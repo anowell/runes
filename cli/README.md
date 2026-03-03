@@ -1,91 +1,59 @@
-## Divvee CLI
+# Runes CLI
 
-See previous work on jem: https://github.com/anowell/jem
+Runes currently provides a pragmatic bootstrap CLI for self-hosting project management in file-backed stores.
 
+## Key Concepts
 
+- `store`: named workspace with backend (`pijul` or `jj`)
+- `project`: folder inside a store
+- `rune`: markdown doc with KDL frontmatter
+- canonical id: `<project>-<short>` (example `runes-cx3`)
+- canonical ref: `<store>:<project-id>` (example `proj:runes-cx3`)
 
-### Ideas
+## Command Surface
 
+```bash
+runes store init <name> --backend <jj|pijul> [--path <path>] [--default]
+runes store list
+
+runes project create <store> <project>
+
+runes issue new <store> <project> <title> [--in <container-id>] [--status <status>]
+runes issue new-milestone <store> <project> <title> [--id <m01>]
+runes issue show <store> <project-id> | <store:project-id> | <project-id>
+runes issue list <store> [--project <project>] [--status <status>]
+runes issue edit <store> <project-id> | <store:project-id> | <project-id> [--title <title>] [--status <status>] [--add-label <l>] [--remove-label <l>] [--milestone <id|none>] [--add-rel <kind:id>] [--remove-rel <kind:id>]
+runes issue move <from-store> <project-id> <to-store> <to-project> [--to-container <id>]
+runes issue move <store:project-id> <to-store> <to-project> [--to-container <id>]
+runes issue archive <store> <project-id> | <store:project-id> | <project-id>
+runes issue log <store> <project-id> | <store:project-id> | <project-id> [--limit <n>] [--section <Heading>]
+runes issue check <store> <project-id> | <store:project-id> | <project-id>
+runes milestone progress <store> <milestone-id> | <store:milestone-id> | <milestone-id>
+
+runes cache rebuild <store>
+runes cache query <store> <where-clause>
+
+runes backend status <store>
+runes backend adapter <store>
+runes backend capabilities <store>
+runes backend probe-sdk <store>
+runes backend log <store> [--limit <n>]
+runes backend sync <store>
 ```
-# Reserve all uppercase one-letter flags for label prefixes: -M milestone -S sprint
-dv list
 
-# Create an issue
-dv create
+## Notes
 
-# One-letter flags for label prefixes
-dv edit <issue> -a assignee -s status
-
-dv comment -m MESSAGE (or editor)
-
-```
-
-
-
-Developer:
-- create -m title -d description -a (like 'git commit' with EDITOR option for description)
-- list (with various filtered views)
-- assign (shorthand for edit --assignee USER)
-- {start, stop, close} (shorthand for edit --status STATUS)
-- comment
-- show (with preconfigured views)
-- search
-- sync (force sync of changes with remote)
-- link (adds a smart link, e.g. git commit, URL, etc..)
-- view (shows a particular view of issues, like a sprint board) - todo: how do distinguish from list
-- estimate: for i in dv list; do dv estimate $i -i; done
-
-Project Manager (PM):
-
-- create (with epic/project options)
-- prioritize
-- plan (work into active or future sprint)
-- schedule a milestone
-- label (issues as part of an epic or milestone)
-- monitor (shows timeliens, project tracing, risks, etc.)
-- generate (reports on team perf, issue status, milestones... specific views with html options)
-- assign (to team or individual)
-- ref (relate items together as parent/child, dep, or just references)
-- bulk-edit by filter or list
-
-Consider TUI version for interactive workflows on some of these
-Consider monitor or watch actions for signalling tasks/projects/etc to monitor more closely
-
-
-Leadership:
-
-- generate or monitor (reports: project, milestones, risks)
-- track-work (resource allocation related acctions)
-- assess-risk
-- align (projects to goals)... just another label
-- create (goal) (maybe separate set-goal action)
-- view resource allocation
-- view decisions
-- analyze
-- resources
-
-
-
-Labels:
-- g-goal (aligned with a goal)
-- e-epic (part of an epic)
-- m-milestone (delivered as part of milestone)
-- d-decision (impacted by some pending decision)
-- s-sprint (what sprint is this in)
-- a-archive (e.g. -a-2023-sprint-alpha)
-- c-customer
-- r-release
-- p-project
-
-
-we also need label aliases:
-// some for convenience
--s-current -> -s-alpha
--s-next -> -s-beta
--s-next+1 -> -s-gamma
--m-next -> -m-nov-11
--r-next
-
-// allow mapping for common typos
--e-mispell -> -e-misspell
-
+- Markdown files are canonical; sqlite cache can be rebuilt from docs.
+- Slug in filename is convenience-only.
+- Title edits auto-rename slug.
+- Canonical refs like `proj:runes-cx3` are accepted across issue commands.
+- If store is omitted, the configured default store is used.
+- Issue archive moves docs into `<project>/_archive`.
+- `issue log --section` uses heading-match heuristics from backend change output.
+- `issue edit` supports metadata updates for labels, milestone link, and relations.
+- `issue check` validates milestone/relation references exist.
+- `milestone progress` reports child rune status rollups from the container directory.
+- Backend integration currently shells out to `jj`/`pijul` CLI and is tracked for migration to SDK/library adapters.
+- `backend adapter <store>` prints active adapter implementation.
+- `backend capabilities <store>` prints a capability matrix for the active adapter.
+- `backend probe-sdk <store>` runs a backend SDK probe (currently `jj-lib` workspace load for jj stores).

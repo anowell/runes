@@ -1,24 +1,13 @@
 [package]
-name = "dv"
+name = "runes"
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1.0.79"
-clap = { version = "4.4.18", features = ["derive", "string"] }
-derive_more = { version = "1.0.0", features = ["display"]}
-dirs = "5.0.1"
-divvee = { path = "../core" }
-edit = "0.1.5"
-env_logger = "0.11.5"
-indoc = "2.0.4"
-log = "0.4.20"
-owo-colors = { version = "4.1.0", features = ["supports-colors"] }
-serde = { version = "1.0.196", features = ["derive"] }
-serde_json = "1.0.113"
-tempfile = "3.9.0"
-termimad = "0.30.0"
-tokio = { version = "1.36.0", features = ["full"] }
-toml = "0.8.9"
+runes-core = { path = "../core" }
+serde = { version = "1.0", features = ["derive"] }
+toml = "1.0"
+kdl = "6.5"
+pijul-interaction = "1.0.0-beta.10"

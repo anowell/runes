@@ -1,29 +1,19 @@
 [package]
-name = "divvee"
+name = "runes-core"
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-canonical-path = "2.0.2"
-chrono = "0.4.31"
-clap = { version = "4.4.18", features = ["env"] }
-gray_matter = "0.2.6"
-itertools = "0.13.0"
-kdl = "4.6.0"
-libpijul = "1.0.0-beta.9"
-log = "0.4.20"
-markdown = "1.0.0-alpha.16"
-rand = "0.8.5"
-serde = { version = "1.0.195", features = ["derive"] }
-serde_json = "1.0.111"
-serde_yaml = "0.9.30"
-tempfile = "3.9.0"
-thiserror = "1.0.56"
-toml = "0.8.8"
-sqlx = { version = "0.8", features = [ "runtime-tokio", "json", "sqlite", "macros" ] }
-owning_ref = "0.4.1"
-
-[dev-dependencies]
-tokio = "1.36.0"
+jj-lib = "0.38.0"
+libpijul = "1.0.0-beta.11"
+anyhow = "1.0.102"
+pollster = "0.4.0"
+pijul-config = "1.0.0-beta.10"
+pijul-identity = "1.0.0-beta.11"
+pijul-interaction = "1.0.0-beta.10"
+pijul-macros = "1.0.0-beta.11"
+pijul-remote = "1.0.0-beta.11"
+pijul-repository = "1.0.0-beta.10"
+tokio = { version = "1.50.0", features = ["rt-multi-thread", "sync"] }

@@ -1,21 +1,58 @@
-Basic plan:
+# Runes
 
-- Implement enough CLI to track this project locally
-- Push the issues to a remote repo, and implement sync workflows
+Runes is a CLI-first, markdown-first, VCS-backed work management system.
 
-- TBD order
-  - Use the lib to implement an API that exposes the workflows over web
-  - Build a local UI client (git-backed)
-    - Could be UI wrapper around lib
-    - Could run light version of API locally
+- Canonical records are markdown files with KDL frontmatter.
+- SQLite is a rebuildable query cache, never source of truth.
+- Cache files are stored at `~/.runes/cache/<store>.sqlite`.
+- Store refs use `<store>:<project-id>` (example: `proj:runes-cx3`).
 
+See:
 
-## Getting Started:
-Install `libsodium-dev`, pijul, rust, and just
+- `docs/framing.md`
+- `docs/schema.md`
+- `docs/milestones.md`
+- `docs/backend-sdk-plan.md`
 
-- Create a team: `mkdir -p repo/TEAM/tasks`
-- Initialize the team's repo: `cd repo && pijul init`
-- Configure pijul identity with the 'default' username: `pijul identity new`
-- Create a database file: `just db-setup`
-- Build with `cargo build`
-- Run with `just cli --help` (or `target/debug/dv`)
+## Build
+
+```bash
+cargo build
+```
+
+## Test
+
+```bash
+cargo test
+```
+
+Integration coverage lives in `cli/tests/workflows.rs` and validates:
+
+- `jj` issue lifecycle (create/edit/list/log/cache query).
+- milestone hierarchy/progress behavior.
+- `pijul` issue lifecycle plus SDK-backed backend observability commands.
+- `pijul` cross-store move behavior (source removal + target add).
+
+## CLI
+
+```bash
+cargo run -p runes -- store list
+```
+
+Core commands:
+
+- `store init`, `store list`
+- `project create`
+- `issue new`, `issue new-milestone`, `issue show`, `issue list`, `issue edit`, `issue move`
+- `issue archive`, `issue log --section`
+- `issue check`, `milestone progress`
+- `cache rebuild`, `cache query`
+- `list` (`runes list --project <store:project> [--type <issues|milestones>] [--status <status>]`)
+- `backend status`, `backend adapter`, `backend capabilities`, `backend log`, `backend sync`
+
+Use `just cli ...` for quick exploration; `just cli --help` now prints the same usage as `runes --help`.
+
+## Current Bootstrap State
+
+- `~/.runes/workspaces/proj` is configured as a `pijul` store.
+- `~/.runes/workspaces/how` is configured as a `jj` colocated store.
