@@ -26,9 +26,8 @@ cargo build
 cargo test
 ```
 
-Integration coverage lives in `cli/tests/workflows.rs` and validates:
-
-- `jj` issue lifecycle (create/edit/list/log/cache query).
+- Integration coverage lives in `cli/tests/workflows.rs` and validates:
+- `jj` issue lifecycle (create/edit/list/log).
 - milestone hierarchy/progress behavior.
 - `pijul` issue lifecycle plus SDK-backed backend observability commands.
 - `pijul` cross-store move behavior (source removal + target add).
@@ -39,16 +38,17 @@ Integration coverage lives in `cli/tests/workflows.rs` and validates:
 cargo run -p runes -- store list
 ```
 
-Core commands:
+- Core commands:
 
-- `store init`, `store list`
+- `store init`, `store list`, `store info`, `store remove`, `store doctor`
 - `project create`
 - `issue new`, `issue new-milestone`, `issue show`, `issue list`, `issue edit`, `issue move`
 - `issue archive`, `issue log --section`
 - `issue check`, `milestone progress`
-- `cache rebuild`, `cache query`
 - `list` (`runes list --project <store:project> [--type <issues|milestones>] [--status <status>]`)
 - `backend status`, `backend adapter`, `backend capabilities`, `backend log`, `backend sync`
+
+`store doctor <store>` rebuilds the sqlite query cache and can be used anytime you suspect the index needs refreshing.
 
 `runes new` now accepts `--project <store:project>` and, when omitted, follows the default project inference described in `docs/configuration.md`.
 

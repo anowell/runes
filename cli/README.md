@@ -15,6 +15,9 @@ Runes currently provides a pragmatic bootstrap CLI for self-hosting project mana
 ```bash
 runes store init <name> --backend <jj|pijul> [--path <path>] [--default]
 runes store list
+runes store info <name>
+runes store remove <name>
+runes store doctor <store>
 
 runes project create <store> <project>
 
@@ -30,8 +33,7 @@ runes issue log <store> <project-id> | <store:project-id> | <project-id> [--limi
 runes issue check <store> <project-id> | <store:project-id> | <project-id>
 runes milestone progress <store> <milestone-id> | <store:milestone-id> | <milestone-id>
 
-runes cache rebuild <store>
-runes cache query <store> <where-clause>
+* `store doctor <store>` rebuilds the sqlite query cache and can be run whenever the cache needs reindexing.
 
 runes backend status <store>
 runes backend adapter <store>

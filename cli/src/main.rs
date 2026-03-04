@@ -35,7 +35,13 @@ enum CliCommand {
     Delete(DeleteArgs),
     Log(LogArgs),
     Sync(SyncArgs),
-    StoreInit {
+    #[command(subcommand)]
+    Store(StoreCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum StoreCommand {
+    Init {
         name: String,
         #[arg(long)]
         backend: String,
@@ -44,19 +50,15 @@ enum CliCommand {
         #[arg(long)]
         default: bool,
     },
-    StoreList,
-    StoreInfo {
+    List,
+    Info {
         name: String,
     },
-    StoreRemove {
+    Remove {
         name: String,
     },
-    CacheRebuild {
+    Doctor {
         store: String,
-    },
-    CacheQuery {
-        store: String,
-        where_clause: String,
     },
 }
 
@@ -203,20 +205,7 @@ fn handle_command(command: CliCommand) -> Result<()> {
         CliCommand::Delete(args) => run_delete(args),
         CliCommand::Log(args) => run_log(args),
         CliCommand::Sync(args) => run_sync(args),
-        CliCommand::StoreInit {
-            name,
-            backend,
-            path,
-            default,
-        } => store_init(name, backend, path, default),
-        CliCommand::StoreList => store_list(),
-        CliCommand::StoreInfo { name } => store_info(name),
-        CliCommand::StoreRemove { name } => store_remove(name),
-        CliCommand::CacheRebuild { store } => cache_rebuild(store),
-        CliCommand::CacheQuery {
-            store,
-            where_clause,
-        } => cache_query(store, where_clause),
+        CliCommand::Store(store_cmd) => run_store(store_cmd),
     }
 }
 fn home_dir() -> Result<PathBuf> {
@@ -1465,6 +1454,21 @@ fn run_sync(args: SyncArgs) -> Result<()> {
     println!("Synced {}", store.name);
     Ok(())
 }
+
+fn run_store(command: StoreCommand) -> Result<()> {
+    match command {
+        StoreCommand::Init {
+            name,
+            backend,
+            path,
+            default,
+        } => store_init(name, backend, path, default),
+        StoreCommand::List => store_list(),
+        StoreCommand::Info { name } => store_info(name),
+        StoreCommand::Remove { name } => store_remove(name),
+        StoreCommand::Doctor { store } => cache_rebuild(store),
+    }
+}
 fn store_init(
     name: String,
     backend_s: String,
@@ -1549,13 +1553,6 @@ fn cache_rebuild(store_name: String) -> Result<()> {
     let store = load_store(&store_name)?;
     cache::rebuild_cache(&store)?;
     println!("Cache rebuilt for {}", store.name);
-    Ok(())
-}
-
-fn cache_query(store_name: String, where_clause: String) -> Result<()> {
-    let store = load_store(&store_name)?;
-    let output = cache::query_cache(&store, &where_clause)?;
-    print!("{output}");
     Ok(())
 }
 
