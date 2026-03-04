@@ -1,5 +1,6 @@
 mod user_config;
 use atty::Stream;
+use clap::{Parser, Subcommand};
 use pijul_interaction::{set_context, InteractiveContext};
 use runes_core::backend;
 use runes_core::cache;
@@ -15,67 +16,198 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use user_config::UserConfig;
 
-fn usage() {
-    eprintln!(
-        "Runes CLI
+#[derive(Debug, Parser)]
+#[command(name = "runes", version, about, propagate_version = true)]
+struct Cli {
+    #[command(subcommand)]
+    command: CliCommand,
+}
 
-Usage:
-  runes new <project> <title> [--store <store>] [--type <issue|milestone>] [--status <status>] [--assignee <assignee>] [--parent <parent-id>] [--milestone <milestone-id>] [--label <label>] [--relation <kind:id>] [--id <custom-short>] [--no-commit]
-  runes list [<view>] [--store <store>] [--project <project>] [--query <name>] [--type <issues|milestones>] [--status <status>] [--assignee <assignee>] [--archived] [--with-archived]
-  runes show <id>
-  runes edit <id> [--title <title>] [--status <status>] [--assignee <assignee>] [--label <label>] [--remove-label <label>] [--milestone <id|none>] [--relation <kind:id>] [--remove-relation <kind:id>] [-f <file>|--file <file>] [--no-commit]
-  runes commit [<store> | <store>:<id>]
-  runes move <id> [--project <project>] [--parent <parent-id>]
-  runes archive <id>
-  runes delete <id> [--force]
-  runes log <id> [--limit <n>] [--section <heading>]
-  runes sync [--store <store>] [--all]
-  runes store init <name> --backend <jj|pijul> [--path <path>] [--default]
-  runes store list
-  runes store info <name>
-  runes store remove <name>
-  runes cache rebuild <store>
-  runes cache query <store> <where-clause>"
-    );
+#[derive(Debug, Subcommand)]
+enum CliCommand {
+    New(NewArgs),
+    List(ListArgs),
+    Show(ShowArgs),
+    Edit(EditArgs),
+    Commit(CommitArgs),
+    Move(MoveArgs),
+    Archive(ArchiveArgs),
+    Delete(DeleteArgs),
+    Log(LogArgs),
+    Sync(SyncArgs),
+    StoreInit {
+        name: String,
+        #[arg(long)]
+        backend: String,
+        #[arg(long)]
+        path: Option<PathBuf>,
+        #[arg(long)]
+        default: bool,
+    },
+    StoreList,
+    StoreInfo { name: String },
+    StoreRemove { name: String },
+    CacheRebuild { store: String },
+    CacheQuery { store: String, where_clause: String },
+}
+
+#[derive(Debug, Parser)]
+struct NewArgs {
+    project: String,
+    title: String,
+    #[arg(long)]
+    store: Option<String>,
+    #[arg(long = "type")]
+    command_type: Option<String>,
+    #[arg(long)]
+    status: Option<String>,
+    #[arg(long)]
+    assignee: Option<String>,
+    #[arg(long)]
+    parent: Option<String>,
+    #[arg(long)]
+    milestone: Option<String>,
+    #[arg(long = "id")]
+    id_override: Option<String>,
+    #[arg(long = "label")]
+    labels: Vec<String>,
+    #[arg(long = "relation")]
+    relations: Vec<String>,
+    #[arg(long = "no-commit")]
+    no_commit: bool,
+}
+
+#[derive(Debug, Parser)]
+struct ListArgs {
+    #[arg(value_name = "view")]
+    view: Option<String>,
+    #[arg(long)]
+    store: Option<String>,
+    #[arg(long)]
+    project: Option<String>,
+    #[arg(long)]
+    query: Option<String>,
+    #[arg(long = "type")]
+    kind: Option<String>,
+    #[arg(long)]
+    status: Option<String>,
+    #[arg(long)]
+    assignee: Option<String>,
+    #[arg(long, conflicts_with = "with_archived")]
+    archived: bool,
+    #[arg(long = "with-archived", conflicts_with = "archived")]
+    with_archived: bool,
+}
+
+#[derive(Debug, Parser)]
+struct ShowArgs {
+    id: String,
+}
+
+#[derive(Debug, Parser)]
+struct EditArgs {
+    id: String,
+    #[arg(long)]
+    title: Option<String>,
+    #[arg(long)]
+    status: Option<String>,
+    #[arg(long)]
+    assignee: Option<String>,
+    #[arg(long = "label")]
+    add_labels: Vec<String>,
+    #[arg(long = "remove-label")]
+    remove_labels: Vec<String>,
+    #[arg(long)]
+    milestone: Option<String>,
+    #[arg(long = "relation")]
+    add_relations: Vec<String>,
+    #[arg(long = "remove-relation")]
+    remove_relations: Vec<String>,
+    #[arg(short = 'f', long = "file")]
+    file: Option<PathBuf>,
+    #[arg(long = "no-commit")]
+    no_commit: bool,
+}
+
+#[derive(Debug, Parser)]
+struct CommitArgs {
+    target: Option<String>,
+}
+
+#[derive(Debug, Parser)]
+struct MoveArgs {
+    id: String,
+    #[arg(long = "project")]
+    target_project: String,
+    #[arg(long)]
+    parent: Option<String>,
+}
+
+#[derive(Debug, Parser)]
+struct ArchiveArgs {
+    id: String,
+}
+
+#[derive(Debug, Parser)]
+struct DeleteArgs {
+    id: String,
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Debug, Parser)]
+struct LogArgs {
+    id: String,
+    #[arg(long)]
+    limit: Option<usize>,
+    #[arg(long)]
+    section: Option<String>,
+}
+
+#[derive(Debug, Parser)]
+struct SyncArgs {
+    #[arg(long)]
+    store: Option<String>,
+    #[arg(long)]
+    all: bool,
 }
 
 fn main() {
     set_context(InteractiveContext::Terminal);
-    if let Err(err) = dispatch(std::env::args().collect()) {
+    let cli = Cli::parse();
+    if let Err(err) = handle_command(cli.command) {
         eprintln!("error: {err}");
         std::process::exit(1);
     }
 }
 
-fn dispatch(args: Vec<String>) -> Result<()> {
-    if args.len() < 2 {
-        usage();
-        return Err(Error::new("Missing command"));
-    }
-    if args.len() == 2 && (args[1] == "--help" || args[1] == "-h") {
-        usage();
-        return Ok(());
-    }
-    let tail = if args.len() > 2 {
-        args[2..].to_vec()
-    } else {
-        Vec::new()
-    };
-    match args[1].as_str() {
-        "new" => run_new(tail),
-        "list" => run_list(tail),
-        "show" => run_show(tail),
-        "edit" => run_edit(tail),
-        "commit" => run_commit(tail),
-        "move" => run_move(tail),
-        "archive" => run_archive(tail),
-        "delete" => run_delete(tail),
-        "log" => run_log(tail),
-        "sync" => run_sync(tail),
-        "store" => run_store(tail),
-        "cache" => run_cache(tail),
-        _ => Err(Error::new(format!("Unknown command: {}", args[1]))),
-    }
+fn handle_command(command: CliCommand) -> Result<()> {
+    match command {
+        CliCommand::New(args) => run_new(args),
+        CliCommand::List(args) => run_list(args),
+        CliCommand::Show(args) => run_show(args),
+        CliCommand::Edit(args) => run_edit(args),
+        CliCommand::Commit(args) => run_commit(args),
+        CliCommand::Move(args) => run_move(args),
+        CliCommand::Archive(args) => run_archive(args),
+        CliCommand::Delete(args) => run_delete(args),
+        CliCommand::Log(args) => run_log(args),
+    CliCommand::Sync(args) => run_sync(args),
+    CliCommand::StoreInit {
+        name,
+        backend,
+        path,
+        default,
+    } => store_init(name, backend, path, default),
+    CliCommand::StoreList => store_list(),
+    CliCommand::StoreInfo { name } => store_info(name),
+    CliCommand::StoreRemove { name } => store_remove(name),
+    CliCommand::CacheRebuild { store } => cache_rebuild(store),
+    CliCommand::CacheQuery {
+        store,
+        where_clause,
+    } => cache_query(store, where_clause),
+}
 }
 fn home_dir() -> Result<PathBuf> {
     Ok(PathBuf::from(
@@ -85,44 +217,6 @@ fn home_dir() -> Result<PathBuf> {
 
 fn default_store_path(name: &str) -> Result<PathBuf> {
     Ok(home_dir()?.join(".runes").join("workspaces").join(name))
-}
-
-fn pop_arg(args: &mut Vec<String>, name: &str) -> Option<String> {
-    if let Some(idx) = args.iter().position(|a| a == name) {
-        args.remove(idx);
-        return if idx >= args.len() {
-            None
-        } else {
-            Some(args.remove(idx))
-        };
-    }
-    None
-}
-
-fn pop_multi(args: &mut Vec<String>, name: &str) -> Vec<String> {
-    let mut values = Vec::new();
-    while let Some(v) = pop_arg(args, name) {
-        values.push(v);
-    }
-    values
-}
-
-fn has_flag(args: &mut Vec<String>, name: &str) -> bool {
-    if let Some(idx) = args.iter().position(|a| a == name) {
-        args.remove(idx);
-        true
-    } else {
-        false
-    }
-}
-
-fn require_len(args: &[String], n: usize, usage_hint: &str) -> Result<()> {
-    if args.len() < n {
-        return Err(Error::new(format!(
-            "Expected at least {n} args: {usage_hint}"
-        )));
-    }
-    Ok(())
 }
 
 fn load_context() -> Result<(Config, UserConfig, PathBuf)> {
@@ -492,24 +586,25 @@ fn create_milestone(
     fs::write(&path, render_doc(&doc))?;
     Ok((full_id, path))
 }
-fn run_new(mut args: Vec<String>) -> Result<()> {
-    require_len(&args, 2, "new <project> <title>")?;
-    let project_spec = args.remove(0);
-    let title = args.remove(0);
-    let no_commit = has_flag(&mut args, "--no-commit");
-    let store_flag = pop_arg(&mut args, "--store");
-    let kind_flag = pop_arg(&mut args, "--type");
-    let status_flag = pop_arg(&mut args, "--status");
-    let assignee_flag = pop_arg(&mut args, "--assignee");
-    let parent = pop_arg(&mut args, "--parent");
-    let milestone = pop_arg(&mut args, "--milestone");
-    let id_override = pop_arg(&mut args, "--id");
-    let label_overrides = pop_multi(&mut args, "--label");
-    let relation_inputs = pop_multi(&mut args, "--relation");
-    let relations = parse_relations(&relation_inputs)?;
+fn run_new(args: NewArgs) -> Result<()> {
+    let NewArgs {
+        project,
+        title,
+        store,
+        command_type,
+        status: status_flag,
+        assignee,
+        parent,
+        milestone,
+        id_override,
+        labels,
+        relations,
+        no_commit,
+    } = args;
+    let relation_inputs = relations;
     let (cfg, user_cfg, cwd) = load_context()?;
     let creation_defaults = user_cfg.creation_defaults();
-    let kind_value = kind_flag
+    let kind_value = command_type
         .clone()
         .or_else(|| creation_defaults.kind.clone())
         .unwrap_or_else(|| "issue".to_string());
@@ -526,28 +621,25 @@ fn run_new(mut args: Vec<String>) -> Result<()> {
         });
     }
     let status = status_value.unwrap();
-    let mut labels = creation_defaults.labels.clone();
-    labels.extend(label_overrides);
-    let assignee_value = assignee_flag
-        .clone()
+    let mut combined_labels = creation_defaults.labels.clone();
+    combined_labels.extend(labels);
+    let assignee_value = assignee
+        .as_deref()
+        .map(|s| s.to_string())
         .or_else(|| creation_defaults.assignee.clone());
     let resolved_assignee = assignee_value
         .as_deref()
         .and_then(|value| user_cfg.resolve_user_alias(value));
-    let (store, project) = resolve_store_and_project_required(
-        &cfg,
-        &user_cfg,
-        &cwd,
-        store_flag.as_deref(),
-        &project_spec,
-    )?;
+    let (store, project) =
+        resolve_store_and_project_required(&cfg, &user_cfg, &cwd, store.as_deref(), &project)?;
+    let relations = parse_relations(&relation_inputs)?;
     let (identifier, doc_path) = if kind == "milestone" {
         create_milestone(
             &store,
             &project,
             &title,
             &status,
-            &labels,
+            &combined_labels,
             id_override.as_deref(),
         )?
     } else {
@@ -558,7 +650,7 @@ fn run_new(mut args: Vec<String>) -> Result<()> {
             &status,
             parent.as_deref(),
             milestone.as_deref(),
-            &labels,
+            &combined_labels,
             &relations,
             resolved_assignee.as_deref(),
             id_override.as_deref(),
@@ -576,60 +668,41 @@ fn run_new(mut args: Vec<String>) -> Result<()> {
     println!("{identifier}");
     Ok(())
 }
-fn run_list(mut args: Vec<String>) -> Result<()> {
-    let query_flag = pop_arg(&mut args, "--query");
-    let store_flag = pop_arg(&mut args, "--store");
-    let project_spec = pop_arg(&mut args, "--project");
-    let type_flag = pop_arg(&mut args, "--type");
-    let status_flag = pop_arg(&mut args, "--status");
-    let assignee_flag = pop_arg(&mut args, "--assignee");
-    let archived_only = has_flag(&mut args, "--archived");
-    let include_archived = has_flag(&mut args, "--with-archived");
-    if archived_only && include_archived {
-        return Err(Error::new(
-            "Cannot use --archived and --with-archived together",
-        ));
-    }
-    let view_arg = if !args.is_empty() {
-        let value = args.remove(0);
-        if !args.is_empty() {
-            return Err(Error::new(format!(
-                "Unexpected arguments after view name: {}",
-                args.join(" ")
-            )));
-        }
-        Some(value)
-    } else {
-        None
-    };
-    let mut archived_mode = if archived_only {
+fn run_list(args: ListArgs) -> Result<()> {
+    let ListArgs {
+        view,
+        store,
+        project,
+        query,
+        kind,
+        status,
+        assignee,
+        archived,
+        with_archived,
+    } = args;
+    let mut archived_mode = if archived {
         ArchivedMode::Only
-    } else if include_archived {
+    } else if with_archived {
         ArchivedMode::Include
     } else {
         ArchivedMode::Exclude
     };
     let (cfg, user_cfg, cwd) = load_context()?;
-    let (store, project) = resolve_store_and_project(
-        &cfg,
-        &user_cfg,
-        &cwd,
-        store_flag.as_deref(),
-        project_spec.as_ref(),
-    )?;
-    let project_flag_present = project_spec.is_some();
-    let status_flag_present = status_flag.is_some();
-    let type_flag_present = type_flag.is_some();
-    let assignee_filter = assignee_flag
+    let (store, project_proj) =
+        resolve_store_and_project(&cfg, &user_cfg, &cwd, store.as_deref(), project.as_ref())?;
+    let project_flag_present = project.is_some();
+    let status_flag_present = status.is_some();
+    let type_flag_present = kind.is_some();
+    let assignee_filter = assignee
         .as_deref()
         .and_then(|value| user_cfg.resolve_user_alias(value));
-    let mut list_kind = type_flag
+    let mut list_kind = kind
         .as_deref()
         .map(ListKind::parse)
         .unwrap_or(ListKind::Issues);
     let mut filters = IssueFilters {
-        project,
-        statuses: status_flag
+        project: project_proj,
+        statuses: status
             .as_ref()
             .map(|value| vec![value.clone()])
             .unwrap_or_else(Vec::new),
@@ -637,32 +710,32 @@ fn run_list(mut args: Vec<String>) -> Result<()> {
         assignee: assignee_filter,
         archived: archived_mode,
     };
-    let query_name = query_flag
-        .or(view_arg)
+    let query_name = view
+        .or(query)
         .or_else(|| user_cfg.query_for_path(&cwd))
         .or_else(|| user_cfg.default_query.clone());
     if let Some(query_key) = query_name {
-        if let Some(query) = user_cfg.query(&query_key) {
+        if let Some(query_cfg) = user_cfg.query(&query_key) {
             if !project_flag_present {
-                filters.project = query.project.clone();
+                filters.project = query_cfg.project.clone();
             }
             if !status_flag_present {
-                filters.statuses = query.statuses.clone();
+                filters.statuses = query_cfg.statuses.clone();
             }
             if !type_flag_present {
-                if let Some(kind_value) = &query.kind {
+                if let Some(kind_value) = &query_cfg.kind {
                     list_kind = ListKind::parse(kind_value);
                 }
             }
-            if !archived_only && !include_archived {
-                if let Some(archived_value) = &query.archived {
+            if !archived && !with_archived {
+                if let Some(archived_value) = &query_cfg.archived {
                     if let Some(parsed) = ArchivedMode::from_keyword(archived_value) {
                         archived_mode = parsed;
                     }
                 }
             }
             if filters.assignee.is_none() {
-                if let Some(query_assignee) = &query.assignee {
+                if let Some(query_assignee) = &query_cfg.assignee {
                     filters.assignee = user_cfg.resolve_user_alias(query_assignee);
                 }
             }
@@ -804,11 +877,9 @@ fn count_milestone_children(container: &Path) -> Result<(usize, usize, usize, us
     }
     Ok((total, done, in_progress, todo))
 }
-fn run_show(mut args: Vec<String>) -> Result<()> {
-    require_len(&args, 1, "show <id>")?;
-    let id_spec = args.remove(0);
+fn run_show(args: ShowArgs) -> Result<()> {
     let (cfg, user_cfg, cwd) = load_context()?;
-    let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id_spec)?;
+    let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &args.id)?;
     let path = locate_doc(&store, &id)?;
     let doc = parse_doc(&path)?;
     print_doc_summary(&path, &doc)
@@ -878,42 +949,43 @@ fn list_container_children(container: &Path) -> Result<Vec<String>> {
     }
     Ok(rows)
 }
-fn run_edit(mut args: Vec<String>) -> Result<()> {
-    require_len(&args, 1, "edit <id>")?;
-    let id_spec = args.remove(0);
-    let file_arg = pop_arg(&mut args, "-f").or_else(|| pop_arg(&mut args, "--file"));
-    let no_commit = has_flag(&mut args, "--no-commit");
-    let new_title = pop_arg(&mut args, "--title");
-    let new_status = pop_arg(&mut args, "--status");
-    let new_assignee = pop_arg(&mut args, "--assignee");
-    let add_labels = pop_multi(&mut args, "--label");
-    let remove_labels = pop_multi(&mut args, "--remove-label");
-    let milestone = pop_arg(&mut args, "--milestone");
-    let add_relation_inputs = pop_multi(&mut args, "--relation");
-    let remove_relation_inputs = pop_multi(&mut args, "--remove-relation");
+fn run_edit(args: EditArgs) -> Result<()> {
+    let EditArgs {
+        id,
+        title,
+        status,
+        assignee,
+        add_labels,
+        remove_labels,
+        milestone,
+        add_relations,
+        remove_relations,
+        file,
+        no_commit,
+    } = args;
     let (cfg, user_cfg, cwd) = load_context()?;
-    let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id_spec)?;
+    let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id)?;
     let path = locate_doc(&store, &id)?;
     let mut doc = parse_doc(&path)?;
     let mut final_path = path.clone();
-    let has_field_edits = new_title.is_some()
-        || new_status.is_some()
-        || new_assignee.is_some()
+    let has_field_edits = title.is_some()
+        || status.is_some()
+        || assignee.is_some()
         || !add_labels.is_empty()
         || !remove_labels.is_empty()
         || milestone.is_some()
-        || !add_relation_inputs.is_empty()
-        || !remove_relation_inputs.is_empty();
-    if file_arg.is_some() && has_field_edits {
+        || !add_relations.is_empty()
+        || !remove_relations.is_empty();
+    if file.is_some() && has_field_edits {
         return Err(Error::new(
             "Cannot mix field edits with --file/STDIN content updates",
         ));
     }
     if has_field_edits {
-        if let Some(status) = new_status {
-            doc.status = status;
+        if let Some(status_value) = status {
+            doc.status = status_value;
         }
-        if let Some(assignee_value) = new_assignee {
+        if let Some(assignee_value) = assignee {
             if assignee_value.eq_ignore_ascii_case("none") {
                 doc.assignee = None;
             } else if let Some(resolved) = user_cfg.resolve_user_alias(&assignee_value) {
@@ -937,25 +1009,25 @@ fn run_edit(mut args: Vec<String>) -> Result<()> {
                 doc.milestone = Some(milestone_value);
             }
         }
-        let add_relations = parse_relations(&add_relation_inputs)?;
-        for (kind, target) in add_relations {
+        let added = parse_relations(&add_relations)?;
+        for (kind, target) in added {
             if !doc.relations.iter().any(|(existing_kind, existing_id)| {
                 existing_kind == &kind && existing_id == &target
             }) {
                 doc.relations.push((kind, target));
             }
         }
-        let remove_relations = parse_relations(&remove_relation_inputs)?;
-        for (kind, target) in remove_relations {
+        let removed = parse_relations(&remove_relations)?;
+        for (kind, target) in removed {
             doc.relations.retain(|(existing_kind, existing_id)| {
                 existing_kind != &kind || existing_id != &target
             });
         }
-        if let Some(title) = new_title {
-            doc.title = title.clone();
-            doc.body = replace_title(&doc.body, &title);
+        if let Some(title_value) = title {
+            doc.title = title_value.clone();
+            doc.body = replace_title(&doc.body, &title_value);
             let parsed = parse_full_id(&doc.id)?;
-            let new_name = format!("{}--{}.md", parsed.short, slugify(&title));
+            let new_name = format!("{}--{}.md", parsed.short, slugify(&title_value));
             final_path = path
                 .parent()
                 .ok_or_else(|| Error::new("Invalid issue path"))?
@@ -966,7 +1038,7 @@ fn run_edit(mut args: Vec<String>) -> Result<()> {
             fs::rename(&path, &final_path)?;
         }
     } else {
-        if let Some(file_path) = file_arg {
+        if let Some(file_path) = file {
             let contents = fs::read_to_string(&file_path)?;
             fs::write(&path, contents)?;
         } else if !stdin_is_tty() {
@@ -1009,15 +1081,8 @@ fn commit_rune(store: &Store, id_spec: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_commit(mut args: Vec<String>) -> Result<()> {
-    if args.len() > 1 {
-        return Err(Error::new("Unexpected arguments after commit target"));
-    }
-    let target = if args.is_empty() {
-        None
-    } else {
-        Some(args.remove(0))
-    };
+fn run_commit(args: CommitArgs) -> Result<()> {
+    let target = args.target;
     let (cfg, user_cfg, cwd) = load_context()?;
     match target {
         Some(spec) if spec.contains(':') || spec.contains('/') => {
@@ -1142,23 +1207,22 @@ fn move_rune(
     );
     Ok(())
 }
-fn run_move(mut args: Vec<String>) -> Result<()> {
-    require_len(&args, 1, "move <id>")?;
-    let id_spec = args.remove(0);
-    let target_project = pop_arg(&mut args, "--project")
-        .ok_or_else(|| Error::new("Missing --project <target-project> for move command"))?;
-    let parent = pop_arg(&mut args, "--parent");
+fn run_move(args: MoveArgs) -> Result<()> {
+    let MoveArgs {
+        id,
+        target_project,
+        parent,
+    } = args;
     let (cfg, user_cfg, cwd) = load_context()?;
-    let (from_store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id_spec)?;
+    let (from_store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id)?;
     let (to_store, project) =
         resolve_store_and_project_required(&cfg, &user_cfg, &cwd, None, &target_project)?;
     move_rune(&from_store, &to_store, &id, &project, parent.as_deref())
 }
-fn run_archive(mut args: Vec<String>) -> Result<()> {
-    require_len(&args, 1, "archive <id>")?;
-    let id_spec = args.remove(0);
+fn run_archive(args: ArchiveArgs) -> Result<()> {
+    let ArchiveArgs { id } = args;
     let (cfg, user_cfg, cwd) = load_context()?;
-    let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id_spec)?;
+    let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id)?;
     archive_rune(&store, &id)
 }
 
@@ -1195,15 +1259,13 @@ fn archive_rune(store: &Store, id: &str) -> Result<()> {
     commit_paths(store, &[target_path], &format!("Archive {}", doc.id))?;
     Ok(())
 }
-fn run_delete(mut args: Vec<String>) -> Result<()> {
-    require_len(&args, 1, "delete <id>")?;
-    let id_spec = args.remove(0);
-    let force = has_flag(&mut args, "--force");
+fn run_delete(args: DeleteArgs) -> Result<()> {
+    let DeleteArgs { id, force } = args;
     if !force {
         return Err(Error::new("Use --force to delete runes"));
     }
     let (cfg, user_cfg, cwd) = load_context()?;
-    let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id_spec)?;
+    let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id)?;
     delete_rune(&store, &id)
 }
 
@@ -1227,15 +1289,11 @@ fn delete_rune(store: &Store, id: &str) -> Result<()> {
     println!("Deleted {}", doc.id);
     Ok(())
 }
-fn run_log(mut args: Vec<String>) -> Result<()> {
-    require_len(&args, 1, "log <id>")?;
-    let id_spec = args.remove(0);
-    let limit = pop_arg(&mut args, "--limit")
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(20);
-    let section = pop_arg(&mut args, "--section");
+fn run_log(args: LogArgs) -> Result<()> {
+    let LogArgs { id, limit, section } = args;
+    let limit = limit.unwrap_or(20);
     let (cfg, user_cfg, cwd) = load_context()?;
-    let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id_spec)?;
+    let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id)?;
     let path = locate_doc(&store, &id)?;
     let rel_path = path
         .strip_prefix(&store.path)
@@ -1252,14 +1310,14 @@ fn run_log(mut args: Vec<String>) -> Result<()> {
     };
     let change_ids = backend::file_change_ids(&store, &rel_path, limit)?;
     let mut printed = 0usize;
-    for id in change_ids {
-        let details = backend::show_change(&store, &id, &rel_path)?;
+    for change_id in change_ids {
+        let details = backend::show_change(&store, &change_id, &rel_path)?;
         let section_hit = details.lines().any(|line| {
             line.contains(&marker)
                 && (line.starts_with('+') || line.starts_with('-') || line.contains("Hunks"))
         });
         if section_hit {
-            println!("Change {id}");
+            println!("Change {change_id}");
             for line in details.lines().take(30) {
                 println!("{line}");
             }
@@ -1272,9 +1330,8 @@ fn run_log(mut args: Vec<String>) -> Result<()> {
     }
     Ok(())
 }
-fn run_sync(mut args: Vec<String>) -> Result<()> {
-    let store_flag = pop_arg(&mut args, "--store");
-    let all = has_flag(&mut args, "--all");
+fn run_sync(args: SyncArgs) -> Result<()> {
+    let SyncArgs { store, all } = args;
     let (cfg, user_cfg, cwd) = load_context()?;
     if all {
         for store in cfg.stores {
@@ -1283,37 +1340,23 @@ fn run_sync(mut args: Vec<String>) -> Result<()> {
         }
         return Ok(());
     }
-    let store = resolve_store_with_context(&cfg, &user_cfg, &cwd, store_flag.as_deref())?;
+    let store = resolve_store_with_context(&cfg, &user_cfg, &cwd, store.as_deref())?;
     backend::sync(&store)?;
     println!("Synced {}", store.name);
     Ok(())
 }
-fn run_store(mut args: Vec<String>) -> Result<()> {
-    if args.is_empty() {
-        return Err(Error::new("Missing store subcommand"));
-    }
-    let sub = args.remove(0);
-    match sub.as_str() {
-        "init" => store_init(args),
-        "list" => store_list(),
-        "info" => store_info(args),
-        "remove" => store_remove(args),
-        _ => Err(Error::new(format!("Unknown store command: {sub}"))),
-    }
-}
-
-fn store_init(mut args: Vec<String>) -> Result<()> {
-    require_len(&args, 1, "store init <name>")?;
-    let name = args.remove(0);
-    let backend_s = pop_arg(&mut args, "--backend")
-        .ok_or_else(|| Error::new("Missing --backend <jj|pijul> for store init"))?;
-    let path = if let Some(path_arg) = pop_arg(&mut args, "--path") {
-        PathBuf::from(path_arg)
+fn store_init(
+    name: String,
+    backend_s: String,
+    path: Option<PathBuf>,
+    set_default: bool,
+) -> Result<()> {
+    let path = if let Some(path_arg) = path {
+        path_arg
     } else {
         default_store_path(&name)?
     };
     let backend_kind = BackendKind::parse(&backend_s)?;
-    let set_default = has_flag(&mut args, "--default");
     backend::init_store(&path, backend_kind.clone())?;
     let mut cfg = Config::load()?;
     cfg.upsert_store(Store {
@@ -1348,9 +1391,7 @@ fn store_list() -> Result<()> {
     Ok(())
 }
 
-fn store_info(mut args: Vec<String>) -> Result<()> {
-    require_len(&args, 1, "store info <name>")?;
-    let name = args.remove(0);
+fn store_info(name: String) -> Result<()> {
     let cfg = Config::load()?;
     let store = cfg.get_store(&name)?;
     println!("name={}", store.name);
@@ -1369,9 +1410,7 @@ fn store_info(mut args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn store_remove(mut args: Vec<String>) -> Result<()> {
-    require_len(&args, 1, "store remove <name>")?;
-    let name = args.remove(0);
+fn store_remove(name: String) -> Result<()> {
     let mut cfg = Config::load()?;
     let index = cfg
         .stores
@@ -1386,31 +1425,14 @@ fn store_remove(mut args: Vec<String>) -> Result<()> {
     println!("Removed store {name}");
     Ok(())
 }
-fn run_cache(mut args: Vec<String>) -> Result<()> {
-    if args.is_empty() {
-        return Err(Error::new("Missing cache subcommand"));
-    }
-    let sub = args.remove(0);
-    match sub.as_str() {
-        "rebuild" => cache_rebuild(args),
-        "query" => cache_query(args),
-        _ => Err(Error::new(format!("Unknown cache command: {sub}"))),
-    }
-}
-
-fn cache_rebuild(mut args: Vec<String>) -> Result<()> {
-    require_len(&args, 1, "cache rebuild <store>")?;
-    let store_name = args.remove(0);
+fn cache_rebuild(store_name: String) -> Result<()> {
     let store = load_store(&store_name)?;
     cache::rebuild_cache(&store)?;
     println!("Cache rebuilt for {}", store.name);
     Ok(())
 }
 
-fn cache_query(mut args: Vec<String>) -> Result<()> {
-    require_len(&args, 2, "cache query <store> <where-clause>")?;
-    let store_name = args.remove(0);
-    let where_clause = args.remove(0);
+fn cache_query(store_name: String, where_clause: String) -> Result<()> {
     let store = load_store(&store_name)?;
     let output = cache::query_cache(&store, &where_clause)?;
     print!("{output}");
