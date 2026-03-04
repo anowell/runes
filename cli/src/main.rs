@@ -45,16 +45,26 @@ enum CliCommand {
         default: bool,
     },
     StoreList,
-    StoreInfo { name: String },
-    StoreRemove { name: String },
-    CacheRebuild { store: String },
-    CacheQuery { store: String, where_clause: String },
+    StoreInfo {
+        name: String,
+    },
+    StoreRemove {
+        name: String,
+    },
+    CacheRebuild {
+        store: String,
+    },
+    CacheQuery {
+        store: String,
+        where_clause: String,
+    },
 }
 
 #[derive(Debug, Parser)]
 struct NewArgs {
-    project: String,
     title: String,
+    #[arg(long)]
+    project: Option<String>,
     #[arg(long)]
     store: Option<String>,
     #[arg(long = "type")]
@@ -192,22 +202,22 @@ fn handle_command(command: CliCommand) -> Result<()> {
         CliCommand::Archive(args) => run_archive(args),
         CliCommand::Delete(args) => run_delete(args),
         CliCommand::Log(args) => run_log(args),
-    CliCommand::Sync(args) => run_sync(args),
-    CliCommand::StoreInit {
-        name,
-        backend,
-        path,
-        default,
-    } => store_init(name, backend, path, default),
-    CliCommand::StoreList => store_list(),
-    CliCommand::StoreInfo { name } => store_info(name),
-    CliCommand::StoreRemove { name } => store_remove(name),
-    CliCommand::CacheRebuild { store } => cache_rebuild(store),
-    CliCommand::CacheQuery {
-        store,
-        where_clause,
-    } => cache_query(store, where_clause),
-}
+        CliCommand::Sync(args) => run_sync(args),
+        CliCommand::StoreInit {
+            name,
+            backend,
+            path,
+            default,
+        } => store_init(name, backend, path, default),
+        CliCommand::StoreList => store_list(),
+        CliCommand::StoreInfo { name } => store_info(name),
+        CliCommand::StoreRemove { name } => store_remove(name),
+        CliCommand::CacheRebuild { store } => cache_rebuild(store),
+        CliCommand::CacheQuery {
+            store,
+            where_clause,
+        } => cache_query(store, where_clause),
+    }
 }
 fn home_dir() -> Result<PathBuf> {
     Ok(PathBuf::from(
@@ -588,9 +598,9 @@ fn create_milestone(
 }
 fn run_new(args: NewArgs) -> Result<()> {
     let NewArgs {
-        project,
         title,
-        store,
+        project: project_arg,
+        store: store_hint,
         command_type,
         status: status_flag,
         assignee,
@@ -630,13 +640,18 @@ fn run_new(args: NewArgs) -> Result<()> {
     let resolved_assignee = assignee_value
         .as_deref()
         .and_then(|value| user_cfg.resolve_user_alias(value));
-    let (store, project) =
-        resolve_store_and_project_required(&cfg, &user_cfg, &cwd, store.as_deref(), &project)?;
+    let (store, project_name) = resolve_project_for_new(
+        &cfg,
+        &user_cfg,
+        &cwd,
+        store_hint.as_deref(),
+        project_arg.as_ref(),
+    )?;
     let relations = parse_relations(&relation_inputs)?;
     let (identifier, doc_path) = if kind == "milestone" {
         create_milestone(
             &store,
-            &project,
+            &project_name,
             &title,
             &status,
             &combined_labels,
@@ -645,7 +660,7 @@ fn run_new(args: NewArgs) -> Result<()> {
     } else {
         create_issue(
             &store,
-            &project,
+            &project_name,
             &title,
             &status,
             parent.as_deref(),
@@ -668,6 +683,111 @@ fn run_new(args: NewArgs) -> Result<()> {
     println!("{identifier}");
     Ok(())
 }
+
+fn resolve_store_and_project_from_spec(
+    config: &Config,
+    user_config: &UserConfig,
+    cwd: &Path,
+    store_hint: Option<&str>,
+    spec: &str,
+) -> Result<(Store, String)> {
+    let trimmed_spec = spec.trim();
+    if trimmed_spec.is_empty() {
+        return Err(Error::new("Project name may not be empty"));
+    }
+    let (project_store_hint, project_value) = split_store_prefix(trimmed_spec);
+    let project_trimmed = project_value.trim();
+    if project_trimmed.is_empty() {
+        return Err(Error::new("Project name may not be empty"));
+    }
+    let override_hint = project_store_hint
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let hint = override_hint.or(store_hint);
+    let store = resolve_store_with_context(config, user_config, cwd, hint)?;
+    Ok((store, project_trimmed.to_string()))
+}
+
+fn resolve_project_for_new(
+    config: &Config,
+    user_config: &UserConfig,
+    cwd: &Path,
+    store_hint: Option<&str>,
+    project_arg: Option<&String>,
+) -> Result<(Store, String)> {
+    if let Some(spec) = project_arg {
+        return resolve_store_and_project_from_spec(config, user_config, cwd, store_hint, spec);
+    }
+    if let Ok(env_value) = std::env::var("RUNES_PROJECT") {
+        let trimmed = env_value.trim();
+        if !trimmed.is_empty() {
+            return resolve_store_and_project_from_spec(
+                config,
+                user_config,
+                cwd,
+                store_hint,
+                trimmed,
+            );
+        }
+    }
+    if let Some(default_spec) = user_config.default_project.as_deref() {
+        let trimmed = default_spec.trim();
+        if !trimmed.is_empty() {
+            return resolve_store_and_project_from_spec(
+                config,
+                user_config,
+                cwd,
+                store_hint,
+                trimmed,
+            );
+        }
+    }
+    let store = resolve_store_with_context(config, user_config, cwd, store_hint)?;
+    let projects = all_projects(&store)?;
+    if let Some(name) = cwd.file_name().and_then(|n| n.to_str()) {
+        if projects.iter().any(|proj| proj == name) {
+            return Ok((store, name.to_string()));
+        }
+    }
+    if let Some(repo_name) = repo_root_basename(cwd) {
+        if projects.iter().any(|proj| proj == &repo_name) {
+            return Ok((store, repo_name));
+        }
+    }
+    Err(Error::new(
+        "Project not specified; provide --project, set RUNES_PROJECT/default_project, \
+        or run from a directory whose name matches a project.",
+    ))
+}
+
+fn repo_root_basename(start: &Path) -> Option<String> {
+    find_repo_root(start).and_then(|root| {
+        root.file_name()
+            .and_then(|name| name.to_str())
+            .map(|value| value.to_string())
+    })
+}
+
+fn find_repo_root(start: &Path) -> Option<PathBuf> {
+    let mut cursor = start.to_path_buf();
+    loop {
+        if has_vcs_marker(&cursor) {
+            return Some(cursor);
+        }
+        if !cursor.pop() {
+            return None;
+        }
+    }
+}
+
+fn has_vcs_marker(path: &Path) -> bool {
+    path.join(".git").exists()
+        || path.join(".jj").exists()
+        || path.join(".pjul").exists()
+        || path.join(".pj").exists()
+}
+
 fn run_list(args: ListArgs) -> Result<()> {
     let ListArgs {
         view,

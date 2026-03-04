@@ -34,6 +34,24 @@ fn runes_ok(home: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).expect("stdout utf8")
 }
 
+fn runes_with_env(home: &Path, envs: &[(&str, &str)], args: &[&str]) -> String {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_runes"));
+    cmd.args(args).env("HOME", home);
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+    let output = cmd.output().expect("run runes command");
+    if !output.status.success() {
+        panic!(
+            "command failed: runes {}\nstdout:\n{}\nstderr:\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+    String::from_utf8(output.stdout).expect("stdout utf8")
+}
+
 fn command_exists(cmd: &str) -> bool {
     Command::new(cmd).arg("--version").output().is_ok()
 }
@@ -95,9 +113,17 @@ fn jj_issue_lifecycle_and_cache_query() {
             "--default",
         ],
     );
-    let issue_id = runes_ok(&home, &["new", "how:runes", "Lock v1 schema and workflow"])
-        .trim()
-        .to_string();
+    let issue_id = runes_ok(
+        &home,
+        &[
+            "new",
+            "--project",
+            "how:runes",
+            "Lock v1 schema and workflow",
+        ],
+    )
+    .trim()
+    .to_string();
     assert!(issue_id.starts_with("runes-"));
 
     runes_ok(
@@ -160,6 +186,44 @@ fn jj_issue_lifecycle_and_cache_query() {
 }
 
 #[test]
+fn new_default_project_from_env_var() {
+    if !command_exists("jj") || !command_exists("sqlite3") {
+        eprintln!("skipping: jj/sqlite3 not installed");
+        return;
+    }
+
+    let home = unique_tmp_home("jj-env-project");
+    let store_path = home.join("stores").join("how");
+    let store_path_s = store_path.to_string_lossy().to_string();
+
+    runes_ok(
+        &home,
+        &[
+            "store",
+            "init",
+            "how",
+            "--backend",
+            "jj",
+            "--path",
+            &store_path_s,
+            "--default",
+        ],
+    );
+
+    let issue_id = runes_with_env(
+        &home,
+        &[("RUNES_PROJECT", "runes")],
+        &["new", "Env var project"],
+    )
+    .trim()
+    .to_string();
+    assert!(issue_id.starts_with("runes-"));
+
+    let shown = runes_ok(&home, &["show", &format!("how:{issue_id}")]);
+    assert!(shown.contains("kind=issue"));
+}
+
+#[test]
 fn jj_milestone_hierarchy_and_progress() {
     if !command_exists("jj") || !command_exists("sqlite3") {
         eprintln!("skipping: jj/sqlite3 not installed");
@@ -187,6 +251,7 @@ fn jj_milestone_hierarchy_and_progress() {
         &home,
         &[
             "new",
+            "--project",
             "how:runes",
             "Principles, schema, and bootstrap",
             "--id",
@@ -203,6 +268,7 @@ fn jj_milestone_hierarchy_and_progress() {
         &home,
         &[
             "new",
+            "--project",
             "how:runes",
             "Define core principles",
             "--parent",
@@ -215,6 +281,7 @@ fn jj_milestone_hierarchy_and_progress() {
         &home,
         &[
             "new",
+            "--project",
             "how:runes",
             "Finalize schema examples",
             "--parent",
@@ -261,6 +328,7 @@ fn milestone_list_and_project_progress() {
         &home,
         &[
             "new",
+            "--project",
             "how:runes",
             "Milestones for list test",
             "--id",
@@ -335,7 +403,12 @@ fn pijul_issue_lifecycle_with_sdk_observability() {
     );
     let issue_id = runes_ok(
         &home,
-        &["new", "proj:runes", "Validate libpijul-backed workflows"],
+        &[
+            "new",
+            "--project",
+            "proj:runes",
+            "Validate libpijul-backed workflows",
+        ],
     )
     .trim()
     .to_string();
@@ -403,9 +476,12 @@ fn pijul_cross_store_move_updates_both_stores() {
             &dst_path.to_string_lossy(),
         ],
     );
-    let issue_id = runes_ok(&home, &["new", "src:runes", "Move me between stores"])
-        .trim()
-        .to_string();
+    let issue_id = runes_ok(
+        &home,
+        &["new", "--project", "src:runes", "Move me between stores"],
+    )
+    .trim()
+    .to_string();
     runes_ok(
         &home,
         &["move", &format!("src:{issue_id}"), "--project", "dst:runes"],

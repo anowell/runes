@@ -10,6 +10,7 @@ pub struct UserConfig {
     pub identity_user: Option<String>,
     pub default_store: Option<String>,
     pub default_query: Option<String>,
+    pub default_project: Option<String>,
     pub creation_defaults: CreationDefaults,
     pub(crate) path_entries: Vec<PathEntry>,
     pub(crate) queries: HashMap<String, QueryDefinition>,
@@ -76,6 +77,14 @@ impl UserConfig {
                         config.default_query = Some(name);
                     }
                 }
+                "default_project" => {
+                    if let Some(value) = first_value(node) {
+                        let trimmed = value.trim();
+                        if !trimmed.is_empty() {
+                            config.default_project = Some(trimmed.to_string());
+                        }
+                    }
+                }
                 "path" => {
                     if let Some(path_value) = first_value(node) {
                         let resolved = resolve_path(&path_value, base_dir)?;
@@ -137,6 +146,7 @@ impl UserConfig {
             identity_user,
             default_store,
             default_query,
+            default_project,
             creation_defaults,
             path_entries,
             queries,
@@ -149,6 +159,9 @@ impl UserConfig {
         }
         if let Some(query) = default_query {
             self.default_query = Some(query);
+        }
+        if let Some(project) = default_project {
+            self.default_project = Some(project);
         }
         let CreationDefaults {
             kind,

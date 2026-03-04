@@ -16,7 +16,7 @@ This repo models the entire rune lifecycle. Always drive changes through the `ru
 
 ## CLI-first rune lifecycle (follow this order)
 1. Run `runes list --store proj --project runes` to see existing runes and avoid duplication. If you need backend context, run `runes backend status proj` or `runes backend capabilities proj` first.
-2. Create new runes exclusively through the CLI: `runes new runes "Title" --store proj [--status <state>] [--label <label>] [--type issue|milestone]`. Let `runes new` pick the canonical filename and metadata.
+2. Create new runes exclusively through the CLI: `runes new --project runes "Title" --store proj [--status <state>] [--label <label>] [--type issue|milestone]`. If `--project` is omitted the CLI uses `RUNES_PROJECT`, `default_project`, the current directory name, or the repo root name (in that order) to infer the target project, then lets `runes new` pick the canonical filename and metadata.
 3. After `runes new` returns, rerun `runes list...` to confirm the ID and path generated inside `~/.runes/workspaces/proj/runes`. Capture the file path reported so future edits happen on that doc.
 4. Use CLI helpers to change metadata when possible (`runes issue edit`, `runes issue move`, etc.). Only open the generated markdown if you must add or remove sections that the CLI does not cover yet.
 5. When a change requires editing the underlying backend behavior, coordinate with `runes backend ...` commands (`status`, `log`, `sync`, `probe-sdk`), and mention in the rune body whether the feature remains CLI-backed (see `docs/backend-sdk-plan.md`).

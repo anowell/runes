@@ -50,6 +50,8 @@ Core commands:
 - `list` (`runes list --project <store:project> [--type <issues|milestones>] [--status <status>]`)
 - `backend status`, `backend adapter`, `backend capabilities`, `backend log`, `backend sync`
 
+`runes new` now accepts `--project <store:project>` and, when omitted, follows the default project inference described in `docs/configuration.md`.
+
 Use `just cli ...` for quick exploration; `just cli --help` now prints the same usage as `runes --help`.
 
 ## Current Bootstrap State
