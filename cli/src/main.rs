@@ -1,4 +1,5 @@
 mod user_config;
+use atty::Stream;
 use pijul_interaction::{set_context, InteractiveContext};
 use runes_core::backend;
 use runes_core::cache;
@@ -9,7 +10,9 @@ use runes_core::model::{
 };
 use runes_core::{Error, Result};
 use std::fs;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use user_config::UserConfig;
 
 fn usage() {
@@ -17,10 +20,11 @@ fn usage() {
         "Runes CLI
 
 Usage:
-  runes new <project> <title> [--store <store>] [--type <issue|milestone>] [--status <status>] [--assignee <assignee>] [--parent <parent-id>] [--milestone <milestone-id>] [--label <label>] [--relation <kind:id>] [--id <custom-short>]
+  runes new <project> <title> [--store <store>] [--type <issue|milestone>] [--status <status>] [--assignee <assignee>] [--parent <parent-id>] [--milestone <milestone-id>] [--label <label>] [--relation <kind:id>] [--id <custom-short>] [--no-commit]
   runes list [<view>] [--store <store>] [--project <project>] [--query <name>] [--type <issues|milestones>] [--status <status>] [--assignee <assignee>] [--archived] [--with-archived]
   runes show <id>
-  runes edit <id> [--title <title>] [--status <status>] [--assignee <assignee>] [--label <label>] [--remove-label <label>] [--milestone <id|none>] [--relation <kind:id>] [--remove-relation <kind:id>]
+  runes edit <id> [--title <title>] [--status <status>] [--assignee <assignee>] [--label <label>] [--remove-label <label>] [--milestone <id|none>] [--relation <kind:id>] [--remove-relation <kind:id>] [-f <file>|--file <file>] [--no-commit]
+  runes commit [<store> | <store>:<id>]
   runes move <id> [--project <project>] [--parent <parent-id>]
   runes archive <id>
   runes delete <id> [--force]
@@ -62,6 +66,7 @@ fn dispatch(args: Vec<String>) -> Result<()> {
         "list" => run_list(tail),
         "show" => run_show(tail),
         "edit" => run_edit(tail),
+        "commit" => run_commit(tail),
         "move" => run_move(tail),
         "archive" => run_archive(tail),
         "delete" => run_delete(tail),
@@ -373,6 +378,45 @@ fn commit_paths(store: &Store, paths: &[PathBuf], message: &str) -> Result<()> {
     cache::rebuild_cache(store)?;
     Ok(())
 }
+
+fn stdin_is_tty() -> bool {
+    atty::is(Stream::Stdin)
+}
+
+fn editor_available() -> bool {
+    atty::is(Stream::Stdout) && stdin_is_tty()
+}
+
+fn open_editor(path: &Path) -> Result<()> {
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string());
+    let status = Command::new(editor)
+        .arg(path)
+        .status()
+        .map_err(|e| Error::new(format!("Editor launch failed: {e}")))?;
+    if !status.success() {
+        return Err(Error::new(format!("Editor exited with status: {status}")));
+    }
+    Ok(())
+}
+
+fn read_from_stdin() -> Result<String> {
+    let mut buffer = String::new();
+    io::stdin()
+        .read_to_string(&mut buffer)
+        .map_err(|e| Error::new(e.to_string()))?;
+    Ok(buffer)
+}
+
+fn print_uncommitted_hint(store: &Store, id: &str, path: &Path) {
+    println!(
+        "Changes for {id} are staged at {path}. Run `runes commit {store_name}:{id}` when ready.",
+        id = id,
+        path = path.display(),
+        store_name = store.name
+    );
+}
 fn create_issue(
     store: &Store,
     project: &str,
@@ -384,7 +428,7 @@ fn create_issue(
     relations: &[(String, String)],
     assignee: Option<&str>,
     short_override: Option<&str>,
-) -> Result<String> {
+) -> Result<(String, PathBuf)> {
     let project_root = store.path.join(project);
     ensure_dir(&project_root)?;
     let short = if let Some(override_id) = short_override {
@@ -416,8 +460,7 @@ fn create_issue(
         doc.assignee = Some(assignee_value.to_string());
     }
     fs::write(&path, render_doc(&doc))?;
-    commit_paths(store, &[path.clone()], &format!("Add {full_id}"))?;
-    Ok(full_id)
+    Ok((full_id, path))
 }
 
 fn create_milestone(
@@ -427,7 +470,7 @@ fn create_milestone(
     status: &str,
     labels: &[String],
     short_override: Option<&str>,
-) -> Result<String> {
+) -> Result<(String, PathBuf)> {
     let project_root = store.path.join(project);
     ensure_dir(&project_root)?;
     let short = if let Some(override_id) = short_override {
@@ -447,13 +490,13 @@ fn create_milestone(
         doc.labels = labels.to_vec();
     }
     fs::write(&path, render_doc(&doc))?;
-    commit_paths(store, &[path.clone()], &format!("Add milestone {full_id}"))?;
-    Ok(full_id)
+    Ok((full_id, path))
 }
 fn run_new(mut args: Vec<String>) -> Result<()> {
     require_len(&args, 2, "new <project> <title>")?;
     let project_spec = args.remove(0);
     let title = args.remove(0);
+    let no_commit = has_flag(&mut args, "--no-commit");
     let store_flag = pop_arg(&mut args, "--store");
     let kind_flag = pop_arg(&mut args, "--type");
     let status_flag = pop_arg(&mut args, "--status");
@@ -498,7 +541,7 @@ fn run_new(mut args: Vec<String>) -> Result<()> {
         store_flag.as_deref(),
         &project_spec,
     )?;
-    let identifier = if kind == "milestone" {
+    let (identifier, doc_path) = if kind == "milestone" {
         create_milestone(
             &store,
             &project,
@@ -521,6 +564,15 @@ fn run_new(mut args: Vec<String>) -> Result<()> {
             id_override.as_deref(),
         )?
     };
+    let interactive = editor_available();
+    if interactive {
+        open_editor(&doc_path)?;
+    }
+    if interactive && !no_commit {
+        commit_paths(&store, &[doc_path.clone()], &format!("Add {identifier}"))?;
+    } else {
+        print_uncommitted_hint(&store, &identifier, &doc_path);
+    }
     println!("{identifier}");
     Ok(())
 }
@@ -829,6 +881,8 @@ fn list_container_children(container: &Path) -> Result<Vec<String>> {
 fn run_edit(mut args: Vec<String>) -> Result<()> {
     require_len(&args, 1, "edit <id>")?;
     let id_spec = args.remove(0);
+    let file_arg = pop_arg(&mut args, "-f").or_else(|| pop_arg(&mut args, "--file"));
+    let no_commit = has_flag(&mut args, "--no-commit");
     let new_title = pop_arg(&mut args, "--title");
     let new_status = pop_arg(&mut args, "--status");
     let new_assignee = pop_arg(&mut args, "--assignee");
@@ -837,80 +891,163 @@ fn run_edit(mut args: Vec<String>) -> Result<()> {
     let milestone = pop_arg(&mut args, "--milestone");
     let add_relation_inputs = pop_multi(&mut args, "--relation");
     let remove_relation_inputs = pop_multi(&mut args, "--remove-relation");
-    if new_title.is_none()
-        && new_status.is_none()
-        && new_assignee.is_none()
-        && add_labels.is_empty()
-        && remove_labels.is_empty()
-        && milestone.is_none()
-        && add_relation_inputs.is_empty()
-        && remove_relation_inputs.is_empty()
-    {
-        return Err(Error::new("No edits specified"));
-    }
     let (cfg, user_cfg, cwd) = load_context()?;
     let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id_spec)?;
     let path = locate_doc(&store, &id)?;
     let mut doc = parse_doc(&path)?;
-    if let Some(status) = new_status {
-        doc.status = status;
-    }
-    if let Some(assignee_value) = new_assignee {
-        if assignee_value.eq_ignore_ascii_case("none") {
-            doc.assignee = None;
-        } else if let Some(resolved) = user_cfg.resolve_user_alias(&assignee_value) {
-            doc.assignee = Some(resolved);
-        } else {
-            doc.assignee = Some(assignee_value);
-        }
-    }
-    for label in add_labels {
-        if !doc.labels.iter().any(|l| l == &label) {
-            doc.labels.push(label);
-        }
-    }
-    for label in remove_labels {
-        doc.labels.retain(|l| l != &label);
-    }
-    if let Some(milestone_value) = milestone {
-        if milestone_value == "none" {
-            doc.milestone = None;
-        } else {
-            doc.milestone = Some(milestone_value);
-        }
-    }
-    let add_relations = parse_relations(&add_relation_inputs)?;
-    for (kind, target) in add_relations {
-        if !doc
-            .relations
-            .iter()
-            .any(|(existing_kind, existing_id)| existing_kind == &kind && existing_id == &target)
-        {
-            doc.relations.push((kind, target));
-        }
-    }
-    let remove_relations = parse_relations(&remove_relation_inputs)?;
-    for (kind, target) in remove_relations {
-        doc.relations.retain(|(existing_kind, existing_id)| {
-            existing_kind != &kind || existing_id != &target
-        });
-    }
     let mut final_path = path.clone();
-    if let Some(title) = new_title {
-        doc.title = title.clone();
-        doc.body = replace_title(&doc.body, &title);
-        let parsed = parse_full_id(&doc.id)?;
-        let new_name = format!("{}--{}.md", parsed.short, slugify(&title));
-        final_path = path
-            .parent()
-            .ok_or_else(|| Error::new("Invalid issue path"))?
-            .join(new_name);
+    let has_field_edits = new_title.is_some()
+        || new_status.is_some()
+        || new_assignee.is_some()
+        || !add_labels.is_empty()
+        || !remove_labels.is_empty()
+        || milestone.is_some()
+        || !add_relation_inputs.is_empty()
+        || !remove_relation_inputs.is_empty();
+    if file_arg.is_some() && has_field_edits {
+        return Err(Error::new(
+            "Cannot mix field edits with --file/STDIN content updates",
+        ));
     }
-    fs::write(&path, render_doc(&doc))?;
-    if final_path != path {
-        fs::rename(&path, &final_path)?;
+    if has_field_edits {
+        if let Some(status) = new_status {
+            doc.status = status;
+        }
+        if let Some(assignee_value) = new_assignee {
+            if assignee_value.eq_ignore_ascii_case("none") {
+                doc.assignee = None;
+            } else if let Some(resolved) = user_cfg.resolve_user_alias(&assignee_value) {
+                doc.assignee = Some(resolved);
+            } else {
+                doc.assignee = Some(assignee_value);
+            }
+        }
+        for label in add_labels {
+            if !doc.labels.iter().any(|l| l == &label) {
+                doc.labels.push(label);
+            }
+        }
+        for label in remove_labels {
+            doc.labels.retain(|l| l != &label);
+        }
+        if let Some(milestone_value) = milestone {
+            if milestone_value == "none" {
+                doc.milestone = None;
+            } else {
+                doc.milestone = Some(milestone_value);
+            }
+        }
+        let add_relations = parse_relations(&add_relation_inputs)?;
+        for (kind, target) in add_relations {
+            if !doc.relations.iter().any(|(existing_kind, existing_id)| {
+                existing_kind == &kind && existing_id == &target
+            }) {
+                doc.relations.push((kind, target));
+            }
+        }
+        let remove_relations = parse_relations(&remove_relation_inputs)?;
+        for (kind, target) in remove_relations {
+            doc.relations.retain(|(existing_kind, existing_id)| {
+                existing_kind != &kind || existing_id != &target
+            });
+        }
+        if let Some(title) = new_title {
+            doc.title = title.clone();
+            doc.body = replace_title(&doc.body, &title);
+            let parsed = parse_full_id(&doc.id)?;
+            let new_name = format!("{}--{}.md", parsed.short, slugify(&title));
+            final_path = path
+                .parent()
+                .ok_or_else(|| Error::new("Invalid issue path"))?
+                .join(new_name);
+        }
+        fs::write(&path, render_doc(&doc))?;
+        if final_path != path {
+            fs::rename(&path, &final_path)?;
+        }
+    } else {
+        if let Some(file_path) = file_arg {
+            let contents = fs::read_to_string(&file_path)?;
+            fs::write(&path, contents)?;
+        } else if !stdin_is_tty() {
+            let contents = read_from_stdin()?;
+            fs::write(&path, contents)?;
+        } else if editor_available() {
+            open_editor(&path)?;
+        } else {
+            return Err(Error::new("No edits specified and no editor available"));
+        }
+        doc = parse_doc(&path)?;
+        final_path = path.clone();
     }
-    commit_paths(&store, &[final_path.clone()], &format!("Update {}", doc.id))?;
+    let commit_message = format!("Update {}", doc.id);
+    if !no_commit {
+        commit_paths(&store, &[final_path.clone()], &commit_message)?;
+    } else {
+        print_uncommitted_hint(&store, &doc.id, &final_path);
+    }
+    Ok(())
+}
+
+fn store_exists(config: &Config, name: &str) -> bool {
+    config.stores.iter().any(|store| store.name == name)
+}
+
+fn commit_store(store: &Store) -> Result<()> {
+    let message = format!("Record staged changes in {}", store.name);
+    commit_paths(store, &[], &message)?;
+    println!("Committed staged changes in {}", store.name);
+    Ok(())
+}
+
+fn commit_rune(store: &Store, id_spec: &str) -> Result<()> {
+    let path = locate_doc(store, id_spec)?;
+    let doc = parse_doc(&path)?;
+    let message = format!("Record {}", doc.id);
+    commit_paths(store, &[path.clone()], &message)?;
+    println!("Committed {}", doc.id);
+    Ok(())
+}
+
+fn run_commit(mut args: Vec<String>) -> Result<()> {
+    if args.len() > 1 {
+        return Err(Error::new("Unexpected arguments after commit target"));
+    }
+    let target = if args.is_empty() {
+        None
+    } else {
+        Some(args.remove(0))
+    };
+    let (cfg, user_cfg, cwd) = load_context()?;
+    match target {
+        Some(spec) if spec.contains(':') || spec.contains('/') => {
+            let (store_hint, id_part) = split_store_prefix(&spec);
+            if let Some(store_name) = store_hint.as_deref() {
+                if store_name.is_empty() {
+                    return Err(Error::new("Store name may not be empty"));
+                }
+            }
+            let store = resolve_store_with_context(&cfg, &user_cfg, &cwd, store_hint.as_deref())?;
+            if id_part.is_empty() {
+                commit_store(&store)?;
+            } else {
+                commit_rune(&store, id_part)?;
+            }
+        }
+        Some(spec) => {
+            if store_exists(&cfg, &spec) {
+                let store = resolve_store_with_context(&cfg, &user_cfg, &cwd, Some(&spec))?;
+                commit_store(&store)?;
+            } else {
+                let store = resolve_store_with_context(&cfg, &user_cfg, &cwd, None)?;
+                commit_rune(&store, &spec)?;
+            }
+        }
+        None => {
+            let store = resolve_store_with_context(&cfg, &user_cfg, &cwd, None)?;
+            commit_store(&store)?;
+        }
+    }
     Ok(())
 }
 fn find_container_dir(project_root: &Path, full_id: &str) -> Result<PathBuf> {
@@ -1013,13 +1150,8 @@ fn run_move(mut args: Vec<String>) -> Result<()> {
     let parent = pop_arg(&mut args, "--parent");
     let (cfg, user_cfg, cwd) = load_context()?;
     let (from_store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id_spec)?;
-    let (to_store, project) = resolve_store_and_project_required(
-        &cfg,
-        &user_cfg,
-        &cwd,
-        None,
-        &target_project,
-    )?;
+    let (to_store, project) =
+        resolve_store_and_project_required(&cfg, &user_cfg, &cwd, None, &target_project)?;
     move_rune(&from_store, &to_store, &id, &project, parent.as_deref())
 }
 fn run_archive(mut args: Vec<String>) -> Result<()> {

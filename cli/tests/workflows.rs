@@ -408,12 +408,7 @@ fn pijul_cross_store_move_updates_both_stores() {
         .to_string();
     runes_ok(
         &home,
-        &[
-            "move",
-            &format!("src:{issue_id}"),
-            "--project",
-            "dst:runes",
-        ],
+        &["move", &format!("src:{issue_id}"), "--project", "dst:runes"],
     );
 
     let moved_doc = runes_ok(&home, &["show", &format!("dst:{issue_id}")]);
