@@ -797,9 +797,10 @@ fn run_list(args: ListArgs) -> Result<()> {
         ArchivedMode::Exclude
     };
     let (cfg, user_cfg, cwd) = load_context()?;
-    let (store, project_proj) =
-        resolve_store_and_project(&cfg, &user_cfg, &cwd, store.as_deref(), project.as_ref())?;
     let project_flag_present = project.is_some();
+    let effective_project = project.filter(|p| !p.is_empty());
+    let (store, project_proj) =
+        resolve_store_and_project(&cfg, &user_cfg, &cwd, store.as_deref(), effective_project.as_ref())?;
     let status_flag_present = status.is_some();
     let type_flag_present = kind.is_some();
     let assignee_filter = assignee
@@ -823,9 +824,13 @@ fn run_list(args: ListArgs) -> Result<()> {
         .or(query)
         .or_else(|| user_cfg.query_for_path(&cwd))
         .or_else(|| user_cfg.default_query.clone());
+    let mut query_set_project = false;
     if let Some(query_key) = query_name {
         if let Some(query_cfg) = user_cfg.query(&query_key) {
             if !project_flag_present {
+                if query_cfg.project.is_some() {
+                    query_set_project = true;
+                }
                 filters.project = query_cfg.project.clone();
             }
             if !status_flag_present {
@@ -847,6 +852,17 @@ fn run_list(args: ListArgs) -> Result<()> {
                 if let Some(query_assignee) = &query_cfg.assignee {
                     filters.assignee = user_cfg.resolve_user_alias(query_assignee);
                 }
+            }
+        }
+    }
+    // Empty project means "any project" (overrides default_project)
+    if filters.project.as_deref() == Some("") {
+        filters.project = None;
+    } else if filters.project.is_none() && !project_flag_present && !query_set_project {
+        if let Some(default_spec) = user_cfg.default_project.as_deref() {
+            let (_, proj_name) = split_store_prefix(default_spec);
+            if !proj_name.is_empty() {
+                filters.project = Some(proj_name.to_string());
             }
         }
     }
