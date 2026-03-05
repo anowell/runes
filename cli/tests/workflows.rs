@@ -149,7 +149,7 @@ fn jj_issue_lifecycle_and_cache_query() {
 
     let shown = runes_ok(&home, &["show", &format!("how:{issue_id}")]);
     assert!(
-        shown.contains("status=\"in-progress\""),
+        shown.contains("status \"in-progress\""),
         "status not updated"
     );
     assert!(shown.contains("labels \"schema\""), "label not added");
@@ -226,7 +226,7 @@ fn new_default_project_from_env_var() {
     assert!(issue_id.starts_with("runes-"));
 
     let shown = runes_ok(&home, &["show", &format!("how:{issue_id}")]);
-    assert!(shown.contains("kind=issue"));
+    assert!(shown.contains("kind=task"));
 }
 
 #[test]

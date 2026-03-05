@@ -360,7 +360,7 @@ impl ListKind {
 
     fn kind_name(&self) -> &'static str {
         match self {
-            ListKind::Issues => "issue",
+            ListKind::Issues => "task",
             ListKind::Milestones => "milestone",
         }
     }

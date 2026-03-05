@@ -78,7 +78,9 @@ All documents are markdown files with KDL frontmatter enclosed by `---`.
 
 ```markdown
 ---
-doc kind="issue" id="runes-cx3" status="todo" priority=2
+task "runes-cx3" {
+  status "todo"
+}
 labels "bootstrap" "cli" "core"
 relations {
   blocks "runes-cx9"

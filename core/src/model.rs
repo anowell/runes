@@ -11,10 +11,10 @@ pub struct RuneDoc {
     pub id: String,
     pub status: String,
     pub assignee: Option<String>,
-    pub priority: Option<i32>,
     pub labels: Vec<String>,
     pub milestone: Option<String>,
     pub relations: Vec<(String, String)>,
+    pub deps: Vec<String>,
     pub frontmatter_extra: Vec<String>,
     pub title: String,
     pub body: String,
@@ -65,22 +65,6 @@ pub fn slugify(title: &str) -> String {
     }
 }
 
-fn extract_quoted_value(line: &str, key: &str) -> Option<String> {
-    let pat = format!("{key}=\"");
-    let idx = line.find(&pat)?;
-    let rest = &line[idx + pat.len()..];
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
-}
-
-fn extract_int_value(line: &str, key: &str) -> Option<i32> {
-    let pat = format!("{key}=");
-    let idx = line.find(&pat)?;
-    let rest = &line[idx + pat.len()..];
-    let end = rest.find(' ').unwrap_or(rest.len());
-    rest[..end].parse::<i32>().ok()
-}
-
 fn extract_quoted_values(line: &str) -> Vec<String> {
     let mut values = Vec::new();
     let mut start = 0usize;
@@ -95,6 +79,135 @@ fn extract_quoted_values(line: &str) -> Vec<String> {
         }
     }
     values
+}
+
+fn extract_first_quoted_value(line: &str) -> Option<String> {
+    extract_quoted_values(line).into_iter().next()
+}
+
+fn find_root_line_index(fm_lines: &[String]) -> Option<usize> {
+    fm_lines.iter().position(|line| !line.trim().is_empty())
+}
+
+fn parse_root_line(line: &str, doc: &mut RuneDoc) -> Result<()> {
+    let trimmed = line.trim();
+    let mut parts = trimmed.split_whitespace();
+    let kind = parts
+        .next()
+        .ok_or_else(|| Error::new("frontmatter missing root node kind"))?;
+    doc.kind = kind.to_string();
+    if let Some(id_value) = extract_first_quoted_value(trimmed) {
+        doc.id = id_value;
+    } else {
+        return Err(Error::new("frontmatter missing rune id"));
+    }
+    Ok(())
+}
+
+fn collect_block_lines(fm_lines: &[String], root_idx: usize) -> Vec<String> {
+    let mut block_lines = Vec::new();
+    let root_line = fm_lines
+        .get(root_idx)
+        .map(|line| line.trim())
+        .unwrap_or("");
+    let mut depth = root_line.matches('{').count() as i32;
+    depth -= root_line.matches('}').count() as i32;
+    let mut collecting = depth > 0;
+    for line in fm_lines.iter().skip(root_idx + 1) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !collecting {
+            if trimmed.contains('{') {
+                collecting = true;
+                depth += trimmed.matches('{').count() as i32;
+                depth -= trimmed.matches('}').count() as i32;
+            }
+            continue;
+        }
+        let opens = trimmed.matches('{').count() as i32;
+        let closes = trimmed.matches('}').count() as i32;
+        if trimmed == "}" && depth <= 1 {
+            break;
+        }
+        block_lines.push(trimmed.to_string());
+        depth += opens;
+        depth -= closes;
+    }
+    block_lines
+}
+
+fn parse_block_lines(block_lines: &[String], doc: &mut RuneDoc) {
+    let mut in_relations = false;
+    for line in block_lines {
+        if in_relations {
+            if line == "}" {
+                in_relations = false;
+                continue;
+            }
+            parse_relation_line(doc, line);
+            continue;
+        }
+        if line == "relations {" {
+            in_relations = true;
+            continue;
+        }
+        if parse_property_line(doc, line) {
+            continue;
+        }
+        doc.frontmatter_extra.push(line.clone());
+    }
+}
+
+fn parse_property_line(doc: &mut RuneDoc, trimmed: &str) -> bool {
+    if trimmed.starts_with("status ") {
+        if let Some(value) = extract_first_quoted_value(trimmed) {
+            doc.status = value;
+            return true;
+        }
+    }
+    if trimmed.starts_with("assignee ") {
+        if let Some(value) = extract_first_quoted_value(trimmed) {
+            if value.eq_ignore_ascii_case("none") {
+                doc.assignee = None;
+            } else {
+                doc.assignee = Some(value);
+            }
+            return true;
+        }
+    }
+    if trimmed.starts_with("labels ") {
+        doc.labels = extract_quoted_values(trimmed);
+        return true;
+    }
+    if trimmed.starts_with("milestone ") {
+        doc.milestone = extract_quoted_values(trimmed).into_iter().next();
+        return true;
+    }
+    if trimmed.starts_with("dep ") {
+        if let Some(value) = extract_first_quoted_value(trimmed) {
+            doc.deps.push(value);
+            return true;
+        }
+    }
+    if trimmed.starts_with("deps ") {
+        doc.deps.extend(extract_quoted_values(trimmed));
+        return true;
+    }
+    false
+}
+
+fn parse_relation_line(doc: &mut RuneDoc, trimmed: &str) {
+    let mut parts = trimmed.split_whitespace();
+    if let Some(kind) = parts.next() {
+        if let Some(rest) = trimmed.strip_prefix(kind) {
+            let vals = extract_quoted_values(rest);
+            if let Some(id) = vals.first() {
+                doc.relations.push((kind.to_string(), id.to_string()));
+            }
+        }
+    }
 }
 
 pub fn parse_doc(path: &Path) -> Result<RuneDoc> {
@@ -134,58 +247,21 @@ pub fn parse_doc(path: &Path) -> Result<RuneDoc> {
 
     let mut doc = RuneDoc::default();
     doc.path = path.to_path_buf();
-    doc.kind = "issue".to_string();
     doc.status = "todo".to_string();
 
-    let mut in_relations = false;
-    for line in &fm_lines {
-        let trimmed = line.trim();
-        if in_relations {
-            if trimmed == "}" {
-                in_relations = false;
-                continue;
-            }
-            let mut split = trimmed.split_whitespace();
-            if let Some(kind) = split.next() {
-                if let Some(rest) = trimmed.strip_prefix(kind) {
-                    let vals = extract_quoted_values(rest);
-                    if let Some(id) = vals.first() {
-                        doc.relations.push((kind.to_string(), id.to_string()));
-                        continue;
-                    }
-                }
-            }
-            doc.frontmatter_extra.push(line.clone());
-            continue;
-        }
-        if trimmed.starts_with("doc ") {
-            if let Some(v) = extract_quoted_value(trimmed, "kind") {
-                doc.kind = v;
-            }
-            if let Some(v) = extract_quoted_value(trimmed, "id") {
-                doc.id = v;
-            }
-            if let Some(v) = extract_quoted_value(trimmed, "status") {
-                doc.status = v;
-            }
-            if let Some(v) = extract_quoted_value(trimmed, "assignee") {
-                doc.assignee = Some(v);
-            }
-            doc.priority = extract_int_value(trimmed, "priority");
-        } else if trimmed.starts_with("labels ") {
-            doc.labels = extract_quoted_values(trimmed);
-        } else if trimmed.starts_with("milestone ") {
-            doc.milestone = extract_quoted_values(trimmed).into_iter().next();
-        } else if trimmed == "relations {" {
-            in_relations = true;
-        } else {
-            doc.frontmatter_extra.push(line.clone());
-        }
-    }
+    let root_idx = find_root_line_index(&fm_lines).ok_or_else(|| {
+        Error::new(format!(
+            "{} frontmatter missing root node",
+            path.display()
+        ))
+    })?;
+    parse_root_line(&fm_lines[root_idx], &mut doc)?;
+    let block_lines = collect_block_lines(&fm_lines, root_idx);
+    parse_block_lines(&block_lines, &mut doc);
 
     if doc.id.is_empty() {
         return Err(Error::new(format!(
-            "{} frontmatter missing doc id",
+            "{} frontmatter missing rune id",
             path.display()
         )));
     }
@@ -208,38 +284,42 @@ pub fn parse_doc(path: &Path) -> Result<RuneDoc> {
 pub fn render_doc(doc: &RuneDoc) -> String {
     let mut out = String::new();
     out.push_str("---\n");
-    out.push_str(&format!(
-        "doc kind=\"{}\" id=\"{}\" status=\"{}\"",
-        doc.kind, doc.id, doc.status
-    ));
+    out.push_str(&format!("{} \"{}\"", doc.kind, doc.id));
+    out.push_str(" {\n");
+    out.push_str(&format!("  status \"{}\"\n", doc.status));
     if let Some(assignee) = &doc.assignee {
-        out.push_str(&format!(" assignee=\"{assignee}\""));
+        out.push_str(&format!("  assignee \"{assignee}\"\n"));
     }
-    if let Some(priority) = doc.priority {
-        out.push_str(&format!(" priority={priority}"));
-    }
-    out.push('\n');
     if !doc.labels.is_empty() {
-        out.push_str("labels");
+        out.push_str("  labels");
         for label in &doc.labels {
             out.push_str(&format!(" \"{label}\""));
         }
         out.push('\n');
     }
     if let Some(milestone) = &doc.milestone {
-        out.push_str(&format!("milestone \"{milestone}\"\n"));
+        out.push_str(&format!("  milestone \"{milestone}\"\n"));
     }
     if !doc.relations.is_empty() {
-        out.push_str("relations {\n");
+        out.push_str("  relations {\n");
         for (kind, id) in &doc.relations {
-            out.push_str(&format!("  {kind} \"{id}\"\n"));
+            out.push_str(&format!("    {kind} \"{id}\"\n"));
         }
-        out.push_str("}\n");
+        out.push_str("  }\n");
+    }
+    for dep in &doc.deps {
+        out.push_str(&format!("  dep \"{dep}\"\n"));
     }
     for line in &doc.frontmatter_extra {
-        out.push_str(line);
-        out.push('\n');
+        if line.is_empty() {
+            out.push('\n');
+        } else {
+            out.push_str("  ");
+            out.push_str(line);
+            out.push('\n');
+        }
     }
+    out.push_str("}\n");
     out.push_str("---\n\n");
     out.push_str(&doc.body);
     if !doc.body.ends_with('\n') {
@@ -251,13 +331,13 @@ pub fn render_doc(doc: &RuneDoc) -> String {
 pub fn new_issue_doc(id: &str, title: &str, milestone: Option<&str>) -> RuneDoc {
     let body = format!("# {title}\n\n## Summary\n\n## Design\n\n## Acceptance\n\n## Comments\n");
     RuneDoc {
-        kind: "issue".to_string(),
+        kind: "task".to_string(),
         id: id.to_string(),
         status: "todo".to_string(),
-        priority: Some(2),
         labels: Vec::new(),
         milestone: milestone.map(|s| s.to_string()),
         relations: Vec::new(),
+        deps: Vec::new(),
         frontmatter_extra: Vec::new(),
         assignee: None,
         title: title.to_string(),
@@ -274,10 +354,10 @@ pub fn new_milestone_doc(id: &str, title: &str) -> RuneDoc {
         kind: "milestone".to_string(),
         id: id.to_string(),
         status: "active".to_string(),
-        priority: Some(1),
         labels: vec!["v1".to_string()],
         milestone: None,
         relations: Vec::new(),
+        deps: Vec::new(),
         frontmatter_extra: Vec::new(),
         assignee: None,
         title: title.to_string(),
@@ -392,4 +472,84 @@ fn random_base32(len: usize) -> Result<String> {
         out.push(BASE32[idx] as char);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn write_temp_doc(contents: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock drift")
+            .as_nanos();
+        let mut path = std::env::temp_dir();
+        path.push(format!("runes-test-doc-{nanos}.md"));
+        fs::write(&path, contents).expect("write temp doc");
+        path
+    }
+
+    #[test]
+    fn parse_new_frontmatter_nodes() {
+        let contents = r#"---
+	task "runes-test" {
+  status "done"
+  assignee "tester"
+  labels "infra" "cli"
+  milestone "runes-m01"
+  relations {
+    blocks "runes-other"
+  }
+  dep "runes-rf1"
+  dep "runes-tnv"
+}
+---
+# Title
+Body
+"#;
+        let path = write_temp_doc(contents);
+        let doc = parse_doc(&path).expect("parse doc");
+        assert_eq!(doc.id, "runes-test");
+        assert_eq!(doc.kind, "task");
+        assert_eq!(doc.status, "done");
+        assert_eq!(doc.assignee.as_deref(), Some("tester"));
+        assert_eq!(doc.labels, vec!["infra", "cli"]);
+        assert_eq!(doc.milestone.as_deref(), Some("runes-m01"));
+        assert!(doc
+            .relations
+            .contains(&("blocks".to_string(), "runes-other".to_string())));
+        let expected_deps = vec!["runes-rf1".to_string(), "runes-tnv".to_string()];
+        assert_eq!(doc.deps, expected_deps);
+        fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn render_new_frontmatter_nodes() {
+        let doc = RuneDoc {
+            kind: "task".to_string(),
+            id: "runes-tfc".to_string(),
+            status: "todo".to_string(),
+            assignee: Some("anowell@gmail.com".to_string()),
+            labels: vec!["infra".to_string(), "cli".to_string()],
+            milestone: Some("runes-m01".to_string()),
+            relations: vec![("blocks".to_string(), "runes-rf1".to_string())],
+            deps: vec!["runes-rf2".to_string()],
+            frontmatter_extra: vec!["notes \"quarantine\"".to_string()],
+            title: "test".to_string(),
+            body: "# Title\n".to_string(),
+            path: PathBuf::new(),
+        };
+        let rendered = render_doc(&doc);
+        assert!(rendered.contains("task \"runes-tfc\""));
+        assert!(rendered.contains("status \"todo\""));
+        assert!(rendered.contains("assignee \"anowell@gmail.com\""));
+        assert!(rendered.contains("labels \"infra\" \"cli\""));
+        assert!(rendered.contains("milestone \"runes-m01\""));
+        assert!(rendered.contains("relations {"));
+        assert!(rendered.contains("dep \"runes-rf2\""));
+        assert!(rendered.contains("notes \"quarantine\""));
+    }
 }
