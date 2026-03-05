@@ -17,7 +17,7 @@ use std::process::Command;
 use user_config::UserConfig;
 
 #[derive(Debug, Parser)]
-#[command(name = "runes", version, about, propagate_version = true)]
+#[command(name = "runes", version, about = "A local-first issue tracker stored as markdown rune docs", propagate_version = true)]
 struct Cli {
     #[command(subcommand)]
     command: CliCommand,
@@ -25,161 +25,229 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum CliCommand {
+    /// Create a new rune doc (issue or milestone)
     New(NewArgs),
+    /// List rune docs with optional filters
     List(ListArgs),
+    /// Show a rune doc by ID
     Show(ShowArgs),
+    /// Edit metadata on an existing rune doc
     Edit(EditArgs),
+    /// Commit pending rune doc changes to the store backend
     Commit(CommitArgs),
+    /// Move a rune doc to a different project
     Move(MoveArgs),
+    /// Archive a rune doc
     Archive(ArchiveArgs),
+    /// Delete a rune doc
     Delete(DeleteArgs),
+    /// Show change log for a rune doc
     Log(LogArgs),
+    /// Sync store with its backend
     Sync(SyncArgs),
+    /// Manage stores
     #[command(subcommand)]
     Store(StoreCommand),
 }
 
 #[derive(Debug, Subcommand)]
 enum StoreCommand {
+    /// Initialize a new store
     Init {
+        /// Store name
         name: String,
+        /// Backend type (e.g. pijul, jj)
         #[arg(long)]
         backend: String,
+        /// Path to the store directory
         #[arg(long)]
         path: Option<PathBuf>,
+        /// Set as the default store
         #[arg(long)]
         default: bool,
     },
+    /// List configured stores
     List,
+    /// Show store details
     Info {
+        /// Store name
         name: String,
     },
+    /// Remove a store from config
     Remove {
+        /// Store name
         name: String,
     },
+    /// Check store health and fix issues
     Doctor {
+        /// Store name
         store: String,
     },
 }
 
 #[derive(Debug, Parser)]
 struct NewArgs {
+    /// Title for the new rune doc
     title: String,
+    /// Target project (or store:project)
     #[arg(long)]
     project: Option<String>,
+    /// Store to create the doc in
     #[arg(long)]
     store: Option<String>,
+    /// Doc type (e.g. issue, milestone)
     #[arg(long = "type")]
     command_type: Option<String>,
+    /// Initial status
     #[arg(long)]
     status: Option<String>,
+    /// Assignee
     #[arg(long)]
     assignee: Option<String>,
+    /// Parent rune ID
     #[arg(long)]
     parent: Option<String>,
+    /// Milestone ID to associate with
     #[arg(long)]
     milestone: Option<String>,
+    /// Override the generated ID
     #[arg(long = "id")]
     id_override: Option<String>,
+    /// Add a label (repeatable)
     #[arg(long = "label")]
     labels: Vec<String>,
+    /// Add a relation e.g. "blocks:runes-x1" (repeatable)
     #[arg(long = "relation")]
     relations: Vec<String>,
+    /// Skip auto-commit after creation
     #[arg(long = "no-commit")]
     no_commit: bool,
 }
 
 #[derive(Debug, Parser)]
 struct ListArgs {
+    /// Named query/view to apply
     #[arg(value_name = "view")]
     view: Option<String>,
+    /// Store to list from
     #[arg(long)]
     store: Option<String>,
+    /// Filter by project (or store:project; empty string for all)
     #[arg(long)]
     project: Option<String>,
+    /// Named query from runes.kdl
     #[arg(long)]
     query: Option<String>,
+    /// Filter by type (e.g. issues, milestones)
     #[arg(long = "type")]
     kind: Option<String>,
+    /// Filter by status
     #[arg(long)]
     status: Option<String>,
+    /// Filter by assignee
     #[arg(long)]
     assignee: Option<String>,
+    /// Show only archived docs
     #[arg(long, conflicts_with = "with_archived")]
     archived: bool,
+    /// Include archived docs in results
     #[arg(long = "with-archived", conflicts_with = "archived")]
     with_archived: bool,
 }
 
 #[derive(Debug, Parser)]
 struct ShowArgs {
+    /// Rune doc ID (or store:id)
     id: String,
 }
 
 #[derive(Debug, Parser)]
 struct EditArgs {
+    /// Rune doc ID (or store:id)
     id: String,
+    /// Set the title
     #[arg(long)]
     title: Option<String>,
+    /// Set the status
     #[arg(long)]
     status: Option<String>,
+    /// Set the assignee (use "none" to clear)
     #[arg(long)]
     assignee: Option<String>,
+    /// Add a label (repeatable)
     #[arg(long = "label")]
     add_labels: Vec<String>,
+    /// Remove a label (repeatable)
     #[arg(long = "remove-label")]
     remove_labels: Vec<String>,
+    /// Set the milestone
     #[arg(long)]
     milestone: Option<String>,
+    /// Add a relation e.g. "blocks:runes-x1" (repeatable)
     #[arg(long = "relation")]
     add_relations: Vec<String>,
+    /// Remove a relation (repeatable)
     #[arg(long = "remove-relation")]
     remove_relations: Vec<String>,
+    /// Replace body from file (use - for stdin)
     #[arg(short = 'f', long = "file")]
     file: Option<PathBuf>,
+    /// Skip auto-commit after edit
     #[arg(long = "no-commit")]
     no_commit: bool,
 }
 
 #[derive(Debug, Parser)]
 struct CommitArgs {
+    /// Store or store:project to commit (defaults to all pending)
     target: Option<String>,
 }
 
 #[derive(Debug, Parser)]
 struct MoveArgs {
+    /// Rune doc ID to move
     id: String,
+    /// Destination project
     #[arg(long = "project")]
     target_project: String,
+    /// New parent rune ID in the destination project
     #[arg(long)]
     parent: Option<String>,
 }
 
 #[derive(Debug, Parser)]
 struct ArchiveArgs {
+    /// Rune doc ID to archive
     id: String,
 }
 
 #[derive(Debug, Parser)]
 struct DeleteArgs {
+    /// Rune doc ID to delete
     id: String,
+    /// Skip confirmation prompt
     #[arg(long)]
     force: bool,
 }
 
 #[derive(Debug, Parser)]
 struct LogArgs {
+    /// Rune doc ID
     id: String,
+    /// Max number of entries to show
     #[arg(long)]
     limit: Option<usize>,
+    /// Filter to a specific section
     #[arg(long)]
     section: Option<String>,
 }
 
 #[derive(Debug, Parser)]
 struct SyncArgs {
+    /// Store to sync
     #[arg(long)]
     store: Option<String>,
+    /// Sync all configured stores
     #[arg(long)]
     all: bool,
 }
