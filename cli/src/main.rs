@@ -48,6 +48,11 @@ enum CliCommand {
     /// Manage stores
     #[command(subcommand)]
     Store(StoreCommand),
+    /// Read and write config values
+    #[command(subcommand)]
+    Config(ConfigCommand),
+    /// Initialize runes for a repo or globally
+    Init(InitArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -83,6 +88,52 @@ enum StoreCommand {
         /// Store name
         store: String,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    /// List all config values
+    List {
+        /// Show global config only
+        #[arg(short, long)]
+        global: bool,
+    },
+    /// Get a config value by key
+    Get {
+        /// Config key (e.g. user.email, defaults.store)
+        key: String,
+        /// Read from global config
+        #[arg(short, long)]
+        global: bool,
+    },
+    /// Set a config value
+    Set {
+        /// Config key (e.g. user.email, defaults.store)
+        key: String,
+        /// Value to set
+        value: String,
+        /// Write to global config
+        #[arg(short, long)]
+        global: bool,
+    },
+    /// Remove a config value
+    Unset {
+        /// Config key to remove
+        key: String,
+        /// Remove from global config
+        #[arg(short, long)]
+        global: bool,
+    },
+}
+
+#[derive(Debug, Parser)]
+struct InitArgs {
+    /// Project prefix (optionally store:project)
+    #[arg(long)]
+    project: Option<String>,
+    /// Add runes.kdl to .git/info/exclude instead of committing it
+    #[arg(long)]
+    stealth: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -274,6 +325,8 @@ fn handle_command(command: CliCommand) -> Result<()> {
         CliCommand::Log(args) => run_log(args),
         CliCommand::Sync(args) => run_sync(args),
         CliCommand::Store(store_cmd) => run_store(store_cmd),
+        CliCommand::Config(config_cmd) => run_config(config_cmd),
+        CliCommand::Init(args) => run_init(args),
     }
 }
 fn home_dir() -> Result<PathBuf> {
@@ -287,9 +340,28 @@ fn default_store_path(name: &str) -> Result<PathBuf> {
 }
 
 fn load_context() -> Result<(Config, UserConfig, PathBuf)> {
-    let config = Config::load()?;
+    let mut config = Config::load()?;
     let cwd = std::env::current_dir().map_err(|e| Error::new(e.to_string()))?;
     let user_cfg = UserConfig::load_from_dir(&cwd)?;
+    // Merge store definitions from KDL config into Config
+    for store_def in &user_cfg.stores {
+        if !store_def.backend.is_empty() && !store_def.path.is_empty() {
+            if let Ok(backend) = BackendKind::parse(&store_def.backend) {
+                let store = Store {
+                    name: store_def.name.clone(),
+                    backend,
+                    path: PathBuf::from(&store_def.path),
+                };
+                config.upsert_store(store);
+            }
+        }
+    }
+    // Also use default_store from user config if config.txt doesn't have one
+    if config.default_store.is_none() {
+        if let Some(ds) = &user_cfg.default_store {
+            config.default_store = Some(ds.clone());
+        }
+    }
     Ok((config, user_cfg, cwd))
 }
 fn split_store_prefix(spec: &str) -> (Option<String>, &str) {
@@ -1642,4 +1714,212 @@ fn cache_rebuild(store_name: String) -> Result<()> {
 
 fn load_store(name: &str) -> Result<Store> {
     Config::load()?.get_store(name)
+}
+
+fn run_config(cmd: ConfigCommand) -> Result<()> {
+    let cwd = std::env::current_dir().map_err(|e| Error::new(e.to_string()))?;
+    match cmd {
+        ConfigCommand::List { global } => {
+            if global {
+                let path = user_config::global_config_path()?;
+                let pairs = user_config::config_list(&path)?;
+                for (k, v) in pairs {
+                    println!("{k}={v}");
+                }
+            } else {
+                // Show merged: global then local
+                let global_path = user_config::global_config_path()?;
+                let local_path = user_config::local_config_path(&cwd);
+                let mut pairs = user_config::config_list(&global_path)?;
+                if let Some(lp) = local_path {
+                    let local_pairs = user_config::config_list(&lp)?;
+                    for (k, v) in local_pairs {
+                        if let Some(existing) = pairs.iter_mut().find(|(ek, _)| ek == &k) {
+                            existing.1 = v;
+                        } else {
+                            pairs.push((k, v));
+                        }
+                    }
+                }
+                for (k, v) in pairs {
+                    println!("{k}={v}");
+                }
+            }
+            Ok(())
+        }
+        ConfigCommand::Get { key, global } => {
+            let path = if global {
+                user_config::global_config_path()?
+            } else {
+                // Check local first, then global
+                let local = user_config::local_config_path(&cwd);
+                if let Some(lp) = &local {
+                    if let Some(val) = user_config::config_get(lp, &key)? {
+                        println!("{val}");
+                        return Ok(());
+                    }
+                }
+                user_config::global_config_path()?
+            };
+            match user_config::config_get(&path, &key)? {
+                Some(val) => println!("{val}"),
+                None => return Err(Error::new(format!("Key '{key}' not found"))),
+            }
+            Ok(())
+        }
+        ConfigCommand::Set { key, value, global } => {
+            let path = if global {
+                user_config::global_config_path()?
+            } else {
+                user_config::local_config_path(&cwd)
+                    .ok_or_else(|| Error::new("Not in a repo. Use --global or run from a repo root."))?
+            };
+            user_config::config_set(&path, &key, &value)?;
+            Ok(())
+        }
+        ConfigCommand::Unset { key, global } => {
+            let path = if global {
+                user_config::global_config_path()?
+            } else {
+                user_config::local_config_path(&cwd)
+                    .ok_or_else(|| Error::new("Not in a repo. Use --global or run from a repo root."))?
+            };
+            user_config::config_unset(&path, &key)?;
+            Ok(())
+        }
+    }
+}
+
+fn run_init(args: InitArgs) -> Result<()> {
+    let cwd = std::env::current_dir().map_err(|e| Error::new(e.to_string()))?;
+    let global_path = user_config::global_config_path()?;
+
+    // Ensure global config exists
+    if !global_path.exists() {
+        if !stdin_is_tty() {
+            return Err(Error::new(
+                "Global config not found. Run `runes init` interactively to create it.",
+            ));
+        }
+        println!("Creating global config at {}", global_path.display());
+
+        // Prompt for default store name
+        eprint!("Default store name [proj]: ");
+        let mut store_name = String::new();
+        io::stdin().read_line(&mut store_name).map_err(|e| Error::new(e.to_string()))?;
+        let store_name = store_name.trim();
+        let store_name = if store_name.is_empty() { "proj" } else { store_name };
+
+        // Prompt for backend
+        eprint!("Backend (jj or pijul) [jj]: ");
+        let mut backend_input = String::new();
+        io::stdin().read_line(&mut backend_input).map_err(|e| Error::new(e.to_string()))?;
+        let backend_input = backend_input.trim();
+        let backend = if backend_input.is_empty() { "jj" } else { backend_input };
+        BackendKind::parse(backend)?;
+
+        // Prompt for user email
+        eprint!("User email: ");
+        let mut email = String::new();
+        io::stdin().read_line(&mut email).map_err(|e| Error::new(e.to_string()))?;
+        let email = email.trim().to_string();
+
+        // Create global config
+        user_config::config_set(&global_path, "user.email", &email)?;
+        user_config::config_set(&global_path, "defaults.store", store_name)?;
+
+        let store_path = default_store_path(store_name)?;
+        user_config::config_set(&global_path, &format!("store.{store_name}.backend"), backend)?;
+        user_config::config_set(
+            &global_path,
+            &format!("store.{store_name}.path"),
+            &store_path.display().to_string(),
+        )?;
+
+        // Create default new and query nodes
+        user_config::config_set(&global_path, "new.task.assignee", "self")?;
+        user_config::config_set(&global_path, "query.open.status", "todo")?;
+        user_config::config_set(&global_path, "query.mine.assignee", "self")?;
+        user_config::config_set(&global_path, "query.mine.status", "todo")?;
+        user_config::config_set(&global_path, "defaults.query", "open")?;
+
+        // Initialize the store
+        let backend_kind = BackendKind::parse(backend)?;
+        backend::init_store(&store_path, backend_kind.clone())?;
+        let mut cfg = Config::load()?;
+        cfg.upsert_store(Store {
+            name: store_name.to_string(),
+            backend: backend_kind,
+            path: store_path,
+        });
+        if cfg.default_store.is_none() {
+            cfg.default_store = Some(store_name.to_string());
+        }
+        cfg.save()?;
+        println!("Global config created.");
+    } else {
+        println!("Global config already exists at {}", global_path.display());
+    }
+
+    // Create local config if in a repo
+    let repo_root = find_repo_root(&cwd);
+    if let Some(root) = repo_root {
+        let local_path = root.join("runes.kdl");
+        if !local_path.exists() {
+            let project = if let Some(spec) = &args.project {
+                let (_store_hint, proj) = split_store_prefix(spec);
+                proj.to_string()
+            } else if stdin_is_tty() {
+                let default_name = root
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("myproject");
+                eprint!("Project prefix [{}]: ", default_name);
+                let mut input = String::new();
+                io::stdin().read_line(&mut input).map_err(|e| Error::new(e.to_string()))?;
+                let input = input.trim();
+                if input.is_empty() {
+                    default_name.to_string()
+                } else {
+                    input.to_string()
+                }
+            } else {
+                return Err(Error::new(
+                    "Use --project to specify the project prefix non-interactively.",
+                ));
+            };
+
+            // If project spec included a store, set that too
+            if let Some(spec) = &args.project {
+                let (store_hint, _) = split_store_prefix(spec);
+                if let Some(store) = store_hint {
+                    user_config::config_set(&local_path, "defaults.store", &store)?;
+                }
+            }
+            user_config::config_set(&local_path, "defaults.project", &project)?;
+
+            if args.stealth {
+                let exclude_path = root.join(".git").join("info").join("exclude");
+                if exclude_path.parent().map_or(false, |p| p.exists()) {
+                    let existing = fs::read_to_string(&exclude_path).unwrap_or_default();
+                    if !existing.lines().any(|l| l.trim() == "runes.kdl") {
+                        let mut content = existing;
+                        if !content.ends_with('\n') && !content.is_empty() {
+                            content.push('\n');
+                        }
+                        content.push_str("runes.kdl\n");
+                        fs::write(&exclude_path, content)?;
+                        println!("Added runes.kdl to .git/info/exclude");
+                    }
+                }
+            }
+            println!("Local config created at {}", local_path.display());
+        } else {
+            println!("Local config already exists at {}", local_path.display());
+        }
+    } else {
+        println!("Not in a repo; skipping local config.");
+    }
+
+    Ok(())
 }
