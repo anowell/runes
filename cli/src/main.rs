@@ -170,6 +170,12 @@ struct NewArgs {
     /// Add a relation e.g. "blocks:runes-x1" (repeatable)
     #[arg(long = "relation")]
     relations: Vec<String>,
+    /// Replace body from file (use - for stdin)
+    #[arg(short = 'f', long = "file")]
+    file: Option<PathBuf>,
+    /// Open editor after creation
+    #[arg(short = 'e', long = "edit")]
+    edit: bool,
     /// Skip auto-commit after creation
     #[arg(long = "no-commit")]
     no_commit: bool,
@@ -243,6 +249,9 @@ struct EditArgs {
     /// Replace body from file (use - for stdin)
     #[arg(short = 'f', long = "file")]
     file: Option<PathBuf>,
+    /// Open editor
+    #[arg(short = 'e', long = "edit")]
+    edit: bool,
     /// Skip auto-commit after edit
     #[arg(long = "no-commit")]
     no_commit: bool,
@@ -738,6 +747,8 @@ fn run_new(args: NewArgs) -> Result<()> {
         id_override,
         labels,
         relations,
+        file,
+        edit,
         no_commit,
     } = args;
     let relation_inputs = relations;
@@ -777,6 +788,9 @@ fn run_new(args: NewArgs) -> Result<()> {
         project_arg.as_ref(),
     )?;
     let relations = parse_relations(&relation_inputs)?;
+    if file.is_some() && edit {
+        return Err(Error::new("Cannot use both --file and --edit"));
+    }
     let (identifier, doc_path) = if kind == "milestone" {
         create_milestone(
             &store,
@@ -800,11 +814,19 @@ fn run_new(args: NewArgs) -> Result<()> {
             id_override.as_deref(),
         )?
     };
-    let interactive = editor_available();
-    if interactive {
+    if let Some(file_path) = file {
+        let contents = if file_path == Path::new("-") {
+            read_from_stdin()?
+        } else {
+            fs::read_to_string(&file_path)?
+        };
+        let mut doc = parse_doc(&doc_path)?;
+        doc.body = contents;
+        fs::write(&doc_path, render_doc(&doc))?;
+    } else if edit {
         open_editor(&doc_path)?;
     }
-    if interactive && !no_commit {
+    if !no_commit {
         commit_paths(&store, &[doc_path.clone()], &format!("Add {identifier}"))?;
     } else {
         print_uncommitted_hint(&store, &identifier, &doc_path);
@@ -1226,6 +1248,7 @@ fn run_edit(args: EditArgs) -> Result<()> {
         add_relations,
         remove_relations,
         file,
+        edit,
         no_commit,
     } = args;
     let (cfg, user_cfg, cwd) = load_context()?;
@@ -1241,9 +1264,12 @@ fn run_edit(args: EditArgs) -> Result<()> {
         || milestone.is_some()
         || !add_relations.is_empty()
         || !remove_relations.is_empty();
-    if file.is_some() && has_field_edits {
+    if file.is_some() && edit {
+        return Err(Error::new("Cannot use both --file and --edit"));
+    }
+    if (file.is_some() || edit) && has_field_edits {
         return Err(Error::new(
-            "Cannot mix field edits with --file/STDIN content updates",
+            "Cannot mix field edits with --file or --edit",
         ));
     }
     if has_field_edits {
@@ -1302,20 +1328,21 @@ fn run_edit(args: EditArgs) -> Result<()> {
         if final_path != path {
             fs::rename(&path, &final_path)?;
         }
-    } else {
-        if let Some(file_path) = file {
-            let contents = fs::read_to_string(&file_path)?;
-            fs::write(&path, contents)?;
-        } else if !stdin_is_tty() {
-            let contents = read_from_stdin()?;
-            fs::write(&path, contents)?;
-        } else if editor_available() {
-            open_editor(&path)?;
+    } else if let Some(file_path) = file {
+        let contents = if file_path == Path::new("-") {
+            read_from_stdin()?
         } else {
-            return Err(Error::new("No edits specified and no editor available"));
-        }
+            fs::read_to_string(&file_path)?
+        };
+        fs::write(&path, contents)?;
         doc = parse_doc(&path)?;
         final_path = path.clone();
+    } else if edit || editor_available() {
+        open_editor(&path)?;
+        doc = parse_doc(&path)?;
+        final_path = path.clone();
+    } else {
+        return Err(Error::new("No edits specified and no editor available"));
     }
     let commit_message = format!("Update {}", doc.id);
     if !no_commit {

@@ -254,31 +254,6 @@ impl UserConfig {
         self.queries.get(name)
     }
 
-    /// Returns creation defaults for the given kind, falling back to the
-    /// kind-less fallback and then to a bare default.
-    pub fn creation_defaults_for(&self, kind: &str) -> CreationDefaults {
-        let specific = self.creation_defaults.get(kind);
-        let fallback = &self.creation_fallback;
-        CreationDefaults {
-            kind: specific
-                .and_then(|s| s.kind.clone())
-                .or_else(|| fallback.kind.clone()),
-            status: specific
-                .and_then(|s| s.status.clone())
-                .or_else(|| fallback.status.clone()),
-            assignee: specific
-                .and_then(|s| s.assignee.clone())
-                .or_else(|| fallback.assignee.clone()),
-            labels: if specific.map_or(false, |s| !s.labels.is_empty()) {
-                specific.unwrap().labels.clone()
-            } else if !fallback.labels.is_empty() {
-                fallback.labels.clone()
-            } else {
-                Vec::new()
-            },
-        }
-    }
-
     /// Backward-compat: returns the "default" creation defaults
     /// (first kind-specific if there's exactly one, else fallback).
     pub fn creation_defaults(&self) -> CreationDefaults {
