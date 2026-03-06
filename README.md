@@ -2,6 +2,36 @@
 
 A local-first, CLI-driven issue tracker. Runes stores issues as markdown files with KDL frontmatter, backed by version control. No server, no web UI — just files, your editor, and your VCS.
 
+A rune is just a file in a repo: `myapp/a3x--add-soft-deletes-to-billing.md`
+
+```markdown
+---
+task "myapp-a3x" {
+  status "in-progress"
+  assignee "anthony"
+  labels "api" "billing"
+  dep "myapp-q7m"
+}
+---
+
+# Add soft deletes to the billing models
+
+## Summary
+
+Hard-deleting subscriptions and invoices breaks audit trails and makes
+support debugging impossible after cancellation. Add a deleted_at
+timestamp and filter them from default queries so the app behaves the
+same but the data survives.
+
+## Acceptance
+
+- [ ] Deleted records excluded from all default query scopes
+- [ ] Admin API can still retrieve soft-deleted records
+- [ ] Existing DELETE endpoints set deleted_at instead of removing rows
+```
+
+That's the entire issue — metadata, context, and acceptance criteria in one portable, version-controlled, greppable file. No database, no API, no sync lag.
+
 ## Install
 
 ```bash
