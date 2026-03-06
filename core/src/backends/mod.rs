@@ -9,8 +9,9 @@ mod jujutsu;
 mod pijul;
 
 use jujutsu::{
-    jj_sdk_commit_paths, jj_sdk_file_change_ids, jj_sdk_file_log, jj_sdk_log, jj_sdk_show_change,
-    jj_sdk_status, jj_sdk_sync, probe_jj_workspace,
+    jj_sdk_commit_paths, jj_sdk_file_change_ids, jj_sdk_file_log,
+    jj_sdk_has_uncommitted_changes, jj_sdk_log, jj_sdk_show_change, jj_sdk_status, jj_sdk_sync,
+    probe_jj_workspace,
 };
 use pijul::{
     pijul_sdk_commit_paths, pijul_sdk_file_change_ids, pijul_sdk_file_log, pijul_sdk_log,
@@ -23,6 +24,7 @@ pub trait BackendAdapter {
     fn init_store(&self, path: &Path) -> Result<()>;
     fn commit_paths(&self, store: &Store, paths: &[PathBuf], message: &str) -> Result<()>;
     fn remove_path(&self, store: &Store, path: &Path) -> Result<()>;
+    fn has_uncommitted_changes(&self, store: &Store) -> Result<bool>;
     fn status(&self, store: &Store) -> Result<String>;
     fn log(&self, store: &Store, limit: usize) -> Result<String>;
     fn file_log(&self, store: &Store, rel_path: &Path, limit: usize) -> Result<String>;
@@ -134,6 +136,17 @@ impl BackendAdapter for CliBackend {
             return Ok(());
         }
         pijul_sdk_remove_path(store, path)
+    }
+
+    fn has_uncommitted_changes(&self, store: &Store) -> Result<bool> {
+        match self.kind {
+            BackendKind::Jj => jj_sdk_has_uncommitted_changes(store),
+            BackendKind::Pijul => {
+                // Parse status output for dirty state
+                let status = pijul_sdk_status(store)?;
+                Ok(!status.contains("working_copy=clean"))
+            }
+        }
     }
 
     fn status(&self, store: &Store) -> Result<String> {
@@ -253,6 +266,10 @@ pub fn file_change_ids(store: &Store, rel_path: &Path, limit: usize) -> Result<V
 
 pub fn show_change(store: &Store, change_id: &str, rel_path: &Path) -> Result<String> {
     adapter_for(store).show_change(store, change_id, rel_path)
+}
+
+pub fn has_uncommitted_changes(store: &Store) -> Result<bool> {
+    adapter_for(store).has_uncommitted_changes(store)
 }
 
 pub fn sync(store: &Store) -> Result<()> {

@@ -6,7 +6,7 @@ use runes_core::backend;
 use runes_core::cache;
 use runes_core::config::{ensure_dir, BackendKind, Config, Store};
 use runes_core::model::{
-    discover_project_docs, new_issue_doc, new_milestone_doc, next_short_id, parse_doc,
+    discover_project_docs, ensure_title, new_issue_doc, new_milestone_doc, next_short_id, parse_doc,
     parse_full_id, render_doc, replace_title, resolve_issue_path, slugify, RuneDoc,
 };
 use runes_core::{Error, Result};
@@ -179,6 +179,9 @@ struct NewArgs {
     /// Skip auto-commit after creation
     #[arg(long = "no-commit")]
     no_commit: bool,
+    /// Commit message (implies commit)
+    #[arg(short = 'm', long = "message")]
+    message: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -255,12 +258,18 @@ struct EditArgs {
     /// Skip auto-commit after edit
     #[arg(long = "no-commit")]
     no_commit: bool,
+    /// Commit message (implies commit)
+    #[arg(short = 'm', long = "message")]
+    message: Option<String>,
 }
 
 #[derive(Debug, Parser)]
 struct CommitArgs {
     /// Store or store:project to commit (defaults to all pending)
     target: Option<String>,
+    /// Commit message
+    #[arg(short = 'm', long = "message")]
+    message: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -273,12 +282,24 @@ struct MoveArgs {
     /// New parent rune ID in the destination project
     #[arg(long)]
     parent: Option<String>,
+    /// Skip auto-commit after move
+    #[arg(long = "no-commit")]
+    no_commit: bool,
+    /// Commit message (implies commit)
+    #[arg(short = 'm', long = "message")]
+    message: Option<String>,
 }
 
 #[derive(Debug, Parser)]
 struct ArchiveArgs {
     /// Rune doc ID to archive
     id: String,
+    /// Skip auto-commit after archive
+    #[arg(long = "no-commit")]
+    no_commit: bool,
+    /// Commit message (implies commit)
+    #[arg(short = 'm', long = "message")]
+    message: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -288,6 +309,12 @@ struct DeleteArgs {
     /// Skip confirmation prompt
     #[arg(long)]
     force: bool,
+    /// Skip auto-commit after delete
+    #[arg(long = "no-commit")]
+    no_commit: bool,
+    /// Commit message (implies commit)
+    #[arg(short = 'm', long = "message")]
+    message: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -607,18 +634,71 @@ fn id_exists(project_root: &Path, id: &str) -> Result<bool> {
     Ok(false)
 }
 
-fn commit_paths(store: &Store, paths: &[PathBuf], message: &str) -> Result<()> {
-    let mut rels = Vec::new();
-    for path in paths {
-        let rel = path
-            .strip_prefix(&store.path)
-            .map_err(|e| Error::new(e.to_string()))?
-            .to_path_buf();
-        rels.push(rel);
-    }
-    backend::commit_paths(store, &rels, message)?;
+fn commit_store_changes(store: &Store, message: &str) -> Result<()> {
+    backend::commit_paths(store, &[], message)?;
     cache::rebuild_cache(store)?;
     Ok(())
+}
+
+fn auto_commit_message(ids: &[String], verb: &str) -> String {
+    let first_line = match ids.len() {
+        0 => format!("{verb} runes"),
+        1 => format!("{verb} {}", ids[0]),
+        2 | 3 => format!("{verb} {}", ids.join(", ")),
+        n => format!("{verb} {n} runes"),
+    };
+    if ids.len() > 1 {
+        let mut msg = first_line;
+        msg.push('\n');
+        for id in ids {
+            msg.push_str(&format!("\n- {verb} {id}"));
+        }
+        msg
+    } else {
+        first_line
+    }
+}
+
+fn reconcile_filename(path: &Path, full_id: &str) -> Result<PathBuf> {
+    let doc = parse_doc(path)?;
+    let parsed = parse_full_id(full_id)?;
+    let expected_name = format!("{}--{}.md", parsed.short, slugify(&doc.title));
+    let current_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    if current_name == "_milestone.md" || current_name == expected_name {
+        return Ok(path.to_path_buf());
+    }
+    let new_path = path
+        .parent()
+        .ok_or_else(|| Error::new("Invalid issue path"))?
+        .join(&expected_name);
+    fs::rename(path, &new_path)?;
+    Ok(new_path)
+}
+
+fn maybe_commit(
+    store: &Store,
+    no_commit: bool,
+    message: Option<&str>,
+    ids: &[String],
+    verb: &str,
+) -> Result<()> {
+    if no_commit && message.is_none() {
+        eprintln!("hint: uncommitted changes pending. Will be included in next commit or `runes commit`.");
+        return Ok(());
+    }
+    let msg = message
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| auto_commit_message(ids, verb));
+    commit_store_changes(store, &msg)
+}
+
+fn warn_if_uncommitted(store: &Store) {
+    if let Ok(true) = backend::has_uncommitted_changes(store) {
+        eprintln!("hint: store has uncommitted changes. Run `runes commit` to commit them.");
+    }
 }
 
 fn stdin_is_tty() -> bool {
@@ -651,14 +731,6 @@ fn read_from_stdin() -> Result<String> {
     Ok(buffer)
 }
 
-fn print_uncommitted_hint(store: &Store, id: &str, path: &Path) {
-    println!(
-        "Changes for {id} are staged at {path}. Run `runes commit {store_name}:{id}` when ready.",
-        id = id,
-        path = path.display(),
-        store_name = store.name
-    );
-}
 fn create_issue(
     store: &Store,
     project: &str,
@@ -750,6 +822,7 @@ fn run_new(args: NewArgs) -> Result<()> {
         file,
         edit,
         no_commit,
+        message,
     } = args;
     let relation_inputs = relations;
     let (cfg, user_cfg, cwd) = load_context()?;
@@ -822,15 +895,20 @@ fn run_new(args: NewArgs) -> Result<()> {
         };
         let mut doc = parse_doc(&doc_path)?;
         doc.body = contents;
+        let (body, effective_title) = ensure_title(&doc.body, &title);
+        doc.body = body;
+        doc.title = effective_title;
         fs::write(&doc_path, render_doc(&doc))?;
     } else if edit {
         open_editor(&doc_path)?;
+        let mut doc = parse_doc(&doc_path)?;
+        let (body, effective_title) = ensure_title(&doc.body, &title);
+        doc.body = body;
+        doc.title = effective_title;
+        fs::write(&doc_path, render_doc(&doc))?;
     }
-    if !no_commit {
-        commit_paths(&store, &[doc_path.clone()], &format!("Add {identifier}"))?;
-    } else {
-        print_uncommitted_hint(&store, &identifier, &doc_path);
-    }
+    let _final_path = reconcile_filename(&doc_path, &identifier)?;
+    maybe_commit(&store, no_commit, message.as_deref(), &[identifier.clone()], "Add")?;
     println!("{identifier}");
     Ok(())
 }
@@ -1030,7 +1108,7 @@ fn run_list(args: ListArgs) -> Result<()> {
     }
     filters.archived = archived_mode;
     filters.kind = Some(list_kind.kind_name().to_string());
-    match list_kind {
+    let result = match list_kind {
         ListKind::Issues => {
             let output = query_issues(&store, filters)?;
             print!("{output}");
@@ -1056,7 +1134,9 @@ fn run_list(args: ListArgs) -> Result<()> {
             }
             Ok(())
         }
-    }
+    };
+    warn_if_uncommitted(&store);
+    result
 }
 fn all_projects(store: &Store) -> Result<Vec<String>> {
     let mut projects = Vec::new();
@@ -1169,7 +1249,9 @@ fn run_show(args: ShowArgs) -> Result<()> {
     let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &args.id)?;
     let path = locate_doc(&store, &id)?;
     let doc = parse_doc(&path)?;
-    print_doc_summary(&path, &doc)
+    let result = print_doc_summary(&path, &doc);
+    warn_if_uncommitted(&store);
+    result
 }
 
 fn print_doc_summary(path: &Path, doc: &RuneDoc) -> Result<()> {
@@ -1250,12 +1332,13 @@ fn run_edit(args: EditArgs) -> Result<()> {
         file,
         edit,
         no_commit,
+        message,
     } = args;
     let (cfg, user_cfg, cwd) = load_context()?;
     let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id)?;
     let path = locate_doc(&store, &id)?;
     let mut doc = parse_doc(&path)?;
-    let mut final_path = path.clone();
+    let original_title = doc.title.clone();
     let has_field_edits = title.is_some()
         || status.is_some()
         || assignee.is_some()
@@ -1314,42 +1397,38 @@ fn run_edit(args: EditArgs) -> Result<()> {
                 existing_kind != &kind || existing_id != &target
             });
         }
-        if let Some(title_value) = title {
-            doc.title = title_value.clone();
-            doc.body = replace_title(&doc.body, &title_value);
-            let parsed = parse_full_id(&doc.id)?;
-            let new_name = format!("{}--{}.md", parsed.short, slugify(&title_value));
-            final_path = path
-                .parent()
-                .ok_or_else(|| Error::new("Invalid issue path"))?
-                .join(new_name);
+        if let Some(title_value) = &title {
+            if title_value.is_empty() {
+                // Empty --title means keep the original title
+            } else {
+                doc.title = title_value.clone();
+                doc.body = replace_title(&doc.body, title_value);
+            }
         }
         fs::write(&path, render_doc(&doc))?;
-        if final_path != path {
-            fs::rename(&path, &final_path)?;
-        }
     } else if let Some(file_path) = file {
         let contents = if file_path == Path::new("-") {
             read_from_stdin()?
         } else {
             fs::read_to_string(&file_path)?
         };
-        fs::write(&path, contents)?;
-        doc = parse_doc(&path)?;
-        final_path = path.clone();
+        doc.body = contents;
+        let (body, effective_title) = ensure_title(&doc.body, &original_title);
+        doc.body = body;
+        doc.title = effective_title;
+        fs::write(&path, render_doc(&doc))?;
     } else if edit || editor_available() {
         open_editor(&path)?;
         doc = parse_doc(&path)?;
-        final_path = path.clone();
+        let (body, effective_title) = ensure_title(&doc.body, &original_title);
+        doc.body = body;
+        doc.title = effective_title;
+        fs::write(&path, render_doc(&doc))?;
     } else {
         return Err(Error::new("No edits specified and no editor available"));
     }
-    let commit_message = format!("Update {}", doc.id);
-    if !no_commit {
-        commit_paths(&store, &[final_path.clone()], &commit_message)?;
-    } else {
-        print_uncommitted_hint(&store, &doc.id, &final_path);
-    }
+    let _final_path = reconcile_filename(&path, &doc.id)?;
+    maybe_commit(&store, no_commit, message.as_deref(), &[doc.id.clone()], "Update")?;
     Ok(())
 }
 
@@ -1357,54 +1436,43 @@ fn store_exists(config: &Config, name: &str) -> bool {
     config.stores.iter().any(|store| store.name == name)
 }
 
-fn commit_store(store: &Store) -> Result<()> {
-    let message = format!("Record staged changes in {}", store.name);
-    commit_paths(store, &[], &message)?;
-    println!("Committed staged changes in {}", store.name);
-    Ok(())
-}
-
-fn commit_rune(store: &Store, id_spec: &str) -> Result<()> {
-    let path = locate_doc(store, id_spec)?;
-    let doc = parse_doc(&path)?;
-    let message = format!("Record {}", doc.id);
-    commit_paths(store, &[path.clone()], &message)?;
-    println!("Committed {}", doc.id);
-    Ok(())
-}
-
 fn run_commit(args: CommitArgs) -> Result<()> {
-    let target = args.target;
+    let CommitArgs { target, message } = args;
     let (cfg, user_cfg, cwd) = load_context()?;
-    match target {
+    let (store, scope_label) = match &target {
         Some(spec) if spec.contains(':') || spec.contains('/') => {
-            let (store_hint, id_part) = split_store_prefix(&spec);
+            let (store_hint, id_part) = split_store_prefix(spec);
             if let Some(store_name) = store_hint.as_deref() {
                 if store_name.is_empty() {
                     return Err(Error::new("Store name may not be empty"));
                 }
             }
-            let store = resolve_store_with_context(&cfg, &user_cfg, &cwd, store_hint.as_deref())?;
-            if id_part.is_empty() {
-                commit_store(&store)?;
+            let s = resolve_store_with_context(&cfg, &user_cfg, &cwd, store_hint.as_deref())?;
+            let label = if id_part.is_empty() {
+                s.name.clone()
             } else {
-                commit_rune(&store, id_part)?;
-            }
+                id_part.to_string()
+            };
+            (s, label)
+        }
+        Some(spec) if store_exists(&cfg, spec) => {
+            let s = resolve_store_with_context(&cfg, &user_cfg, &cwd, Some(spec))?;
+            let label = s.name.clone();
+            (s, label)
         }
         Some(spec) => {
-            if store_exists(&cfg, &spec) {
-                let store = resolve_store_with_context(&cfg, &user_cfg, &cwd, Some(&spec))?;
-                commit_store(&store)?;
-            } else {
-                let store = resolve_store_with_context(&cfg, &user_cfg, &cwd, None)?;
-                commit_rune(&store, &spec)?;
-            }
+            let s = resolve_store_with_context(&cfg, &user_cfg, &cwd, None)?;
+            (s, spec.clone())
         }
         None => {
-            let store = resolve_store_with_context(&cfg, &user_cfg, &cwd, None)?;
-            commit_store(&store)?;
+            let s = resolve_store_with_context(&cfg, &user_cfg, &cwd, None)?;
+            let label = s.name.clone();
+            (s, label)
         }
-    }
+    };
+    let msg = message.unwrap_or_else(|| format!("Record changes for {scope_label}"));
+    commit_store_changes(&store, &msg)?;
+    println!("Committed changes in {}", store.name);
     Ok(())
 }
 fn find_container_dir(project_root: &Path, full_id: &str) -> Result<PathBuf> {
@@ -1459,44 +1527,20 @@ fn move_rune(
         target_doc.id = format!("{to_project}-{}", parsed.short);
     }
 
-    if from_store.name == to_store.name {
-        fs::write(&target_path, render_doc(&target_doc))?;
-        if source_path != target_path {
+    fs::write(&target_path, render_doc(&target_doc))?;
+    if source_path != target_path {
+        if from_store.name == to_store.name {
+            fs::remove_file(&source_path)?;
+        } else {
+            let from_rel = source_path
+                .strip_prefix(&from_store.path)
+                .map_err(|e| Error::new(e.to_string()))?
+                .to_path_buf();
+            backend::remove_path(from_store, &from_rel)?;
             fs::remove_file(&source_path)?;
         }
-        commit_paths(
-            from_store,
-            &[target_path.clone()],
-            &format!("Move {} within {}", target_doc.id, from_store.name),
-        )?;
-        println!("Moved {}", target_doc.id);
-        return Ok(());
     }
-
-    fs::write(&target_path, render_doc(&target_doc))?;
-    commit_paths(
-        to_store,
-        &[target_path.clone()],
-        &format!("Move in {}", target_doc.id),
-    )?;
-    let from_rel = source_path
-        .strip_prefix(&from_store.path)
-        .map_err(|e| Error::new(e.to_string()))?
-        .to_path_buf();
-    backend::remove_path(from_store, &from_rel)?;
-    fs::remove_file(&source_path)?;
-    if let Err(err) = backend::commit_paths(from_store, &[], &format!("Move out {}", source_doc.id))
-    {
-        fs::write(&source_path, render_doc(&source_doc))?;
-        return Err(Error::new(format!(
-            "Move-in committed to target, but source commit failed: {err}"
-        )));
-    }
-    cache::rebuild_cache(from_store)?;
-    println!(
-        "Moved {} from {} to {}",
-        parsed.full, from_store.name, to_store.name
-    );
+    println!("Moved {}", target_doc.id);
     Ok(())
 }
 fn run_move(args: MoveArgs) -> Result<()> {
@@ -1504,18 +1548,36 @@ fn run_move(args: MoveArgs) -> Result<()> {
         id,
         target_project,
         parent,
+        no_commit,
+        message,
     } = args;
     let (cfg, user_cfg, cwd) = load_context()?;
     let (from_store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id)?;
     let (to_store, project) =
         resolve_store_and_project_required(&cfg, &user_cfg, &cwd, None, &target_project)?;
-    move_rune(&from_store, &to_store, &id, &project, parent.as_deref())
+    move_rune(&from_store, &to_store, &id, &project, parent.as_deref())?;
+    if from_store.name == to_store.name {
+        maybe_commit(&from_store, no_commit, message.as_deref(), &[id.clone()], "Move")?;
+    } else {
+        maybe_commit(&to_store, no_commit, message.as_deref(), &[id.clone()], "Move in")?;
+        // Commit the removal from the source store
+        if !no_commit || message.is_some() {
+            let from_msg = message
+                .as_deref()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("Move out {id}"));
+            commit_store_changes(&from_store, &from_msg)?;
+        }
+    }
+    Ok(())
 }
 fn run_archive(args: ArchiveArgs) -> Result<()> {
-    let ArchiveArgs { id } = args;
+    let ArchiveArgs { id, no_commit, message } = args;
     let (cfg, user_cfg, cwd) = load_context()?;
     let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id)?;
-    archive_rune(&store, &id)
+    archive_rune(&store, &id)?;
+    maybe_commit(&store, no_commit, message.as_deref(), &[id], "Archive")?;
+    Ok(())
 }
 
 fn archive_rune(store: &Store, id: &str) -> Result<()> {
@@ -1548,17 +1610,18 @@ fn archive_rune(store: &Store, id: &str) -> Result<()> {
     } else {
         fs::rename(&source_path, &target_path)?;
     }
-    commit_paths(store, &[target_path], &format!("Archive {}", doc.id))?;
     Ok(())
 }
 fn run_delete(args: DeleteArgs) -> Result<()> {
-    let DeleteArgs { id, force } = args;
+    let DeleteArgs { id, force, no_commit, message } = args;
     if !force {
         return Err(Error::new("Use --force to delete runes"));
     }
     let (cfg, user_cfg, cwd) = load_context()?;
     let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id)?;
-    delete_rune(&store, &id)
+    delete_rune(&store, &id)?;
+    maybe_commit(&store, no_commit, message.as_deref(), &[id], "Delete")?;
+    Ok(())
 }
 
 fn delete_rune(store: &Store, id: &str) -> Result<()> {
@@ -1577,7 +1640,6 @@ fn delete_rune(store: &Store, id: &str) -> Result<()> {
         .map_err(|e| Error::new(e.to_string()))?
         .to_path_buf();
     backend::remove_path(store, &rel_path)?;
-    backend::commit_paths(store, &[], &format!("Delete {}", doc.id))?;
     println!("Deleted {}", doc.id);
     Ok(())
 }

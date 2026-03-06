@@ -38,6 +38,32 @@ pub(super) fn probe_jj_workspace(store: &Store) -> Result<(PathBuf, PathBuf)> {
     ))
 }
 
+pub(super) fn jj_sdk_has_uncommitted_changes(store: &Store) -> Result<bool> {
+    let config = StackedConfig::with_defaults();
+    let settings = UserSettings::from_config(config).map_err(|e| Error::new(e.to_string()))?;
+    let store_factories = StoreFactories::default();
+    let wc_factories = default_working_copy_factories();
+    let workspace = Workspace::load(&settings, &store.path, &store_factories, &wc_factories)
+        .map_err(|e| Error::new(format!("jj-lib workspace load failed: {e}")))?;
+    let repo = workspace
+        .repo_loader()
+        .load_at_head()
+        .map_err(|e| Error::new(format!("jj-lib repo load failed: {e}")))?;
+    if let Some(wc_commit_id) = repo.view().get_wc_commit_id(workspace.workspace_name()) {
+        let commit = repo
+            .store()
+            .get_commit(wc_commit_id)
+            .map_err(|e| Error::new(format!("jj-lib wc commit load failed: {e}")))?;
+        let wc_tree = workspace
+            .working_copy()
+            .tree()
+            .map_err(|e| Error::new(format!("jj-lib working copy state failed: {e}")))?;
+        Ok(wc_tree.tree_ids_and_labels() != commit.tree().tree_ids_and_labels())
+    } else {
+        Ok(false)
+    }
+}
+
 pub(super) fn jj_sdk_status(store: &Store) -> Result<String> {
     let config = StackedConfig::with_defaults();
     let settings = UserSettings::from_config(config).map_err(|e| Error::new(e.to_string()))?;

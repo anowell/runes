@@ -387,6 +387,31 @@ pub fn replace_title(body: &str, title: &str) -> String {
     joined
 }
 
+/// Extract the title from the body's first H1 line, if any.
+pub fn extract_body_title(body: &str) -> Option<String> {
+    for line in body.lines() {
+        if let Some(rest) = line.strip_prefix("# ") {
+            let trimmed = rest.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Ensure the body has an H1 title line. If missing, reinsert the given title.
+/// Returns the (possibly updated) body and the effective title.
+pub fn ensure_title(body: &str, original_title: &str) -> (String, String) {
+    match extract_body_title(body) {
+        Some(new_title) => (body.to_string(), new_title),
+        None => {
+            let restored = replace_title(body, original_title);
+            (restored, original_title.to_string())
+        }
+    }
+}
+
 pub fn discover_project_docs(project_root: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     walk_markdown(project_root, &mut out)?;
@@ -551,5 +576,97 @@ Body
         assert!(rendered.contains("relations {"));
         assert!(rendered.contains("dep \"runes-rf2\""));
         assert!(rendered.contains("notes \"quarantine\""));
+    }
+
+    #[test]
+    fn extract_body_title_from_h1() {
+        assert_eq!(
+            extract_body_title("# My Title\n\nBody text"),
+            Some("My Title".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_body_title_none_when_missing() {
+        assert_eq!(extract_body_title("No heading here\nJust body"), None);
+    }
+
+    #[test]
+    fn extract_body_title_none_when_empty_h1() {
+        assert_eq!(extract_body_title("# \n\nBody text"), None);
+    }
+
+    #[test]
+    fn extract_body_title_uses_first_h1() {
+        assert_eq!(
+            extract_body_title("## Not this\n# First\n# Second"),
+            Some("First".to_string())
+        );
+    }
+
+    #[test]
+    fn ensure_title_preserves_changed_title() {
+        let body = "# New Title\n\nBody text\n";
+        let (result_body, title) = ensure_title(body, "Old Title");
+        assert_eq!(title, "New Title");
+        assert!(result_body.contains("# New Title"));
+        assert!(!result_body.contains("Old Title"));
+    }
+
+    #[test]
+    fn ensure_title_restores_deleted_title() {
+        let body = "Body text without heading\n";
+        let (result_body, title) = ensure_title(body, "Original Title");
+        assert_eq!(title, "Original Title");
+        assert!(result_body.starts_with("# Original Title\n"));
+        assert!(result_body.contains("Body text without heading"));
+    }
+
+    #[test]
+    fn ensure_title_restores_when_h1_emptied() {
+        let body = "# \n\nBody text\n";
+        let (result_body, title) = ensure_title(body, "Original Title");
+        assert_eq!(title, "Original Title");
+        assert!(result_body.contains("# Original Title"));
+    }
+
+    #[test]
+    fn replace_title_changes_existing_h1() {
+        let body = "# Old Title\n\nBody\n";
+        let result = replace_title(body, "New Title");
+        assert!(result.contains("# New Title"));
+        assert!(!result.contains("Old Title"));
+        assert!(result.contains("Body"));
+    }
+
+    #[test]
+    fn replace_title_inserts_h1_when_missing() {
+        let body = "Body without heading\n";
+        let result = replace_title(body, "Inserted Title");
+        assert!(result.starts_with("# Inserted Title\n"));
+        assert!(result.contains("Body without heading"));
+    }
+
+    #[test]
+    fn title_roundtrip_through_parse_and_render() {
+        let contents = "---\ntask \"proj-abc\" {\n  status \"todo\"\n}\n---\n\n# My Task\n\n## Summary\n";
+        let path = write_temp_doc(contents);
+        let doc = parse_doc(&path).expect("parse");
+        assert_eq!(doc.title, "My Task");
+        let rendered = render_doc(&doc);
+        let path2 = write_temp_doc(&rendered);
+        let doc2 = parse_doc(&path2).expect("re-parse");
+        assert_eq!(doc2.title, "My Task");
+        fs::remove_file(&path).unwrap();
+        fs::remove_file(&path2).unwrap();
+    }
+
+    #[test]
+    fn title_falls_back_to_id_when_no_h1() {
+        let contents = "---\ntask \"proj-abc\" {\n  status \"todo\"\n}\n---\n\nBody only\n";
+        let path = write_temp_doc(contents);
+        let doc = parse_doc(&path).expect("parse");
+        assert_eq!(doc.title, "proj-abc");
+        fs::remove_file(&path).unwrap();
     }
 }
