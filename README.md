@@ -1,60 +1,169 @@
 # Runes
 
-Runes is a CLI-first, markdown-first, VCS-backed work management system.
+A local-first, CLI-driven issue tracker. Runes stores issues as markdown files with KDL frontmatter, backed by version control. No server, no web UI — just files, your editor, and your VCS.
 
-- Canonical records are markdown files with KDL frontmatter.
-- SQLite is a rebuildable query cache, never source of truth.
-- Cache files are stored at `~/.runes/cache/<store>.sqlite`.
-- Store refs use `<store>:<project-id>` (example: `proj:runes-cx3`).
-
-See:
-
-- `docs/framing.md`
-- `docs/schema.md`
-- `docs/milestones.md`
-- `docs/backend-sdk-plan.md`
-
-## Build
+## Install
 
 ```bash
-cargo build
+cargo install --git https://github.com/anowell/runes runes
 ```
 
-## Test
+## Getting Started
+
+Initialize runes (first run creates a global config and default store):
 
 ```bash
-cargo test
+runes init --stealth
 ```
 
-- Integration coverage lives in `cli/tests/workflows.rs` and validates:
-- `jj` issue lifecycle (create/edit/list/log).
-- milestone hierarchy/progress behavior.
-- `pijul` issue lifecycle plus SDK-backed backend observability commands.
-- `pijul` cross-store move behavior (source removal + target add).
+The `--stealth` flag keeps `runes.kdl` out of your repo's tracked files by adding it to `.git/info/exclude`.
 
-## CLI
+Create your first rune:
 
 ```bash
-cargo run -p runes -- store list
+runes new "My first issue"
 ```
 
-- Core commands:
+That's it. A markdown file is created, committed to your store, and you get back an ID like `myproject-a3x`.
 
-- `store init`, `store list`, `store info`, `store remove`, `store doctor`
-- `project create`
-- `issue new`, `issue new-milestone`, `issue show`, `issue list`, `issue edit`, `issue move`
-- `issue archive`, `issue log --section`
-- `issue check`, `milestone progress`
-- `list` (`runes list --project <store:project> [--type <issues|milestones>] [--status <status>]`)
-- `backend status`, `backend adapter`, `backend capabilities`, `backend log`, `backend sync`
+Want to write a description right away? Open it in your editor:
 
-`store doctor <store>` rebuilds the sqlite query cache and can be used anytime you suspect the index needs refreshing.
+```bash
+runes new "My first issue" -e
+```
 
-`runes new` now accepts `--project <store:project>` and, when omitted, follows the default project inference described in `docs/configuration.md`.
+Or pipe content in:
 
-Use `just cli ...` for quick exploration; `just cli --help` now prints the same usage as `runes --help`.
+```bash
+echo "Some details" | runes new "My first issue" -f -
+```
 
-## Current Bootstrap State
+List your runes:
 
-- `~/.runes/workspaces/proj` is configured as a `pijul` store.
-- `~/.runes/workspaces/how` is configured as a `jj` colocated store.
+```bash
+runes list
+```
+
+## Usage Guide
+
+### Creating and editing runes
+
+```bash
+# Create an issue
+runes new "Fix the login bug"
+
+# Create and open in $EDITOR
+runes new "Design the API" -e
+
+# Create with metadata
+runes new "Refactor auth" --status in-progress --label backend --assignee self
+
+# Create a milestone
+runes new "v1 Release" --type milestone
+
+# Edit metadata
+runes edit myproject-a3x --status done
+runes edit myproject-a3x --label urgent --assignee alice
+
+# Edit body in $EDITOR
+runes edit myproject-a3x -e
+
+# Replace body from file or stdin
+runes edit myproject-a3x -f notes.md
+cat updated.md | runes edit myproject-a3x -f -
+```
+
+### Browsing and filtering
+
+```bash
+# List all runes (uses default query if configured)
+runes list
+
+# Filter by status, assignee, type
+runes list --status todo --assignee self
+runes list --type milestones
+
+# Use a saved query
+runes list mine
+
+# Show a specific rune
+runes show myproject-a3x
+
+# View change history
+runes log myproject-a3x
+```
+
+### Other operations
+
+```bash
+# Move a rune to another project
+runes move myproject-a3x --project otherproject
+
+# Archive a rune
+runes archive myproject-a3x
+
+# Sync store with remote
+runes sync
+```
+
+### Configuration
+
+Runes uses KDL config files (`runes.kdl`) at two levels:
+
+- **Global** (`~/.runes/config.kdl`) — user identity, stores, default queries
+- **Local** (per-repo `runes.kdl`) — project defaults, path bindings
+
+`runes init` creates both. The local config sets `defaults.project` so commands like `runes new` know which project to target.
+
+Read and write config values with `runes config`:
+
+```bash
+runes config get defaults.project
+runes config set new.task.assignee self
+runes config list
+runes config list --global
+```
+
+See [docs/configuration.md](docs/configuration.md) for the full configuration reference.
+
+### Stores
+
+A store is a VCS-backed repository that holds your runes. Runes supports `jj` (Jujutsu) and `pijul` backends.
+
+```bash
+# List configured stores
+runes store list
+
+# Add a new store
+runes store init mystore --backend jj
+
+# Rebuild the query cache
+runes store doctor mystore
+```
+
+## Document Format
+
+Rune docs are markdown files with KDL frontmatter:
+
+```markdown
+---
+task "myproject-a3x" {
+  status "todo"
+  assignee "alice"
+  labels "backend" "urgent"
+  dep "myproject-b2f"
+}
+---
+
+# Fix the login bug
+
+## Summary
+
+The login page throws a 500 when...
+```
+
+Files are named `<id>--<slug>.md` (e.g. `a3x--fix-the-login-bug.md`). The ID is canonical; the slug is for readability and updates automatically on title changes.
+
+## License
+
+MIT

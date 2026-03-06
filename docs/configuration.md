@@ -1,65 +1,136 @@
-# Configuration
+# Configuration Reference
 
-Runes is configured with **KDL** documents named `runes.kdl`. The loader searches in the current directory, then walks ancestors up to `~`, and finally checks `~/.runes/config.kdl`. Each document can add or override fields.
+Runes uses KDL config files named `runes.kdl`. Configuration is loaded by searching the current directory, then walking ancestors up to `~`, and finally checking `~/.runes/config.kdl`. Values from closer files override those from further ones.
 
-A sample configuration:
+`runes init` creates both global and local configs interactively.
+
+## Reading and writing config
+
+```bash
+runes config list              # show effective local config
+runes config list --global     # show global config
+runes config get <key>         # read a value
+runes config set <key> <value> # write a value (to local config)
+runes config set <key> <value> --global  # write to global config
+runes config unset <key>       # remove a value
+```
+
+## Global config (`~/.runes/config.kdl`)
+
+Created by `runes init` on first run. Typical contents:
 
 ```kdl
-identity {
-  user "anthony"
-  default_store "work"
+user {
+  email "you@example.com"
 }
 
-creation {
-  type "task"
+defaults {
+  store "proj"
+  query "open"
+}
+
+store "proj" {
+  backend "jj"
+  path "/Users/you/.runes/workspaces/proj"
+}
+
+new {
+  task {
+    assignee "self"
+  }
+}
+
+query "open" {
+  status "todo"
+}
+
+query "mine" {
   assignee "self"
-  labels
-}
-
-default_query "mine"
-
-queries.mine {
-  assignee "self"
-  status "todo" "in-progress"
-}
-
-queries.open {
-  status "todo" "in-progress"
-}
-
-tools {
-  # placeholder for future CLI/tool integration flags
+  status "todo"
 }
 ```
 
-## Blocks
+## Local config (per-repo `runes.kdl`)
 
-- `identity`: optional defaults such as `user` (string) and `default_store` (string).
-- `creation`: defaults applied during `runes new` (`type`, `status`, `assignee`, and repeatable `labels`).
-- `default_query`: name of a saved query (see below) applied when `runes list`/`runes show` are invoked without filters.
-- `default_project`: project (optionally prefixed with `<store>:`) used by `runes new` when no `--project` flag is supplied. See below for the selection order.
-- `queries.<name>`: stores filters for `runes list`. Supported child nodes include `project`, repeatable `status`, `kind`, `archived`, and `assignee` (the latter can be set to `self` to reuse the configured identity user). Values with the same key are OR’ed, while different keys are AND’ed, and explicit flags (`--status`, `--assignee`, `--query`, ...) override the stored set.
-- `path`: optional entries that bind directories to stores or queries (`store` and `query` properties on the node).
+Created by `runes init` when run inside a git/jj/pijul repo. Sets the default project for that directory:
 
-## Store selection
+```kdl
+defaults {
+  project "myproject"
+}
+```
 
-Runes resolves stores in this order:
-1. explicit prefix (`store:id` or `store/project`).
-2. `--store` flag (legacy compatibility).
-3. the nearest `path` entry for the current working directory.
-4. the configured `identity.default_store`.
-5. the global default store from `~/.runes/config.txt`.
+Use `--stealth` with `runes init` to add `runes.kdl` to `.git/info/exclude` so it stays untracked.
 
-## Default project selection for `runes new`
+## Config blocks
 
-`runes new` now accepts `--project <store:project>` but will infer a target project when that flag is omitted. The CLI evaluates the following in order:
+### `user`
 
-1. The `RUNES_PROJECT` environment variable (which can include a `<store>:` prefix).
-2. The nearest `runes.kdl` document's `default_project` value (also accepts `<store>:` syntax).
-3. Whether the basename of the current working directory matches a project in the resolved store.
-4. Whether the repository root's basename (detected by finding `.git`, `.jj`, `.pjul`, or `.pj`) matches a project in the resolved store.
-5. Otherwise the command fails and asks you to pass `--project` or configure one of the defaults above.
+- `email` — your identity for VCS operations
 
-## Queries
+### `defaults`
 
-Queries let you save filter sets for `runes list`. Use `runes list --query mine` or simply `runes list mine` when you want to apply a stored query manually, and the defaults above apply when no overriding flags are supplied. For example, `queries.mine` can automatically focus on issues assigned to you (`assignee "self"` expands to the configured identity user) and restrict results to whatever statuses you list: `status "todo" "in-progress"` is interpreted as `(status == "todo" OR status == "in-progress")`, and combining that with an `assignee` or `project` node adds an `AND`. Explicit flags like `--status` or `--assignee` still override the stored values when you need a different slice of work.
+- `store` — default store when no `--store` flag or store prefix is given
+- `project` — default project for `runes new` when no `--project` flag is given (accepts `store:project` syntax)
+- `query` — named query applied by default to `runes list`
+
+### `store "<name>"`
+
+Defines a named store:
+
+- `backend` — VCS backend: `"jj"` or `"pijul"`
+- `path` — absolute path to the store repository
+
+### `new`
+
+Creation defaults applied during `runes new`:
+
+- `new.task.assignee` — default assignee for tasks (use `"self"` to expand to your configured email)
+- `new.task.status` — default status
+- `new.task.labels` — default labels
+- `new.milestone.status` — default status for milestones
+
+### `query "<name>"`
+
+Saved filter sets for `runes list`. Use with `runes list <name>` or `runes list --query <name>`.
+
+Supported filters:
+
+- `project` — restrict to a project
+- `status` — one or more statuses (multiple values are OR'd)
+- `kind` — doc type (`task`, `milestone`)
+- `assignee` — assignee (use `"self"` to match your configured email)
+- `archived` — boolean, include archived docs
+
+Multiple filters of the same key are OR'd; different keys are AND'd. Explicit CLI flags (`--status`, `--assignee`, etc.) override stored query values.
+
+### `path`
+
+Bind directories to stores or queries:
+
+```kdl
+path "/Users/you/work" {
+  store "work"
+  query "mine"
+}
+```
+
+When your working directory is under a bound path, the associated store and query are used as defaults.
+
+## Store selection order
+
+1. Explicit prefix in the ref (`store:id` or `store:project`)
+2. `--store` flag
+3. Nearest `path` entry matching the current working directory
+4. `defaults.store` from config
+5. The single configured store (if only one exists)
+
+## Project selection for `runes new`
+
+When `--project` is omitted, the CLI checks in order:
+
+1. `RUNES_PROJECT` environment variable (accepts `store:project` syntax)
+2. `defaults.project` from the nearest `runes.kdl`
+3. Whether the current directory name matches a project in the resolved store
+4. Whether the repo root name matches a project in the resolved store
+5. Fails with a prompt to pass `--project` or configure a default

@@ -1,140 +1,134 @@
-# Runes Schema (v0 Draft)
-
-This document defines the pre-bootstrap storage schema for Runes.
+# Runes Schema
 
 ## Core Concepts
 
-- `store`: an independent issue repository (for example `me`, `team`).
-- `project`: a directory inside a store. Creating a directory creates a project.
-- `issue`: a markdown document with KDL frontmatter.
-- `ref`: canonical identifier: `<store>:<project-id>`
-
-Examples:
-
-- `me:runes-cx3`
-- `team:api-102`
+- **Store**: an independent VCS-backed repository (e.g. `proj`, `work`). Backend can be `jj` or `pijul`.
+- **Project**: a directory inside a store. Creating a directory creates a project.
+- **Rune doc**: a markdown file with KDL frontmatter. Can be a task or milestone.
+- **Ref**: canonical identifier using `<store>:<project-id>` syntax (e.g. `proj:runes-cx3`).
 
 ## Store Layout
 
-Each store is an independent VCS repo (backend: `jj` or `pijul`).
-
 ```text
 ~/.runes/workspaces/
-  proj/                                # a store repo (personal, in this bootstrap)
-    runes/                             # project root
-      _archive/                        # optional archive area
-      cx3--lock-schema.md              # issue (id is runes-cx3)
-      m01--principles-schema-bootstrap/
-        _milestone.md                  # container doc
-        cx3--lock-runes-v1.md          # nested issues
-        f4q--bootstrap-cli.md
+  proj/                               # store repo
+    myproject/                        # project directory
+      _archive/                       # archived runes
+      a3x--fix-login-bug.md          # task (id: myproject-a3x)
+      m01--v1-release/                # milestone directory
+        _milestone.md                 # milestone doc (id: myproject-m01)
+        b2f--design-api.md           # child task
 ```
 
-Local cache layout:
+Cache (not canonical, rebuildable):
 
 ```text
 ~/.runes/cache/
   <store>.sqlite
 ```
 
-Cache files are not canonical and should not live inside store repos.
-
 ## File Naming
 
-Issue filename format:
+Task files:
 
 ```text
-<id>--<slug>.md
+<short-id>--<slug>.md
 ```
 
-- `id` is canonical.
-- `slug` is convenience-only for readability/search.
-- CLI should auto-rename slug on title change.
-- CLI must still resolve files if slug is stale or missing.
+- The ID is canonical; the slug is for readability.
+- The CLI auto-renames the slug on title changes.
+- Resolution works even if the slug is stale.
 
-Milestone container format:
+Milestone containers:
 
 ```text
-<id>--<slug>/
+<short-id>--<slug>/
   _milestone.md
 ```
 
-- milestone/epic/feature containers are directories with an underscored control doc.
-- nested issue files under a container are normal issue docs (no underscore).
-- this keeps hierarchy explicit and avoids massive flat directories.
+Child tasks live alongside `_milestone.md` in the milestone directory.
 
 ## ID Generation
 
-Project-unique IDs with configurable strategy:
+IDs are project-scoped: `<project>-<short>` (e.g. `myproject-a3x`).
 
-- default: `<project>-<rand3_base32>` (example `runes-cx3`)
-- configurable:
-  - random: charset + length
-  - sequential: numeric (example `runes-104`)
+Default strategy: 3-character base32 random suffix. Configurable to sequential numeric (e.g. `myproject-104`).
 
 ## Document Format
 
-All documents are markdown files with KDL frontmatter enclosed by `---`.
+All rune docs are markdown with KDL frontmatter in a node block:
 
 ```markdown
 ---
-task "runes-cx3" {
+task "myproject-a3x" {
   status "todo"
-}
-labels "bootstrap" "cli" "core"
-relations {
-  blocks "runes-cx9"
-}
-links {
-  repo "anowell/spice" branch="main"
+  assignee "alice"
+  labels "backend" "urgent"
+  milestone "myproject-m01"
+  relations {
+    blocks "myproject-b2f"
+  }
+  dep "myproject-c1z"
 }
 ---
 
-# Define Runes v1 CLI scope
+# Fix the login bug
 
 ## Summary
-...
+
+Description of the issue...
 
 ## Design
-...
+
+Technical approach...
 
 ## Acceptance
-...
+
+- [ ] Criteria...
 
 ## Comments
-...
+
+Discussion and notes...
 ```
 
-Notes:
+### Frontmatter fields
 
-- `# <title>` is the title source of truth.
-- canonical identity is the `doc id`; path can move and nest freely.
-- temporal/author context should come from VCS history by default.
-- structured metadata belongs in KDL frontmatter.
-- longform context and iterative notes belong in markdown sections.
+The top-level node declares the doc type and ID:
 
-## Hierarchy and Completion Semantics
+- `task "<id>" { ... }` — a task/issue
+- `milestone "<id>" { ... }` — a milestone
 
-- container docs (`_milestone.md`, future `_epic.md`, `_feature.md`) represent parent runes.
-- child rune docs live in the same directory.
-- parent completion can be inferred from child completion state (policy configurable).
-- archive workflows should be directory moves (for example `runes/m01--...` to `runes/_archive/...`).
+Inside the block:
 
-## Section Conventions
+| Field | Required | Description |
+|-------|----------|-------------|
+| `status` | yes | Current status (e.g. `"todo"`, `"in-progress"`, `"done"`) |
+| `assignee` | no | Assigned user |
+| `labels` | no | Space-separated quoted strings |
+| `milestone` | no | Parent milestone ID |
+| `relations` | no | Block of typed relations (e.g. `blocks`, `related`) |
+| `dep` | no | Dependency ID (repeatable) |
 
-Recommended sections for issues:
+### Body conventions
 
+The `# Title` heading is the source of truth for the document title.
+
+Recommended sections for tasks:
 - `## Summary`
 - `## Design`
 - `## Acceptance`
 - `## Comments`
 
 Recommended sections for milestones:
-
 - `## Goal`
 - `## Exit Criteria`
 - `## Scope`
 - `## Risks`
 - `## Tracking`
 
-Future CLI feature: filter file history by heading-scoped edits (for example `--section Design`).
+## Hierarchy
+
+- Milestone containers are directories with a `_milestone.md` control doc.
+- Child rune docs live in the same directory.
+- Parent completion can be inferred from child status (policy configurable).
+- Archive moves the directory to `<project>/_archive/`.
