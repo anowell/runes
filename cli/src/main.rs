@@ -1,3 +1,4 @@
+mod color;
 mod user_config;
 use atty::Stream;
 use clap::{Parser, Subcommand};
@@ -612,7 +613,7 @@ fn sql_escape(val: &str) -> String {
     val.replace('\'', "''")
 }
 
-fn query_issues(store: &Store, filters: IssueFilters) -> Result<String> {
+fn query_issues(store: &Store, filters: IssueFilters) -> Result<Vec<cache::CacheRow>> {
     let mut where_parts = vec!["1=1".to_string()];
     if let Some(project) = filters.project {
         where_parts.push(format!("project='{}'", sql_escape(&project)));
@@ -1269,8 +1270,8 @@ fn run_list(args: ListArgs) -> Result<()> {
     filters.kind = Some(list_kind.kind_name().to_string());
     let result = match list_kind {
         ListKind::Issues => {
-            let output = query_issues(&store, filters)?;
-            print!("{output}");
+            let rows = query_issues(&store, filters)?;
+            print_issue_table(&rows);
             Ok(())
         }
         ListKind::Milestones => {
@@ -1403,50 +1404,61 @@ fn count_milestone_children(container: &Path) -> Result<(usize, usize, usize, us
     }
     Ok((total, done, in_progress, todo))
 }
+fn print_issue_table(rows: &[cache::CacheRow]) {
+    if rows.is_empty() {
+        return;
+    }
+    // Calculate column widths
+    let mut w_id = "id".len();
+    let mut w_kind = "kind".len();
+    let mut w_status = "status".len();
+    let mut w_title = "title".len();
+    let mut w_path = "path".len();
+    for row in rows {
+        w_id = w_id.max(row.id.len());
+        w_kind = w_kind.max(row.kind.len());
+        w_status = w_status.max(row.status.len());
+        w_title = w_title.max(row.title.len());
+        w_path = w_path.max(row.path.len());
+    }
+    // Header
+    println!(
+        "{:<w_id$}  {:<w_kind$}  {:<w_status$}  {:<w_title$}  {:<w_path$}",
+        "id", "kind", "status", "title", "path"
+    );
+    println!(
+        "{:-<w_id$}  {:-<w_kind$}  {:-<w_status$}  {:-<w_title$}  {:-<w_path$}",
+        "", "", "", "", ""
+    );
+    for row in rows {
+        let id = color::colored_id(&row.id);
+        let status = color::status_color(&row.status);
+        // Pad based on raw (uncolored) lengths
+        let id_pad = w_id.saturating_sub(row.id.len());
+        let status_pad = w_status.saturating_sub(row.status.len());
+        println!(
+            "{}{:id_pad$}  {:<w_kind$}  {}{:status_pad$}  {:<w_title$}  {:<w_path$}",
+            id, "", row.kind, status, "", row.title, row.path
+        );
+    }
+}
+
 fn run_show(args: ShowArgs) -> Result<()> {
     let (cfg, user_cfg, cwd) = load_context()?;
     let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &args.id)?;
     let path = locate_doc(&store, &id)?;
-    if let Some(revision) = &args.revision {
+    let content = if let Some(revision) = &args.revision {
         let rel_path = path
             .strip_prefix(&store.path)
             .map_err(|e| Error::new(e.to_string()))?;
         let contents = backend::file_at_revision(&store, rel_path, revision)?;
-        let tmp_path = std::env::temp_dir().join(format!("runes-show-{}.md", &revision[..revision.len().min(12)]));
-        fs::write(&tmp_path, &contents)?;
-        let doc = parse_doc(&tmp_path)?;
-        let _ = fs::remove_file(&tmp_path);
         println!("revision={}", &revision[..revision.len().min(12)]);
-        return print_doc_summary(&path, &doc);
-    }
+        contents
+    } else {
+        fs::read_to_string(&path)?
+    };
+    print_highlighted_rune_doc(&content);
     let doc = parse_doc(&path)?;
-    let result = print_doc_summary(&path, &doc);
-    warn_if_uncommitted(&store);
-    result
-}
-
-fn print_doc_summary(path: &Path, doc: &RuneDoc) -> Result<()> {
-    println!("path={}", path.display());
-    println!("kind={}", doc.kind);
-    println!("id={}", doc.id);
-    println!("status={}", doc.status);
-    if let Some(assignee) = &doc.assignee {
-        println!("assignee={}", assignee);
-    }
-    if !doc.labels.is_empty() {
-        println!("labels={}", doc.labels.join(","));
-    }
-    if let Some(milestone) = &doc.milestone {
-        println!("milestone={}", milestone);
-    }
-    if !doc.relations.is_empty() {
-        let rels: Vec<String> = doc
-            .relations
-            .iter()
-            .map(|(kind, id)| format!("{kind}:{id}"))
-            .collect();
-        println!("relations={}", rels.join(","));
-    }
     if doc.kind == "milestone" {
         if let Some(container) = path.parent() {
             if container.exists() {
@@ -1467,9 +1479,50 @@ fn print_doc_summary(path: &Path, doc: &RuneDoc) -> Result<()> {
             }
         }
     }
-    println!();
-    print!("{}", fs::read_to_string(path)?);
+    warn_if_uncommitted(&store);
     Ok(())
+}
+
+fn split_rune_doc(content: &str) -> (String, String) {
+    let mut lines = content.lines();
+    let mut frontmatter = String::new();
+    let mut body = String::new();
+    let mut in_fm = false;
+    let mut fm_done = false;
+    for line in &mut lines {
+        if !fm_done && line.trim() == "---" {
+            frontmatter.push_str(line);
+            frontmatter.push('\n');
+            if in_fm {
+                fm_done = true;
+            } else {
+                in_fm = true;
+            }
+            continue;
+        }
+        if !fm_done && in_fm {
+            frontmatter.push_str(line);
+            frontmatter.push('\n');
+        } else if fm_done {
+            body.push_str(line);
+            body.push('\n');
+            break;
+        }
+    }
+    for line in lines {
+        body.push_str(line);
+        body.push('\n');
+    }
+    // Normalize body: collapse leading blank lines to a single newline
+    let body_trimmed = body.trim_start_matches('\n');
+    let body_normalized = format!("\n{body_trimmed}");
+    (frontmatter, body_normalized)
+}
+
+fn print_highlighted_rune_doc(content: &str) {
+    let (frontmatter, body) = split_rune_doc(content);
+    color::highlight_kdl(&frontmatter);
+    color::highlight_markdown(&body);
 }
 
 fn list_container_children(container: &Path) -> Result<Vec<String>> {
@@ -2114,11 +2167,22 @@ fn print_unified_diff(rel_path: &Path, before: &str, after: &str) {
     let mut has_changes = false;
     for hunk in diff.unified_diff().context_radius(3).iter_hunks() {
         if !has_changes {
-            println!("--- a/{path_str}");
-            println!("+++ b/{path_str}");
+            println!("{}", color::diff_file_header(&format!("--- a/{path_str}")));
+            println!("{}", color::diff_file_header(&format!("+++ b/{path_str}")));
             has_changes = true;
         }
-        print!("{hunk}");
+        let hunk_str = hunk.to_string();
+        for line in hunk_str.lines() {
+            if line.starts_with("@@") {
+                println!("{}", color::diff_hunk_header(line));
+            } else if line.starts_with('+') {
+                println!("{}", color::diff_added(line));
+            } else if line.starts_with('-') {
+                println!("{}", color::diff_removed(line));
+            } else {
+                println!("{line}");
+            }
+        }
     }
     if !has_changes {
         println!("(no changes)");

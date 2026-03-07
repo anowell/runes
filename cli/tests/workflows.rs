@@ -226,7 +226,7 @@ fn new_default_project_from_env_var() {
     assert!(issue_id.starts_with("runes-"));
 
     let shown = runes_ok(&home, &["show", &format!("how:{issue_id}")]);
-    assert!(shown.contains("kind=task"));
+    assert!(shown.contains("task \""));
 }
 
 #[test]
@@ -390,7 +390,7 @@ fn milestone_list_and_project_progress() {
     assert!(list_output.contains(&milestone));
 
     let project_progress = runes_ok(&home, &["show", &format!("how:{milestone}")]);
-    assert!(project_progress.contains("kind=milestone"));
+    assert!(project_progress.contains("milestone \""));
     assert!(project_progress.contains(&milestone));
 }
 

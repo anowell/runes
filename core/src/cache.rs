@@ -91,7 +91,16 @@ CREATE INDEX idx_runes_assignee ON runes(assignee);",
     Ok(())
 }
 
-pub fn query_cache(store: &Store, where_clause: &str) -> Result<String> {
+#[derive(Debug, Clone)]
+pub struct CacheRow {
+    pub id: String,
+    pub kind: String,
+    pub status: String,
+    pub title: String,
+    pub path: String,
+}
+
+pub fn query_cache(store: &Store, where_clause: &str) -> Result<Vec<CacheRow>> {
     let db_path = cache_path(store)?;
     if !db_path.exists() {
         rebuild_cache(store)?;
@@ -101,8 +110,8 @@ pub fn query_cache(store: &Store, where_clause: &str) -> Result<String> {
         where_clause
     );
     let output = Command::new("sqlite3")
-        .arg("-header")
-        .arg("-column")
+        .arg("-separator")
+        .arg("\t")
         .arg(&db_path)
         .arg(&sql)
         .stdout(Stdio::piped())
@@ -113,5 +122,45 @@ pub fn query_cache(store: &Store, where_clause: &str) -> Result<String> {
             db_path.display()
         )));
     }
-    Ok(String::from_utf8(output.stdout)?)
+    let stdout = String::from_utf8(output.stdout)?;
+    let mut rows = Vec::new();
+    for line in stdout.lines() {
+        let cols: Vec<&str> = line.splitn(5, '\t').collect();
+        if cols.len() >= 5 {
+            rows.push(CacheRow {
+                id: cols[0].to_string(),
+                kind: cols[1].to_string(),
+                status: cols[2].to_string(),
+                title: cols[3].to_string(),
+                path: cols[4].to_string(),
+            });
+        }
+    }
+    Ok(rows)
+}
+
+pub fn lookup_status(store: &Store, id: &str) -> Result<Option<String>> {
+    let db_path = cache_path(store)?;
+    if !db_path.exists() {
+        rebuild_cache(store)?;
+    }
+    let sql = format!(
+        "SELECT status FROM runes WHERE id='{}' LIMIT 1;",
+        sql_escape(id)
+    );
+    let output = Command::new("sqlite3")
+        .arg(&db_path)
+        .arg(&sql)
+        .stdout(Stdio::piped())
+        .output()?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let stdout = String::from_utf8(output.stdout)?;
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(trimmed.to_string()))
+    }
 }

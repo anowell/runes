@@ -1,0 +1,123 @@
+%YAML 1.2
+---
+name: KDL
+file_extensions: [kdl]
+scope: source.kdl
+
+contexts:
+  main:
+    - include: comments
+
+    # Root node name (prominent — this is the rune kind like task/bug)
+    - match: '^\s*([\w][\w.-]*)'
+      captures:
+        1: entity.name.tag.kdl
+
+    - include: values
+
+    # Opening brace pushes into block context
+    - match: '\{'
+      scope: punctuation.section.block.begin.kdl
+      push: block
+
+  block:
+    - match: '\}'
+      scope: punctuation.section.block.end.kdl
+      pop: true
+
+    - include: comments
+
+    # Child node names (de-emphasized — these are property keys like status/assignee)
+    - match: '^\s*([\w][\w.-]*)'
+      captures:
+        1: variable.other.member.kdl
+
+    - include: values
+
+    # Nested blocks
+    - match: '\{'
+      scope: punctuation.section.block.begin.kdl
+      push: block
+
+  values:
+    # Quoted strings
+    - match: '"'
+      scope: punctuation.definition.string.begin.kdl
+      push: double_string
+
+    # Raw strings
+    - match: 'r"'
+      scope: punctuation.definition.string.begin.kdl
+      push: raw_string
+
+    # Boolean and null keywords
+    - match: \b(true|false|null)\b
+      scope: constant.language.kdl
+
+    # Numbers - hex
+    - match: '[-+]?0x[0-9a-fA-F][0-9a-fA-F_]*'
+      scope: constant.numeric.hex.kdl
+
+    # Numbers - octal
+    - match: '[-+]?0o[0-7][0-7_]*'
+      scope: constant.numeric.octal.kdl
+
+    # Numbers - binary
+    - match: '[-+]?0b[01][01_]*'
+      scope: constant.numeric.binary.kdl
+
+    # Numbers - float
+    - match: '[-+]?[0-9][0-9_]*\.[0-9][0-9_]*([eE][-+]?[0-9_]+)?'
+      scope: constant.numeric.float.kdl
+
+    # Numbers - integer
+    - match: '[-+]?[0-9][0-9_]*'
+      scope: constant.numeric.integer.kdl
+
+    # Property keys (identifier followed by =)
+    - match: '([\w][\w.-]*)\s*(=)'
+      captures:
+        1: variable.other.property.kdl
+        2: keyword.operator.assignment.kdl
+
+    # Semicolons
+    - match: ;
+      scope: punctuation.terminator.kdl
+
+  comments:
+    # Single-line comments
+    - match: //.*$
+      scope: comment.line.double-slash.kdl
+
+    # Block comments
+    - match: /\*
+      scope: punctuation.definition.comment.begin.kdl
+      push: block_comment
+
+    # Slash-dash (node disabling)
+    - match: /-
+      scope: comment.block.kdl
+
+  double_string:
+    - meta_scope: string.quoted.double.kdl
+    - match: \\[nrt\\"/bfs]
+      scope: constant.character.escape.kdl
+    - match: \\u\{[0-9a-fA-F]+\}
+      scope: constant.character.escape.unicode.kdl
+    - match: '"'
+      scope: punctuation.definition.string.end.kdl
+      pop: true
+
+  raw_string:
+    - meta_scope: string.quoted.other.raw.kdl
+    - match: '"'
+      scope: punctuation.definition.string.end.kdl
+      pop: true
+
+  block_comment:
+    - meta_scope: comment.block.kdl
+    - match: /\*
+      push: block_comment
+    - match: \*/
+      scope: punctuation.definition.comment.end.kdl
+      pop: true
