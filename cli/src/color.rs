@@ -1,4 +1,6 @@
 use atty::Stream;
+use std::io::Write;
+use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
@@ -55,6 +57,7 @@ const BOLD: &str = "\x1b[1m";
 const DIM: &str = "\x1b[2m";
 const RED: &str = "\x1b[31m";
 const GREEN: &str = "\x1b[32m";
+const YELLOW: &str = "\x1b[33m";
 const MAGENTA: &str = "\x1b[35m";
 const CYAN: &str = "\x1b[36m";
 const BRIGHT_BLACK: &str = "\x1b[90m";
@@ -70,6 +73,9 @@ fn wrap(code: &str, s: &str) -> String {
 pub fn purple(s: &str) -> String { wrap(MAGENTA, s) }
 pub fn dim(s: &str) -> String { wrap(DIM, s) }
 pub fn green(s: &str) -> String { wrap(GREEN, s) }
+pub fn yellow(s: &str) -> String { wrap(YELLOW, s) }
+pub fn teal(s: &str) -> String { wrap(CYAN, s) }
+pub fn gray(s: &str) -> String { wrap(BRIGHT_BLACK, s) }
 pub fn bright_black(s: &str) -> String { wrap(BRIGHT_BLACK, s) }
 
 pub fn status_color(status: &str) -> String {
@@ -162,6 +168,46 @@ pub fn highlight_kdl(content: &str) {
         }
     }
     print!("{RESET}");
+}
+
+/// Pipe output through a pager (like `less -FRX`) when stdout is a TTY.
+/// If `no_pager` is true or stdout is not a TTY, prints directly.
+pub fn print_with_pager(output: &str, no_pager: bool) {
+    if no_pager || !is_color_enabled() {
+        print!("{output}");
+        return;
+    }
+    let pager_cmd = std::env::var("PAGER").unwrap_or_else(|_| "less".to_string());
+    let mut parts = pager_cmd.split_whitespace();
+    let program = match parts.next() {
+        Some(p) => p,
+        None => {
+            print!("{output}");
+            return;
+        }
+    };
+    let mut args: Vec<&str> = parts.collect();
+    // Add default flags for less if no custom args were provided
+    if program == "less" && args.is_empty() {
+        args = vec!["-FRX"];
+    }
+    match Command::new(program)
+        .args(&args)
+        .stdin(Stdio::piped())
+        .spawn()
+    {
+        Ok(mut child) => {
+            if let Some(ref mut stdin) = child.stdin {
+                let _ = stdin.write_all(output.as_bytes());
+            }
+            drop(child.stdin.take());
+            let _ = child.wait();
+        }
+        Err(_) => {
+            // Pager not available, fall back to direct output
+            print!("{output}");
+        }
+    }
 }
 
 /// Highlight Markdown body using syntect with bundled Coldark Dark theme.

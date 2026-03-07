@@ -347,6 +347,9 @@ struct LogArgs {
     /// Output as JSON
     #[arg(long)]
     json: bool,
+    /// Disable pager
+    #[arg(long)]
+    no_pager: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -2308,7 +2311,9 @@ fn print_log_entries_json(entries: &[LogEntry], rune_filter: Option<&str>, autho
     println!("{}", serde_json::to_string_pretty(&json_entries).unwrap());
 }
 
-fn print_log_entries(entries: &[LogEntry], rune_filter: Option<&str>, author_filter: Option<&str>) {
+fn format_log_entries(entries: &[LogEntry], rune_filter: Option<&str>, author_filter: Option<&str>) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
     for entry in entries {
         if let Some(author) = author_filter {
             if !entry.author.eq_ignore_ascii_case(author) {
@@ -2317,6 +2322,9 @@ fn print_log_entries(entries: &[LogEntry], rune_filter: Option<&str>, author_fil
         }
         let short_rev = &entry.revision[..entry.revision.len().min(12)];
         let ts = format_log_timestamp(entry.timestamp);
+        let rev_colored = color::gray(short_rev);
+        let ts_colored = color::teal(&ts);
+        let author_colored = color::yellow(&entry.author);
 
         // Derive rune IDs from changed files, falling back to description parsing
         let rune_ids: Vec<String> = if !entry.changed_files.is_empty() {
@@ -2336,7 +2344,7 @@ fn print_log_entries(entries: &[LogEntry], rune_filter: Option<&str>, author_fil
                 continue;
             }
             let desc = entry.description.lines().next().unwrap_or("").trim();
-            println!("{short_rev}  {ts}  {desc}");
+            let _ = writeln!(out, "{rev_colored}  {ts_colored}  {author_colored}  {desc}");
             continue;
         }
 
@@ -2352,9 +2360,11 @@ fn print_log_entries(entries: &[LogEntry], rune_filter: Option<&str>, author_fil
                 }
             }
             let desc = description_line_for_id(&entry.description, rune_id);
-            println!("{short_rev}  {ts}  {rune_id}  {desc}");
+            let id_colored = color::colored_id(rune_id);
+            let _ = writeln!(out, "{rev_colored}  {ts_colored}  {author_colored}  {id_colored}  {desc}");
         }
     }
+    out
 }
 
 fn run_log(args: LogArgs) -> Result<()> {
@@ -2364,6 +2374,7 @@ fn run_log(args: LogArgs) -> Result<()> {
         section,
         changed_by,
         json,
+        no_pager,
     } = args;
     let limit = limit.unwrap_or(50);
     let (cfg, user_cfg, cwd) = load_context()?;
@@ -2421,7 +2432,8 @@ fn run_log(args: LogArgs) -> Result<()> {
     if json {
         print_log_entries_json(&entries, rune_filter.as_deref(), changed_by.as_deref());
     } else {
-        print_log_entries(&entries, rune_filter.as_deref(), changed_by.as_deref());
+        let output = format_log_entries(&entries, rune_filter.as_deref(), changed_by.as_deref());
+        color::print_with_pager(&output, no_pager);
     }
     Ok(())
 }
