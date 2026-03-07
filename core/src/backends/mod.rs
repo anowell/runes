@@ -35,7 +35,7 @@ pub trait BackendAdapter {
     fn name(&self) -> &'static str;
     fn capabilities(&self) -> BackendCapabilities;
     fn init_store(&self, path: &Path) -> Result<()>;
-    fn commit_paths(&self, store: &Store, paths: &[PathBuf], message: &str) -> Result<()>;
+    fn commit_paths(&self, store: &Store, paths: &[PathBuf], message: &str, author_name: &str, author_email: &str) -> Result<()>;
     fn remove_path(&self, store: &Store, path: &Path) -> Result<()>;
     fn has_uncommitted_changes(&self, store: &Store) -> Result<bool>;
     fn status(&self, store: &Store) -> Result<String>;
@@ -134,15 +134,15 @@ impl BackendAdapter for CliBackend {
         Ok(())
     }
 
-    fn commit_paths(&self, store: &Store, paths: &[PathBuf], message: &str) -> Result<()> {
+    fn commit_paths(&self, store: &Store, paths: &[PathBuf], message: &str, author_name: &str, author_email: &str) -> Result<()> {
         let _ = probe_sdk(store);
         match self.kind {
             BackendKind::Jj => {
                 let _ = paths;
-                jj_sdk_commit_paths(store, message)?;
+                jj_sdk_commit_paths(store, message, author_name, author_email)?;
             }
             BackendKind::Pijul => {
-                pijul_sdk_commit_paths(store, paths, message)?;
+                pijul_sdk_commit_paths(store, paths, message, author_name, author_email)?;
             }
         }
         Ok(())
@@ -281,8 +281,8 @@ pub fn probe_sdk(store: &Store) -> Result<String> {
     }
 }
 
-pub fn commit_paths(store: &Store, paths: &[PathBuf], message: &str) -> Result<()> {
-    adapter_for(store).commit_paths(store, paths, message)
+pub fn commit_paths(store: &Store, paths: &[PathBuf], message: &str, author_name: &str, author_email: &str) -> Result<()> {
+    adapter_for(store).commit_paths(store, paths, message, author_name, author_email)
 }
 
 pub fn remove_path(store: &Store, path: &Path) -> Result<()> {

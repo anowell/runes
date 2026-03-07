@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Default)]
 pub struct UserConfig {
-    pub identity_user: Option<String>,
+    pub identity_email: Option<String>,
+    pub identity_name: Option<String>,
     pub default_store: Option<String>,
     pub default_query: Option<String>,
     pub default_project: Option<String>,
@@ -76,7 +77,10 @@ impl UserConfig {
                 // New format nodes
                 "user" => {
                     if let Some(email) = value_string(node, "email") {
-                        config.identity_user = Some(email);
+                        config.identity_email = Some(email);
+                    }
+                    if let Some(name) = value_string(node, "name") {
+                        config.identity_name = Some(name);
                     }
                 }
                 "defaults" => {
@@ -117,7 +121,7 @@ impl UserConfig {
                         config.default_store = Some(val);
                     }
                     if let Some(user) = value_string(node, "user") {
-                        config.identity_user = Some(user);
+                        config.identity_email = Some(user);
                     }
                 }
                 "default_query" => {
@@ -168,7 +172,8 @@ impl UserConfig {
 
     fn merge(&mut self, other: UserConfig) {
         let UserConfig {
-            identity_user,
+            identity_email,
+            identity_name,
             default_store,
             default_query,
             default_project,
@@ -178,8 +183,11 @@ impl UserConfig {
             queries,
             stores,
         } = other;
-        if let Some(user) = identity_user {
-            self.identity_user = Some(user);
+        if let Some(user) = identity_email {
+            self.identity_email = Some(user);
+        }
+        if let Some(name) = identity_name {
+            self.identity_name = Some(name);
         }
         if let Some(store) = default_store {
             self.default_store = Some(store);
@@ -279,13 +287,13 @@ impl UserConfig {
     }
 
     #[allow(dead_code)]
-    pub fn identity_user(&self) -> Option<&str> {
-        self.identity_user.as_deref()
+    pub fn identity_email(&self) -> Option<&str> {
+        self.identity_email.as_deref()
     }
 
     pub fn resolve_user_alias(&self, value: &str) -> Option<String> {
         if value.eq_ignore_ascii_case("self") {
-            self.identity_user.clone()
+            self.identity_email.clone()
         } else {
             Some(value.to_string())
         }
@@ -317,6 +325,9 @@ pub fn config_list(path: &Path) -> Result<Vec<(String, String)>> {
             "user" => {
                 if let Some(v) = value_string(node, "email") {
                     pairs.push(("user.email".to_string(), v));
+                }
+                if let Some(v) = value_string(node, "name") {
+                    pairs.push(("user.name".to_string(), v));
                 }
             }
             "defaults" => {

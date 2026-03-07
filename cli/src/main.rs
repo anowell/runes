@@ -284,6 +284,9 @@ struct CommitArgs {
     /// Commit message
     #[arg(short = 'm', long = "message")]
     message: Option<String>,
+    /// Override commit author (email or "Name <email>")
+    #[arg(long)]
+    author: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -693,8 +696,39 @@ fn id_exists(project_root: &Path, id: &str) -> Result<bool> {
     Ok(false)
 }
 
-fn commit_store_changes(store: &Store, message: &str) -> Result<()> {
-    backend::commit_paths(store, &[], message)?;
+/// Parse an author string: "Name <email>" or just "email"
+fn parse_author_string(s: &str) -> (String, String) {
+    let s = s.trim();
+    if let Some(start) = s.find('<') {
+        if let Some(end) = s.find('>') {
+            let name = s[..start].trim().to_string();
+            let email = s[start + 1..end].trim().to_string();
+            return (name, email);
+        }
+    }
+    // Treat entire string as email, use email as name fallback
+    (s.to_string(), s.to_string())
+}
+
+/// Resolve commit author from: override flag > RUNES_USER env > config
+fn resolve_commit_author(user_cfg: &UserConfig, author_override: Option<&str>) -> Result<(String, String)> {
+    if let Some(author_str) = author_override {
+        return Ok(parse_author_string(author_str));
+    }
+    if let Ok(env_val) = std::env::var("RUNES_USER") {
+        return Ok(parse_author_string(&env_val));
+    }
+    if let Some(email) = &user_cfg.identity_email {
+        let name = user_cfg.identity_name.as_deref().unwrap_or(email);
+        return Ok((name.to_string(), email.clone()));
+    }
+    Err(Error::new(
+        "No author configured. Set user.email in runes config, RUNES_USER env var, or use --author flag."
+    ))
+}
+
+fn commit_store_changes(store: &Store, message: &str, author_name: &str, author_email: &str) -> Result<()> {
+    backend::commit_paths(store, &[], message, author_name, author_email)?;
     cache::rebuild_cache(store)?;
     Ok(())
 }
@@ -861,13 +895,15 @@ fn maybe_commit(
     no_commit: bool,
     user_message: Option<&str>,
     default_message: &str,
+    user_cfg: &UserConfig,
 ) -> Result<()> {
     if no_commit && user_message.is_none() {
         eprintln!("hint: uncommitted changes pending. Will be included in next commit or `runes commit`.");
         return Ok(());
     }
     let msg = user_message.unwrap_or(default_message);
-    commit_store_changes(store, msg)
+    let (author_name, author_email) = resolve_commit_author(user_cfg, None)?;
+    commit_store_changes(store, msg, &author_name, &author_email)
 }
 
 fn warn_if_uncommitted(store: &Store) {
@@ -1084,7 +1120,7 @@ fn run_new(args: NewArgs) -> Result<()> {
     }
     let _final_path = reconcile_filename(&doc_path, &identifier)?;
     let default_msg = build_commit_message("Add", &identifier, &[status.clone()]);
-    maybe_commit(&store, no_commit, message.as_deref(), &default_msg)?;
+    maybe_commit(&store, no_commit, message.as_deref(), &default_msg, &user_cfg)?;
     println!("{identifier}");
     Ok(())
 }
@@ -1969,7 +2005,7 @@ fn run_edit(args: EditArgs) -> Result<()> {
     let _final_path = reconcile_filename(&path, &doc.id)?;
     let snippets = edit_change_snippets(&original_doc, &doc);
     let default_msg = build_commit_message("Update", &doc.id, &snippets);
-    maybe_commit(&store, no_commit, message.as_deref(), &default_msg)?;
+    maybe_commit(&store, no_commit, message.as_deref(), &default_msg, &user_cfg)?;
     Ok(())
 }
 
@@ -1978,7 +2014,7 @@ fn store_exists(config: &Config, name: &str) -> bool {
 }
 
 fn run_commit(args: CommitArgs) -> Result<()> {
-    let CommitArgs { target, message } = args;
+    let CommitArgs { target, message, author } = args;
     let (cfg, user_cfg, cwd) = load_context()?;
     let (store, scope_label) = match &target {
         Some(spec) if spec.contains(':') || spec.contains('/') => {
@@ -2012,7 +2048,8 @@ fn run_commit(args: CommitArgs) -> Result<()> {
         }
     };
     let msg = message.unwrap_or_else(|| format!("Record changes for {scope_label}"));
-    commit_store_changes(&store, &msg)?;
+    let (author_name, author_email) = resolve_commit_author(&user_cfg, author.as_deref())?;
+    commit_store_changes(&store, &msg, &author_name, &author_email)?;
     println!("Committed changes in {}", store.name);
     Ok(())
 }
@@ -2099,15 +2136,16 @@ fn run_move(args: MoveArgs) -> Result<()> {
     move_rune(&from_store, &to_store, &id, &project, parent.as_deref())?;
     let move_msg = format!("Move {id} to {project}");
     if from_store.name == to_store.name {
-        maybe_commit(&from_store, no_commit, message.as_deref(), &move_msg)?;
+        maybe_commit(&from_store, no_commit, message.as_deref(), &move_msg, &user_cfg)?;
     } else {
         let move_in_msg = format!("Move in {id} from {}", from_store.name);
-        maybe_commit(&to_store, no_commit, message.as_deref(), &move_in_msg)?;
+        maybe_commit(&to_store, no_commit, message.as_deref(), &move_in_msg, &user_cfg)?;
         // Commit the removal from the source store
         if !no_commit || message.is_some() {
             let default_from_msg = format!("Move out {id} to {}", to_store.name);
             let from_msg = message.as_deref().unwrap_or(&default_from_msg);
-            commit_store_changes(&from_store, from_msg)?;
+            let (author_name, author_email) = resolve_commit_author(&user_cfg, None)?;
+            commit_store_changes(&from_store, from_msg, &author_name, &author_email)?;
         }
     }
     Ok(())
@@ -2118,7 +2156,7 @@ fn run_archive(args: ArchiveArgs) -> Result<()> {
     let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id)?;
     archive_rune(&store, &id)?;
     let default_msg = format!("Archive {id}");
-    maybe_commit(&store, no_commit, message.as_deref(), &default_msg)?;
+    maybe_commit(&store, no_commit, message.as_deref(), &default_msg, &user_cfg)?;
     Ok(())
 }
 
@@ -2163,7 +2201,7 @@ fn run_delete(args: DeleteArgs) -> Result<()> {
     let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id)?;
     delete_rune(&store, &id)?;
     let default_msg = format!("Delete {id}");
-    maybe_commit(&store, no_commit, message.as_deref(), &default_msg)?;
+    maybe_commit(&store, no_commit, message.as_deref(), &default_msg, &user_cfg)?;
     Ok(())
 }
 
@@ -2622,7 +2660,7 @@ fn run_restore(args: RestoreArgs) -> Result<()> {
     let short_rev = &revision[..revision.len().min(12)];
     println!("Restored {} to revision {short_rev}", doc.id);
     let default_msg = format!("Restore {} to revision {short_rev}", doc.id);
-    maybe_commit(&store, no_commit, message.as_deref(), &default_msg)?;
+    maybe_commit(&store, no_commit, message.as_deref(), &default_msg, &user_cfg)?;
     Ok(())
 }
 

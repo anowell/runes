@@ -17,6 +17,7 @@ fn runes_output(home: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_runes"))
         .args(args)
         .env("HOME", home)
+        .env("RUNES_USER", "Test User <test@runes.dev>")
         .output()
         .expect("run runes command")
 }
@@ -36,7 +37,7 @@ fn runes_ok(home: &Path, args: &[&str]) -> String {
 
 fn runes_with_env(home: &Path, envs: &[(&str, &str)], args: &[&str]) -> String {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_runes"));
-    cmd.args(args).env("HOME", home);
+    cmd.args(args).env("HOME", home).env("RUNES_USER", "Test User <test@runes.dev>");
     for (key, value) in envs {
         cmd.env(key, value);
     }

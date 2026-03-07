@@ -1,5 +1,6 @@
 use crate::config::Store;
 use crate::{Error, Result};
+use jj_lib::backend::{Signature, Timestamp as JjTimestamp};
 use jj_lib::config::StackedConfig;
 use jj_lib::conflicts::{materialize_tree_value, MaterializedTreeValue};
 use jj_lib::git::{
@@ -185,10 +186,10 @@ pub(super) fn jj_sdk_rich_log(store: &Store, limit: usize) -> Result<Vec<super::
             continue;
         }
         let author = commit.author();
-        let author_name = if author.name.is_empty() {
-            author.email.clone()
-        } else {
+        let author_name = if author.email.is_empty() {
             author.name.clone()
+        } else {
+            author.email.clone()
         };
         let timestamp = author.timestamp.timestamp.0 / 1000;
         let changed_files = match repo
@@ -450,7 +451,7 @@ pub(super) fn jj_sdk_file_rich_log(
     Ok(entries)
 }
 
-pub(super) fn jj_sdk_commit_paths(store: &Store, message: &str) -> Result<()> {
+pub(super) fn jj_sdk_commit_paths(store: &Store, message: &str, author_name: &str, author_email: &str) -> Result<()> {
     let config = StackedConfig::with_defaults();
     let settings = UserSettings::from_config(config).map_err(|e| Error::new(e.to_string()))?;
     let store_factories = StoreFactories::default();
@@ -499,10 +500,16 @@ pub(super) fn jj_sdk_commit_paths(store: &Store, message: &str) -> Result<()> {
 
     let mut tx = repo.start_transaction();
     let mut_repo = tx.repo_mut();
+    let author_sig = Signature {
+        name: author_name.to_string(),
+        email: author_email.to_string(),
+        timestamp: JjTimestamp::now(),
+    };
     let committed = mut_repo
         .rewrite_commit(&wc_commit)
         .set_tree(new_tree)
         .set_description(message)
+        .set_author(author_sig)
         .write()
         .map_err(|e| Error::new(format!("jj-lib rewrite commit failed: {e}")))?;
     mut_repo

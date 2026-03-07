@@ -220,7 +220,7 @@ pub(super) fn pijul_sdk_rich_log(store: &Store, limit: usize) -> Result<Vec<supe
                     .header
                     .authors
                     .first()
-                    .and_then(|a| a.0.get("name").or(a.0.get("key")))
+                    .and_then(|a| a.0.get("email").or(a.0.get("name")).or(a.0.get("key")))
                     .cloned()
                     .unwrap_or_default();
                 let ts = change.header.timestamp.as_second();
@@ -420,6 +420,8 @@ pub(super) fn pijul_sdk_commit_paths(
     store: &Store,
     paths: &[PathBuf],
     message: &str,
+    author_name: &str,
+    author_email: &str,
 ) -> Result<()> {
     let repo = open_pijul_repo(store)?;
     let txn = (&repo.pristine)
@@ -483,8 +485,23 @@ pub(super) fn pijul_sdk_commit_paths(
             })
             .collect::<Result<Vec<_>>>()?;
         let contents = std::mem::take(&mut *recorded.contents.lock());
+        let mut author_map = std::collections::BTreeMap::new();
+        author_map.insert("name".to_string(), author_name.to_string());
+        if !author_email.is_empty() {
+            author_map.insert("email".to_string(), author_email.to_string());
+        }
+        // Try to attach the pijul identity key if one matches this email
+        if let Ok(identities) = CompleteIdentity::load_all() {
+            for ident in &identities {
+                if ident.config.author.email == author_email {
+                    author_map.insert("key".to_string(), ident.public_key.key.clone());
+                    break;
+                }
+            }
+        }
         let header = libpijul::change::ChangeHeader {
             message: message.to_string(),
+            authors: vec![libpijul::change::Author(author_map)],
             ..Default::default()
         };
         let mut change = libpijul::change::Change::make_change(
