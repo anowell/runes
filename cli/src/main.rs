@@ -1886,21 +1886,27 @@ fn description_line_for_id<'a>(description: &'a str, id: &str) -> &'a str {
 /// Try to extract a rune ID from a commit description.
 /// Matches patterns like "Add runes-x3s", "Update runes-tfc", "Record dli-zwc.5"
 fn rune_id_from_description(desc: &str) -> Option<String> {
-    // Look for <project>-<shortid> pattern (letters/digits, hyphen, letters/digits)
-    // Common prefixes: Add, Update, Record, Delete, Archive, Move, Restore
     let first_line = desc.lines().next().unwrap_or("").trim();
-    // Try to find a token that looks like a rune ID: word-word pattern
     for token in first_line.split_whitespace() {
-        // Strip trailing punctuation and version suffixes like ".5"
-        let base = token.split('.').next().unwrap_or(token);
-        if let Some((proj, short)) = base.split_once('-') {
-            if !proj.is_empty()
-                && !short.is_empty()
-                && proj.chars().all(|c| c.is_alphanumeric())
-                && short.chars().all(|c| c.is_alphanumeric())
-            {
-                return Some(base.to_string());
+        // Match <project>-<shortid> or <project>-<shortid>.<child>
+        if let Some((proj, rest)) = token.split_once('-') {
+            if proj.is_empty() || !proj.chars().all(|c| c.is_alphanumeric()) {
+                continue;
             }
+            // rest may be "zwc" or "zwc.3" — validate the short part and optional child suffix
+            let (short, child) = match rest.split_once('.') {
+                Some((s, c)) => (s, Some(c)),
+                None => (rest, None),
+            };
+            if short.is_empty() || !short.chars().all(|c| c.is_alphanumeric()) {
+                continue;
+            }
+            if let Some(c) = child {
+                if !c.is_empty() && c.chars().all(|ch| ch.is_alphanumeric()) {
+                    return Some(format!("{proj}-{short}.{c}"));
+                }
+            }
+            return Some(format!("{proj}-{short}"));
         }
     }
     None
