@@ -333,7 +333,7 @@ struct DeleteArgs {
 
 #[derive(Debug, Parser)]
 struct LogArgs {
-    /// Rune doc ID (optional; omit for store-wide log)
+    /// Project name or rune ID (project:shortid); omit for default project log
     id: Option<String>,
     /// Max number of entries to show
     #[arg(long)]
@@ -350,6 +350,9 @@ struct LogArgs {
     /// Disable pager
     #[arg(long)]
     no_pager: bool,
+    /// Show all projects (ignore default project)
+    #[arg(long)]
+    all: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -2276,7 +2279,12 @@ fn rune_id_from_description(desc: &str) -> Option<String> {
     None
 }
 
-fn print_log_entries_json(entries: &[LogEntry], rune_filter: Option<&str>, author_filter: Option<&str>) {
+fn print_log_entries_json(
+    entries: &[LogEntry],
+    rune_filter: Option<&str>,
+    project_filter: Option<&str>,
+    author_filter: Option<&str>,
+) {
     let mut json_entries = Vec::new();
     for entry in entries {
         if let Some(author) = author_filter {
@@ -2299,6 +2307,11 @@ fn print_log_entries_json(entries: &[LogEntry], rune_filter: Option<&str>, autho
             if !rune_ids.iter().any(|rid| rid == filter_id) {
                 continue;
             }
+        } else if let Some(proj) = project_filter {
+            let prefix = format!("{proj}-");
+            if !rune_ids.iter().any(|rid| rid.starts_with(&prefix)) {
+                continue;
+            }
         }
         let comment = entry.description.lines().next().unwrap_or("").trim();
         json_entries.push(serde_json::json!({
@@ -2311,9 +2324,15 @@ fn print_log_entries_json(entries: &[LogEntry], rune_filter: Option<&str>, autho
     println!("{}", serde_json::to_string_pretty(&json_entries).unwrap());
 }
 
-fn format_log_entries(entries: &[LogEntry], rune_filter: Option<&str>, author_filter: Option<&str>) -> String {
+fn format_log_entries(
+    entries: &[LogEntry],
+    rune_filter: Option<&str>,
+    project_filter: Option<&str>,
+    author_filter: Option<&str>,
+) -> String {
     use std::fmt::Write;
     let mut out = String::new();
+    let project_prefix = project_filter.map(|p| format!("{p}-"));
     for entry in entries {
         if let Some(author) = author_filter {
             if !entry.author.eq_ignore_ascii_case(author) {
@@ -2340,7 +2359,7 @@ fn format_log_entries(entries: &[LogEntry], rune_filter: Option<&str>, author_fi
         };
 
         if rune_ids.is_empty() {
-            if rune_filter.is_some() {
+            if rune_filter.is_some() || project_prefix.is_some() {
                 continue;
             }
             let desc = entry.description.lines().next().unwrap_or("").trim();
@@ -2352,10 +2371,18 @@ fn format_log_entries(entries: &[LogEntry], rune_filter: Option<&str>, author_fi
             if !rune_ids.iter().any(|rid| rid == filter_id) {
                 continue;
             }
+        } else if let Some(ref prefix) = project_prefix {
+            if !rune_ids.iter().any(|rid| rid.starts_with(prefix.as_str())) {
+                continue;
+            }
         }
         for rune_id in &rune_ids {
             if let Some(filter_id) = rune_filter {
                 if rune_id != filter_id {
+                    continue;
+                }
+            } else if let Some(ref prefix) = project_prefix {
+                if !rune_id.starts_with(prefix.as_str()) {
                     continue;
                 }
             }
@@ -2375,18 +2402,51 @@ fn run_log(args: LogArgs) -> Result<()> {
         changed_by,
         json,
         no_pager,
+        all,
     } = args;
     let limit = limit.unwrap_or(50);
     let (cfg, user_cfg, cwd) = load_context()?;
 
+    // Parse the positional arg into project filter vs rune filter:
+    //   <project>-<shortid> → rune filter (rune_id contains hyphen)
+    //   <store>:<project>-<shortid> → rune filter with store hint
+    //   <project> (no hyphen) → project filter
+    //   None → default project (unless --all)
+    let (rune_filter, project_filter) = match &id {
+        Some(spec) if split_store_prefix(spec).1.contains('-') => {
+            // rune_id (with optional store prefix)
+            let (_, resolved) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, spec)?;
+            let store = resolve_store_with_context(&cfg, &user_cfg, &cwd, split_store_prefix(spec).0.as_deref())?;
+            let _ = locate_doc(&store, &resolved)?;
+            (Some(resolved), None)
+        }
+        Some(proj) => {
+            // Project-level filter (no hyphen, so it's a project name)
+            let (_, proj_name) = split_store_prefix(proj);
+            (None, Some(proj_name.to_string()))
+        }
+        None if all => {
+            // --all: no filtering
+            (None, None)
+        }
+        None => {
+            // Use default project if configured
+            let proj = user_cfg.default_project.as_ref().map(|spec| {
+                let (_, proj_name) = split_store_prefix(spec);
+                proj_name.to_string()
+            }).filter(|p| !p.is_empty());
+            (None, proj)
+        }
+    };
+
     // Section filter requires a rune ID
-    if section.is_some() && id.is_none() {
-        return Err(Error::new("--section requires a rune ID"));
+    if section.is_some() && rune_filter.is_none() {
+        return Err(Error::new("--section requires a rune ID (e.g. proj:shortid)"));
     }
 
-    // If section is specified, use the old section-diff logic
-    if let (Some(id_value), Some(section_raw)) = (&id, section) {
-        let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, id_value)?;
+    // If section is specified, use the section-diff logic
+    if let (Some(rune_id), Some(section_raw)) = (&rune_filter, section) {
+        let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, rune_id)?;
         let path = locate_doc(&store, &id)?;
         let rel_path = path
             .strip_prefix(&store.path)
@@ -2419,20 +2479,13 @@ fn run_log(args: LogArgs) -> Result<()> {
         return Ok(());
     }
 
-    // Rich log: store-wide or filtered to a specific rune
+    // Rich log: filtered by project, rune, or all
     let store = resolve_store_with_context(&cfg, &user_cfg, &cwd, None)?;
-    let rune_filter = match &id {
-        Some(id_value) => {
-            let (_, resolved) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, id_value)?;
-            Some(resolved)
-        }
-        None => None,
-    };
     let entries = backend::rich_log(&store, limit)?;
     if json {
-        print_log_entries_json(&entries, rune_filter.as_deref(), changed_by.as_deref());
+        print_log_entries_json(&entries, rune_filter.as_deref(), project_filter.as_deref(), changed_by.as_deref());
     } else {
-        let output = format_log_entries(&entries, rune_filter.as_deref(), changed_by.as_deref());
+        let output = format_log_entries(&entries, rune_filter.as_deref(), project_filter.as_deref(), changed_by.as_deref());
         color::print_with_pager(&output, no_pager);
     }
     Ok(())
