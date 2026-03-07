@@ -3535,6 +3535,7 @@ version = "0.1.0"
 dependencies = [
  "atty",
  "clap",
+ "jiff",
  "kdl",
  "pijul-interaction",
  "runes-core",

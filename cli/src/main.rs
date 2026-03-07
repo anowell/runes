@@ -1287,6 +1287,7 @@ fn run_list(args: ListArgs) -> Result<()> {
                     serde_json::json!({
                         "kind": row.kind,
                         "id": row.id,
+                        "title": row.title,
                         "store": store.name,
                         "project": row.project,
                         "path": row.path,
@@ -1496,9 +1497,15 @@ fn run_show(args: ShowArgs) -> Result<()> {
             .display()
             .to_string();
         let project = doc.id.split('-').next().unwrap_or("").to_string();
+        let meta = content
+            .split("---")
+            .nth(1)
+            .map(|s| s.trim())
+            .unwrap_or("");
         let json = serde_json::json!({
             "kind": doc.kind,
             "id": doc.id,
+            "title": doc.title,
             "store": store.name,
             "project": project,
             "path": rel_path,
@@ -1506,13 +1513,18 @@ fn run_show(args: ShowArgs) -> Result<()> {
             "assignee": doc.assignee,
             "deps": doc.deps,
             "labels": doc.labels,
-            "content": content.trim(),
+            "meta": meta,
+            "description": doc.body.trim(),
         });
         println!("{}", serde_json::to_string_pretty(&json).unwrap());
         return Ok(());
     }
 
-    print_highlighted_rune_doc(&content);
+    let rel_path = path
+        .strip_prefix(&store.path)
+        .map_err(|e| Error::new(e.to_string()))?;
+    let history = backend::file_rich_log(&store, rel_path, 50).unwrap_or_default();
+    print_annotated_rune_doc(&content, &history, &store, rel_path);
     let doc = parse_doc(&path)?;
     if doc.kind == "milestone" {
         if let Some(container) = path.parent() {
@@ -1578,6 +1590,247 @@ fn print_highlighted_rune_doc(content: &str) {
     let (frontmatter, body) = split_rune_doc(content);
     color::highlight_kdl(&frontmatter);
     color::highlight_markdown(&body);
+}
+
+fn format_timestamp_local(epoch_secs: i64) -> String {
+    use jiff::Timestamp;
+    let Ok(ts) = Timestamp::from_second(epoch_secs) else {
+        return String::new();
+    };
+    let zdt = ts.to_zoned(jiff::tz::TimeZone::system());
+    zdt.strftime("%b %-d at %-I:%M%P").to_string()
+}
+
+fn print_annotated_rune_doc(
+    content: &str,
+    history: &[LogEntry],
+    store: &Store,
+    rel_path: &Path,
+) {
+    if history.is_empty() {
+        print_highlighted_rune_doc(content);
+        return;
+    }
+
+    let (frontmatter, body) = split_rune_doc(content);
+
+    // Oldest entry = created, newest = last update
+    let created = history.last().unwrap();
+    let updated = history.first().unwrap();
+
+    // Print KDL frontmatter with injected metadata
+    let fm_lines: Vec<&str> = frontmatter.trim_end().lines().collect();
+    // Insert metadata before the closing `---`
+    let mut injected = String::new();
+    if !created.author.is_empty() {
+        injected.push_str(&format!("  created_by \"{}\"\n", created.author));
+    }
+    if created.timestamp > 0 {
+        injected.push_str(&format!("  created_at \"{}\"\n", format_timestamp_local(created.timestamp)));
+    }
+    if updated.timestamp != created.timestamp && updated.timestamp > 0 {
+        injected.push_str(&format!("  updated_at \"{}\"\n", format_timestamp_local(updated.timestamp)));
+    }
+
+    // Find closing --- and insert before it
+    if let Some(close_idx) = fm_lines.iter().rposition(|l| l.trim() == "---") {
+        // Find the closing `}` before `---`
+        if let Some(brace_idx) = fm_lines[..close_idx].iter().rposition(|l| l.trim() == "}") {
+            // Insert before closing brace
+            let before = &fm_lines[..brace_idx];
+            let after = &fm_lines[brace_idx..];
+            let mut annotated_fm = String::new();
+            for line in before {
+                annotated_fm.push_str(line);
+                annotated_fm.push('\n');
+            }
+            annotated_fm.push_str(&injected);
+            for line in after {
+                annotated_fm.push_str(line);
+                annotated_fm.push('\n');
+            }
+            color::highlight_kdl(&annotated_fm);
+        } else {
+            color::highlight_kdl(&frontmatter);
+        }
+    } else {
+        color::highlight_kdl(&frontmatter);
+    }
+
+    // Build section-level attribution by diffing consecutive revisions
+    let section_annotations = build_section_annotations(history, store, rel_path, &body, created);
+
+    // Print body with section annotations
+    print_annotated_body(&body, &section_annotations, created);
+}
+
+/// A section heading annotation
+struct SectionAnnotation {
+    /// The heading line text (e.g. "## Design")
+    heading: String,
+    /// Last editor of this section
+    last_editor: String,
+    /// Timestamp of last edit
+    last_edited_at: i64,
+    /// Unique editors in order of edits
+    editors: Vec<String>,
+}
+
+fn build_section_annotations(
+    history: &[LogEntry],
+    store: &Store,
+    rel_path: &Path,
+    current_body: &str,
+    created: &LogEntry,
+) -> Vec<SectionAnnotation> {
+    // Parse current body into sections
+    let current_sections = parse_sections(current_body);
+    if current_sections.is_empty() {
+        return Vec::new();
+    }
+
+    // Get file content at each revision and track section changes
+    // history is newest-first, we want to walk oldest-to-newest for attribution
+    let mut revisions_content: Vec<(&LogEntry, String)> = Vec::new();
+    for entry in history.iter().rev() {
+        if let Ok(content) = backend::file_at_revision(store, rel_path, &entry.revision) {
+            let (_, body) = split_rune_doc(&content);
+            revisions_content.push((entry, body));
+        }
+    }
+
+    // For each current section heading, find the last revision that changed it
+    let mut annotations = Vec::new();
+    for (heading, _current_text) in &current_sections {
+        if heading == "Comments" || heading.is_empty() {
+            continue;
+        }
+        let mut last_editor = created.author.clone();
+        let mut last_edited_at = created.timestamp;
+        let mut editors: Vec<String> = vec![created.author.clone()];
+        let mut prev_section_text: Option<String> = None;
+
+        for (entry, body) in &revisions_content {
+            let sections = parse_sections(body);
+            let section_text = sections
+                .iter()
+                .find(|(h, _)| h == heading)
+                .map(|(_, t)| t.clone());
+
+            if let Some(ref text) = section_text {
+                if prev_section_text.as_ref() != Some(text) {
+                    last_editor = entry.author.clone();
+                    last_edited_at = entry.timestamp;
+                    if !editors.contains(&entry.author) {
+                        editors.push(entry.author.clone());
+                    }
+                }
+            }
+            prev_section_text = section_text;
+        }
+
+        annotations.push(SectionAnnotation {
+            heading: heading.clone(),
+            last_editor,
+            last_edited_at,
+            editors,
+        });
+    }
+    annotations
+}
+
+/// Parse markdown body into sections keyed by heading text.
+/// Returns vec of (heading_text, section_content) pairs.
+fn parse_sections(body: &str) -> Vec<(String, String)> {
+    let mut sections: Vec<(String, String)> = Vec::new();
+    let mut current_heading = String::new();
+    let mut current_content = String::new();
+
+    for line in body.lines() {
+        if line.starts_with('#') {
+            if !current_heading.is_empty() || !current_content.trim().is_empty() {
+                sections.push((current_heading.clone(), current_content.clone()));
+            }
+            current_heading = line.trim_start_matches('#').trim().to_string();
+            current_content = String::new();
+        } else {
+            current_content.push_str(line);
+            current_content.push('\n');
+        }
+    }
+    if !current_heading.is_empty() || !current_content.trim().is_empty() {
+        sections.push((current_heading, current_content));
+    }
+    sections
+}
+
+fn print_annotated_body(body: &str, annotations: &[SectionAnnotation], created: &LogEntry) {
+    let lines: Vec<&str> = body.lines().collect();
+    let mut i = 0;
+    let mut in_comments = false;
+    let mut comment_buf: Vec<&str> = Vec::new();
+
+    while i < lines.len() {
+        let line = lines[i];
+
+        // Check if this is a heading
+        if line.starts_with('#') {
+            let heading_text = line.trim_start_matches('#').trim();
+
+            // Check for Comments section
+            if heading_text == "Comments" {
+                in_comments = true;
+                color::highlight_markdown(&format!("{line}\n"));
+                i += 1;
+                continue;
+            }
+
+            // Find annotation for this heading
+            if let Some(ann) = annotations.iter().find(|a| a.heading == heading_text) {
+                // Skip annotation if single editor matches created_by and timestamp matches
+                let skip = ann.editors.len() <= 1
+                    && ann.last_editor == created.author
+                    && ann.last_edited_at == created.timestamp;
+                if !skip {
+                    let ts = format_timestamp_local(ann.last_edited_at);
+                    color::highlight_markdown(&format!("{line}"));
+                    if ann.last_editor.is_empty() {
+                        print!("{}", color::dim(&format!(" _(Last edited on {ts})_")));
+                    } else {
+                        print!("{}", color::dim(&format!(" _(Last edited by {} on {})_", ann.last_editor, ts)));
+                    }
+                    println!();
+                    i += 1;
+                    continue;
+                }
+            }
+        }
+
+        if in_comments {
+            // Collect and render comment blocks
+            // Comments are separated by --- and each should get an author/date header
+            if line.trim() == "---" {
+                // Print buffered comment
+                if !comment_buf.is_empty() {
+                    let comment_text = comment_buf.join("\n");
+                    color::highlight_markdown(&format!("{comment_text}\n"));
+                    comment_buf.clear();
+                }
+                color::highlight_markdown(&format!("{line}\n"));
+            } else {
+                comment_buf.push(line);
+            }
+        } else {
+            color::highlight_markdown(&format!("{line}\n"));
+        }
+        i += 1;
+    }
+
+    // Flush remaining comment buffer
+    if !comment_buf.is_empty() {
+        let comment_text = comment_buf.join("\n");
+        color::highlight_markdown(&format!("{comment_text}\n"));
+    }
 }
 
 fn list_container_children(container: &Path) -> Result<Vec<String>> {

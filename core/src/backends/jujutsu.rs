@@ -379,6 +379,77 @@ pub(super) fn jj_sdk_file_change_ids(
     Ok(rows.into_iter().map(|(id, _)| id).collect())
 }
 
+pub(super) fn jj_sdk_file_rich_log(
+    store: &Store,
+    rel_path: &Path,
+    limit: usize,
+) -> Result<Vec<super::LogEntry>> {
+    let path_raw = rel_path.to_string_lossy().replace('\\', "/");
+    let target = RepoPathBuf::from_internal_string(path_raw.clone())
+        .map_err(|_| Error::new(format!("invalid repo-relative path for jj: {path_raw}")))?;
+    let config = StackedConfig::with_defaults();
+    let settings = UserSettings::from_config(config).map_err(|e| Error::new(e.to_string()))?;
+    let store_factories = StoreFactories::default();
+    let wc_factories = default_working_copy_factories();
+    let workspace = Workspace::load(&settings, &store.path, &store_factories, &wc_factories)
+        .map_err(|e| Error::new(format!("jj-lib workspace load failed: {e}")))?;
+    let repo = workspace
+        .repo_loader()
+        .load_at_head()
+        .map_err(|e| Error::new(format!("jj-lib repo load failed: {e}")))?;
+    let mut queue: VecDeque<_> = repo.view().heads().iter().cloned().collect();
+    let mut seen = HashSet::new();
+    let mut entries = Vec::new();
+    while let Some(commit_id) = queue.pop_front() {
+        if entries.len() >= limit {
+            break;
+        }
+        if !seen.insert(commit_id.clone()) {
+            continue;
+        }
+        let mut changed = false;
+        if let Some(paths) = repo
+            .index()
+            .changed_paths_in_commit(&commit_id)
+            .map_err(|e| Error::new(format!("jj-lib changed-path query failed: {e}")))?
+        {
+            for p in paths {
+                if p == target || p.starts_with(target.as_ref()) || target.starts_with(p.as_ref()) {
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        let commit = repo
+            .store()
+            .get_commit(&commit_id)
+            .map_err(|e| Error::new(format!("jj-lib commit load failed: {e}")))?;
+        if changed {
+            let desc = commit.description().trim().to_string();
+            let author = commit.author();
+            let author_name = if author.name.is_empty() {
+                author.email.clone()
+            } else {
+                author.name.clone()
+            };
+            let timestamp = author.timestamp.timestamp.0 / 1000;
+            entries.push(super::LogEntry {
+                revision: commit_id.hex(),
+                timestamp,
+                author: author_name,
+                description: desc,
+                changed_files: Vec::new(),
+            });
+        }
+        for parent_id in commit.parent_ids() {
+            if !seen.contains(parent_id) {
+                queue.push_back(parent_id.clone());
+            }
+        }
+    }
+    Ok(entries)
+}
+
 pub(super) fn jj_sdk_commit_paths(store: &Store, message: &str) -> Result<()> {
     let config = StackedConfig::with_defaults();
     let settings = UserSettings::from_config(config).map_err(|e| Error::new(e.to_string()))?;

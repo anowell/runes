@@ -148,6 +148,36 @@ pub(super) fn pijul_sdk_file_change_ids(
     pijul_sdk_path_hashes(store, rel_path, limit)
 }
 
+pub(super) fn pijul_sdk_file_rich_log(
+    store: &Store,
+    rel_path: &Path,
+    limit: usize,
+) -> Result<Vec<super::LogEntry>> {
+    // Use the store-wide rich_log and filter by description mentioning the file
+    // since pijul's path-based log can be unreliable for newer files
+    let rel_str = rel_path.to_string_lossy();
+    // Extract rune ID from path like "runes/bix--default-to-runes-list.md"
+    let file_stem = rel_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let rune_id = file_stem
+        .split("--")
+        .next()
+        .unwrap_or(file_stem);
+    // Get all entries and filter to those that mention this rune
+    let all_entries = pijul_sdk_rich_log(store, limit * 10)?;
+    let filtered: Vec<_> = all_entries
+        .into_iter()
+        .filter(|e| {
+            e.description.contains(rune_id)
+                || e.changed_files.iter().any(|f| f.contains(&*rel_str))
+        })
+        .take(limit)
+        .collect();
+    Ok(filtered)
+}
+
 pub(super) fn pijul_sdk_show_change(store: &Store, change_id: &str) -> Result<String> {
     let repo = open_pijul_repo(store)?;
     let changes = PijulChangeStore::from_root(&repo.path, 32);
