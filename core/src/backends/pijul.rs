@@ -360,6 +360,40 @@ fn rel_to_internal_path(path: &Path) -> Result<String> {
     Ok(raw)
 }
 
+pub(super) fn pijul_sdk_has_uncommitted_changes(store: &Store) -> Result<bool> {
+    let repo = open_pijul_repo(store)?;
+    let txn = (&repo.pristine)
+        .arc_txn_begin()
+        .map_err(|e| Error::new(format!("libpijul txn begin failed: {e}")))?;
+    let channel_name = txn
+        .read()
+        .current_channel()
+        .map_err(|e| Error::new(format!("libpijul current channel failed: {e}")))?
+        .to_string();
+    let channel = txn
+        .write()
+        .open_or_create_channel(&channel_name)
+        .map_err(|e| Error::new(format!("libpijul open channel failed: {e}")))?;
+    let working_copy = PijulWorkingCopy::from_root(&repo.path);
+    let changes = repo.changes.clone();
+    let mut record = libpijul::RecordBuilder::new();
+    record
+        .record(
+            txn.clone(),
+            libpijul::Algorithm::default(),
+            false,
+            &libpijul::DEFAULT_SEPARATOR,
+            channel,
+            &working_copy,
+            &changes,
+            "",
+            1,
+        )
+        .map_err(|e| Error::new(format!("libpijul record failed: {e}")))?;
+    let recorded = record.finish();
+    Ok(!recorded.actions.is_empty())
+}
+
 pub(super) fn pijul_sdk_commit_paths(
     store: &Store,
     paths: &[PathBuf],

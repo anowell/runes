@@ -15,8 +15,9 @@ use jujutsu::{
 };
 use pijul::{
     pijul_sdk_commit_paths, pijul_sdk_file_at_revision, pijul_sdk_file_before_revision,
-    pijul_sdk_file_change_ids, pijul_sdk_file_log, pijul_sdk_log, pijul_sdk_remove_path,
-    pijul_sdk_rich_log, pijul_sdk_show_change, pijul_sdk_status, pijul_sdk_sync,
+    pijul_sdk_file_change_ids, pijul_sdk_file_log, pijul_sdk_has_uncommitted_changes,
+    pijul_sdk_log, pijul_sdk_remove_path, pijul_sdk_rich_log, pijul_sdk_show_change,
+    pijul_sdk_status, pijul_sdk_sync,
 };
 
 /// A structured log entry from the backend.
@@ -155,11 +156,7 @@ impl BackendAdapter for CliBackend {
     fn has_uncommitted_changes(&self, store: &Store) -> Result<bool> {
         match self.kind {
             BackendKind::Jj => jj_sdk_has_uncommitted_changes(store),
-            BackendKind::Pijul => {
-                // Parse status output for dirty state
-                let status = pijul_sdk_status(store)?;
-                Ok(!status.contains("working_copy=clean"))
-            }
+            BackendKind::Pijul => pijul_sdk_has_uncommitted_changes(store),
         }
     }
 
