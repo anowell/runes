@@ -82,7 +82,7 @@ pub fn status_color(status: &str) -> String {
 
 pub fn colored_id(id: &str) -> String {
     if let Some((project, short)) = id.split_once('-') {
-        format!("{}{}", dim(project), purple(&format!("-{short}")))
+        format!("{}{}", dim(&format!("{project}-")), purple(short))
     } else {
         id.to_string()
     }

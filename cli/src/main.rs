@@ -218,6 +218,9 @@ struct ListArgs {
     /// Include archived docs in results
     #[arg(long = "with-archived", conflicts_with = "archived")]
     with_archived: bool,
+    /// Output as JSON
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -227,6 +230,9 @@ struct ShowArgs {
     /// Show rune at a specific revision
     #[arg(long)]
     revision: Option<String>,
+    /// Output as JSON
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -338,6 +344,9 @@ struct LogArgs {
     /// Filter by change author
     #[arg(long = "changed-by")]
     changed_by: Option<String>,
+    /// Output as JSON
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -1188,6 +1197,7 @@ fn run_list(args: ListArgs) -> Result<()> {
         assignee,
         archived,
         with_archived,
+        json,
     } = args;
     let mut archived_mode = if archived {
         ArchivedMode::Only
@@ -1271,7 +1281,22 @@ fn run_list(args: ListArgs) -> Result<()> {
     let result = match list_kind {
         ListKind::Issues => {
             let rows = query_issues(&store, filters)?;
-            print_issue_table(&rows);
+            if json {
+                let json_rows: Vec<serde_json::Value> = rows.iter().map(|row| {
+                    serde_json::json!({
+                        "kind": row.kind,
+                        "id": row.id,
+                        "store": store.name,
+                        "project": row.project,
+                        "path": row.path,
+                        "status": row.status,
+                        "assignee": if row.assignee.is_empty() { None } else { Some(&row.assignee) },
+                    })
+                }).collect();
+                println!("{}", serde_json::to_string_pretty(&json_rows).unwrap());
+            } else {
+                print_issue_table(&rows);
+            }
             Ok(())
         }
         ListKind::Milestones => {
@@ -1295,7 +1320,9 @@ fn run_list(args: ListArgs) -> Result<()> {
             Ok(())
         }
     };
-    warn_if_uncommitted(&store);
+    if !json {
+        warn_if_uncommitted(&store);
+    }
     result
 }
 fn all_projects(store: &Store) -> Result<Vec<String>> {
@@ -1412,22 +1439,22 @@ fn print_issue_table(rows: &[cache::CacheRow]) {
     let mut w_id = "id".len();
     let mut w_kind = "kind".len();
     let mut w_status = "status".len();
+    let mut w_assignee = "assignee".len();
     let mut w_title = "title".len();
-    let mut w_path = "path".len();
     for row in rows {
         w_id = w_id.max(row.id.len());
         w_kind = w_kind.max(row.kind.len());
         w_status = w_status.max(row.status.len());
+        w_assignee = w_assignee.max(row.assignee.len());
         w_title = w_title.max(row.title.len());
-        w_path = w_path.max(row.path.len());
     }
     // Header
     println!(
-        "{:<w_id$}  {:<w_kind$}  {:<w_status$}  {:<w_title$}  {:<w_path$}",
-        "id", "kind", "status", "title", "path"
+        "{:<w_id$}  {:<w_kind$}  {:<w_status$}  {:<w_assignee$}  {:<w_title$}",
+        "id", "kind", "status", "assignee", "title"
     );
     println!(
-        "{:-<w_id$}  {:-<w_kind$}  {:-<w_status$}  {:-<w_title$}  {:-<w_path$}",
+        "{:-<w_id$}  {:-<w_kind$}  {:-<w_status$}  {:-<w_assignee$}  {:-<w_title$}",
         "", "", "", "", ""
     );
     for row in rows {
@@ -1437,8 +1464,8 @@ fn print_issue_table(rows: &[cache::CacheRow]) {
         let id_pad = w_id.saturating_sub(row.id.len());
         let status_pad = w_status.saturating_sub(row.status.len());
         println!(
-            "{}{:id_pad$}  {:<w_kind$}  {}{:status_pad$}  {:<w_title$}  {:<w_path$}",
-            id, "", row.kind, status, "", row.title, row.path
+            "{}{:id_pad$}  {:<w_kind$}  {}{:status_pad$}  {:<w_assignee$}  {:<w_title$}",
+            id, "", row.kind, status, "", row.assignee, row.title
         );
     }
 }
@@ -1452,11 +1479,38 @@ fn run_show(args: ShowArgs) -> Result<()> {
             .strip_prefix(&store.path)
             .map_err(|e| Error::new(e.to_string()))?;
         let contents = backend::file_at_revision(&store, rel_path, revision)?;
-        println!("revision={}", &revision[..revision.len().min(12)]);
+        if !args.json {
+            println!("revision={}", &revision[..revision.len().min(12)]);
+        }
         contents
     } else {
         fs::read_to_string(&path)?
     };
+
+    if args.json {
+        let doc = parse_doc(&path)?;
+        let rel_path = path
+            .strip_prefix(&store.path)
+            .map_err(|e| Error::new(e.to_string()))?
+            .display()
+            .to_string();
+        let project = doc.id.split('-').next().unwrap_or("").to_string();
+        let json = serde_json::json!({
+            "kind": doc.kind,
+            "id": doc.id,
+            "store": store.name,
+            "project": project,
+            "path": rel_path,
+            "status": doc.status,
+            "assignee": doc.assignee,
+            "deps": doc.deps,
+            "labels": doc.labels,
+            "content": content.trim(),
+        });
+        println!("{}", serde_json::to_string_pretty(&json).unwrap());
+        return Ok(());
+    }
+
     print_highlighted_rune_doc(&content);
     let doc = parse_doc(&path)?;
     if doc.kind == "milestone" {
@@ -1965,6 +2019,41 @@ fn rune_id_from_description(desc: &str) -> Option<String> {
     None
 }
 
+fn print_log_entries_json(entries: &[LogEntry], rune_filter: Option<&str>, author_filter: Option<&str>) {
+    let mut json_entries = Vec::new();
+    for entry in entries {
+        if let Some(author) = author_filter {
+            if !entry.author.eq_ignore_ascii_case(author) {
+                continue;
+            }
+        }
+        let rune_ids: Vec<String> = if !entry.changed_files.is_empty() {
+            entry
+                .changed_files
+                .iter()
+                .filter_map(|f| rune_id_from_path(f))
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect()
+        } else {
+            rune_id_from_description(&entry.description).into_iter().collect()
+        };
+        if let Some(filter_id) = rune_filter {
+            if !rune_ids.iter().any(|rid| rid == filter_id) {
+                continue;
+            }
+        }
+        let comment = entry.description.lines().next().unwrap_or("").trim();
+        json_entries.push(serde_json::json!({
+            "revision": entry.revision,
+            "committed_at": entry.timestamp,
+            "runes": rune_ids,
+            "comment": comment,
+        }));
+    }
+    println!("{}", serde_json::to_string_pretty(&json_entries).unwrap());
+}
+
 fn print_log_entries(entries: &[LogEntry], rune_filter: Option<&str>, author_filter: Option<&str>) {
     for entry in entries {
         if let Some(author) = author_filter {
@@ -2020,6 +2109,7 @@ fn run_log(args: LogArgs) -> Result<()> {
         limit,
         section,
         changed_by,
+        json,
     } = args;
     let limit = limit.unwrap_or(50);
     let (cfg, user_cfg, cwd) = load_context()?;
@@ -2074,7 +2164,11 @@ fn run_log(args: LogArgs) -> Result<()> {
         None => None,
     };
     let entries = backend::rich_log(&store, limit)?;
-    print_log_entries(&entries, rune_filter.as_deref(), changed_by.as_deref());
+    if json {
+        print_log_entries_json(&entries, rune_filter.as_deref(), changed_by.as_deref());
+    } else {
+        print_log_entries(&entries, rune_filter.as_deref(), changed_by.as_deref());
+    }
     Ok(())
 }
 fn run_diff(args: DiffArgs) -> Result<()> {
