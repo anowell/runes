@@ -664,23 +664,142 @@ fn commit_store_changes(store: &Store, message: &str) -> Result<()> {
     Ok(())
 }
 
-fn auto_commit_message(ids: &[String], verb: &str) -> String {
-    let first_line = match ids.len() {
-        0 => format!("{verb} runes"),
-        1 => format!("{verb} {}", ids[0]),
-        2 | 3 => format!("{verb} {}", ids.join(", ")),
-        n => format!("{verb} {n} runes"),
-    };
-    if ids.len() > 1 {
-        let mut msg = first_line;
-        msg.push('\n');
-        for id in ids {
-            msg.push_str(&format!("\n- {verb} {id}"));
-        }
-        msg
-    } else {
-        first_line
+/// Build a compact change description from an old and new RuneDoc.
+/// Returns snippets like "in-progress", "assign to alice", "description", "comments", etc.
+fn edit_change_snippets(old: &RuneDoc, new: &RuneDoc) -> Vec<String> {
+    let mut snippets = Vec::new();
+    // Status change (highest priority)
+    if old.status != new.status {
+        snippets.push(new.status.clone());
     }
+    // Assignee change
+    if old.assignee != new.assignee {
+        match &new.assignee {
+            Some(a) => snippets.push(format!("assign to {a}")),
+            None => snippets.push("unassign".to_string()),
+        }
+    }
+    // Label changes
+    let added_labels: Vec<_> = new.labels.iter().filter(|l| !old.labels.contains(l)).collect();
+    let removed_labels: Vec<_> = old.labels.iter().filter(|l| !new.labels.contains(l)).collect();
+    if !added_labels.is_empty() || !removed_labels.is_empty() {
+        snippets.push("labels".to_string());
+    }
+    // Milestone change
+    if old.milestone != new.milestone {
+        snippets.push("milestone".to_string());
+    }
+    // Relation changes
+    if old.relations != new.relations {
+        snippets.push("relations".to_string());
+    }
+    // Body/section changes — detect which sections changed
+    let old_sections = body_section_names(&old.body);
+    let new_sections = body_section_names(&new.body);
+    // Check for changed section content
+    for section in &new_sections {
+        let old_content = extract_section_content(&old.body, section);
+        let new_content = extract_section_content(&new.body, section);
+        if old_content != new_content {
+            snippets.push(section.to_lowercase());
+        }
+    }
+    // Check for new sections
+    for section in &new_sections {
+        if !old_sections.contains(section) && !snippets.iter().any(|s| s == &section.to_lowercase()) {
+            snippets.push(section.to_lowercase());
+        }
+    }
+    // If body changed but no section-level diff caught it, say "description"
+    if old.body != new.body && snippets.iter().all(|s| {
+        !["description", "design", "comments", "notes", "acceptance criteria"].contains(&s.as_str())
+    }) {
+        // Check if the non-section body content changed
+        let old_main = extract_section_content(&old.body, "");
+        let new_main = extract_section_content(&new.body, "");
+        if old_main != new_main {
+            snippets.push("description".to_string());
+        }
+    }
+    // Extra frontmatter
+    if old.frontmatter_extra != new.frontmatter_extra {
+        snippets.push("meta".to_string());
+    }
+    snippets
+}
+
+/// Extract `## Section` names from a body.
+fn body_section_names(body: &str) -> Vec<String> {
+    body.lines()
+        .filter_map(|line| {
+            line.strip_prefix("## ").map(|rest| rest.trim().to_string())
+        })
+        .collect()
+}
+
+/// Extract content of a named section (or main body if name is empty).
+fn extract_section_content<'a>(body: &'a str, section_name: &str) -> String {
+    let mut collecting = section_name.is_empty();
+    let mut content = String::new();
+    for line in body.lines() {
+        if let Some(heading) = line.strip_prefix("## ") {
+            if section_name.is_empty() {
+                // Stop at first ## heading for main body
+                break;
+            }
+            if heading.trim() == section_name {
+                collecting = true;
+                continue;
+            } else if collecting {
+                break;
+            }
+        }
+        if collecting {
+            content.push_str(line);
+            content.push('\n');
+        }
+    }
+    content
+}
+
+/// Build a commit message with verb, id, and optional change snippets, capped at ~100 chars.
+fn build_commit_message(verb: &str, id: &str, snippets: &[String]) -> String {
+    let prefix = format!("{verb} {id}");
+    if snippets.is_empty() {
+        return prefix;
+    }
+    let joined = snippets.join(", ");
+    let full = format!("{prefix}: {joined}");
+    if full.len() <= 100 {
+        return full;
+    }
+    // Truncate by including snippets until we'd exceed the limit
+    let mut msg = prefix.clone();
+    msg.push_str(": ");
+    let budget = 100 - msg.len();
+    let mut remaining = budget;
+    let mut included = 0;
+    for (i, snippet) in snippets.iter().enumerate() {
+        let sep_len = if i > 0 { 2 } else { 0 }; // ", "
+        let needed = sep_len + snippet.len();
+        if needed > remaining {
+            break;
+        }
+        if i > 0 {
+            msg.push_str(", ");
+        }
+        msg.push_str(snippet);
+        remaining -= needed;
+        included += 1;
+    }
+    if included == 0 {
+        // First snippet itself is too long, truncate it
+        let mut truncated = snippets[0].clone();
+        truncated.truncate(budget.saturating_sub(3));
+        msg.push_str(&truncated);
+        msg.push_str("...");
+    }
+    msg
 }
 
 fn reconcile_filename(path: &Path, full_id: &str) -> Result<PathBuf> {
@@ -705,18 +824,15 @@ fn reconcile_filename(path: &Path, full_id: &str) -> Result<PathBuf> {
 fn maybe_commit(
     store: &Store,
     no_commit: bool,
-    message: Option<&str>,
-    ids: &[String],
-    verb: &str,
+    user_message: Option<&str>,
+    default_message: &str,
 ) -> Result<()> {
-    if no_commit && message.is_none() {
+    if no_commit && user_message.is_none() {
         eprintln!("hint: uncommitted changes pending. Will be included in next commit or `runes commit`.");
         return Ok(());
     }
-    let msg = message
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| auto_commit_message(ids, verb));
-    commit_store_changes(store, &msg)
+    let msg = user_message.unwrap_or(default_message);
+    commit_store_changes(store, msg)
 }
 
 fn warn_if_uncommitted(store: &Store) {
@@ -932,7 +1048,8 @@ fn run_new(args: NewArgs) -> Result<()> {
         fs::write(&doc_path, render_doc(&doc))?;
     }
     let _final_path = reconcile_filename(&doc_path, &identifier)?;
-    maybe_commit(&store, no_commit, message.as_deref(), &[identifier.clone()], "Add")?;
+    let default_msg = build_commit_message("Add", &identifier, &[status.clone()]);
+    maybe_commit(&store, no_commit, message.as_deref(), &default_msg)?;
     println!("{identifier}");
     Ok(())
 }
@@ -1374,6 +1491,7 @@ fn run_edit(args: EditArgs) -> Result<()> {
     let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id)?;
     let path = locate_doc(&store, &id)?;
     let mut doc = parse_doc(&path)?;
+    let original_doc = doc.clone();
     let original_title = doc.title.clone();
     let has_field_edits = title.is_some()
         || status.is_some()
@@ -1464,7 +1582,9 @@ fn run_edit(args: EditArgs) -> Result<()> {
         return Err(Error::new("No edits specified and no editor available"));
     }
     let _final_path = reconcile_filename(&path, &doc.id)?;
-    maybe_commit(&store, no_commit, message.as_deref(), &[doc.id.clone()], "Update")?;
+    let snippets = edit_change_snippets(&original_doc, &doc);
+    let default_msg = build_commit_message("Update", &doc.id, &snippets);
+    maybe_commit(&store, no_commit, message.as_deref(), &default_msg)?;
     Ok(())
 }
 
@@ -1592,17 +1712,17 @@ fn run_move(args: MoveArgs) -> Result<()> {
     let (to_store, project) =
         resolve_store_and_project_required(&cfg, &user_cfg, &cwd, None, &target_project)?;
     move_rune(&from_store, &to_store, &id, &project, parent.as_deref())?;
+    let move_msg = format!("Move {id} to {project}");
     if from_store.name == to_store.name {
-        maybe_commit(&from_store, no_commit, message.as_deref(), &[id.clone()], "Move")?;
+        maybe_commit(&from_store, no_commit, message.as_deref(), &move_msg)?;
     } else {
-        maybe_commit(&to_store, no_commit, message.as_deref(), &[id.clone()], "Move in")?;
+        let move_in_msg = format!("Move in {id} from {}", from_store.name);
+        maybe_commit(&to_store, no_commit, message.as_deref(), &move_in_msg)?;
         // Commit the removal from the source store
         if !no_commit || message.is_some() {
-            let from_msg = message
-                .as_deref()
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| format!("Move out {id}"));
-            commit_store_changes(&from_store, &from_msg)?;
+            let default_from_msg = format!("Move out {id} to {}", to_store.name);
+            let from_msg = message.as_deref().unwrap_or(&default_from_msg);
+            commit_store_changes(&from_store, from_msg)?;
         }
     }
     Ok(())
@@ -1612,7 +1732,8 @@ fn run_archive(args: ArchiveArgs) -> Result<()> {
     let (cfg, user_cfg, cwd) = load_context()?;
     let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id)?;
     archive_rune(&store, &id)?;
-    maybe_commit(&store, no_commit, message.as_deref(), &[id], "Archive")?;
+    let default_msg = format!("Archive {id}");
+    maybe_commit(&store, no_commit, message.as_deref(), &default_msg)?;
     Ok(())
 }
 
@@ -1656,7 +1777,8 @@ fn run_delete(args: DeleteArgs) -> Result<()> {
     let (cfg, user_cfg, cwd) = load_context()?;
     let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id)?;
     delete_rune(&store, &id)?;
-    maybe_commit(&store, no_commit, message.as_deref(), &[id], "Delete")?;
+    let default_msg = format!("Delete {id}");
+    maybe_commit(&store, no_commit, message.as_deref(), &default_msg)?;
     Ok(())
 }
 
@@ -1743,6 +1865,29 @@ fn description_line_for_id<'a>(description: &'a str, id: &str) -> &'a str {
     description.lines().next().unwrap_or("").trim()
 }
 
+/// Try to extract a rune ID from a commit description.
+/// Matches patterns like "Add runes-x3s", "Update runes-tfc", "Record dli-zwc.5"
+fn rune_id_from_description(desc: &str) -> Option<String> {
+    // Look for <project>-<shortid> pattern (letters/digits, hyphen, letters/digits)
+    // Common prefixes: Add, Update, Record, Delete, Archive, Move, Restore
+    let first_line = desc.lines().next().unwrap_or("").trim();
+    // Try to find a token that looks like a rune ID: word-word pattern
+    for token in first_line.split_whitespace() {
+        // Strip trailing punctuation and version suffixes like ".5"
+        let base = token.split('.').next().unwrap_or(token);
+        if let Some((proj, short)) = base.split_once('-') {
+            if !proj.is_empty()
+                && !short.is_empty()
+                && proj.chars().all(|c| c.is_alphanumeric())
+                && short.chars().all(|c| c.is_alphanumeric())
+            {
+                return Some(base.to_string());
+            }
+        }
+    }
+    None
+}
+
 fn print_log_entries(entries: &[LogEntry], rune_filter: Option<&str>, author_filter: Option<&str>) {
     for entry in entries {
         if let Some(author) = author_filter {
@@ -1752,42 +1897,42 @@ fn print_log_entries(entries: &[LogEntry], rune_filter: Option<&str>, author_fil
         }
         let short_rev = &entry.revision[..entry.revision.len().min(12)];
         let ts = format_log_timestamp(entry.timestamp);
-        if entry.changed_files.is_empty() {
-            // No file info available (e.g. pijul) — show entry as-is
-            if rune_filter.is_some() {
-                // Can't filter by rune without changed_files
-                continue;
-            }
-            let desc = entry.description.lines().next().unwrap_or("").trim();
-            println!("{short_rev}  {ts}  {author}  {desc}", author = entry.author);
-        } else {
-            let rune_ids: Vec<String> = entry
+
+        // Derive rune IDs from changed files, falling back to description parsing
+        let rune_ids: Vec<String> = if !entry.changed_files.is_empty() {
+            entry
                 .changed_files
                 .iter()
                 .filter_map(|f| rune_id_from_path(f))
                 .collect::<std::collections::HashSet<_>>()
                 .into_iter()
-                .collect();
-            if rune_ids.is_empty() {
+                .collect()
+        } else {
+            rune_id_from_description(&entry.description).into_iter().collect()
+        };
+
+        if rune_ids.is_empty() {
+            if rune_filter.is_some() {
                 continue;
             }
+            let desc = entry.description.lines().next().unwrap_or("").trim();
+            println!("{short_rev}  {ts}  {desc}");
+            continue;
+        }
+
+        if let Some(filter_id) = rune_filter {
+            if !rune_ids.iter().any(|rid| rid == filter_id) {
+                continue;
+            }
+        }
+        for rune_id in &rune_ids {
             if let Some(filter_id) = rune_filter {
-                if !rune_ids.iter().any(|rid| rid == filter_id) {
+                if rune_id != filter_id {
                     continue;
                 }
             }
-            for rune_id in &rune_ids {
-                if let Some(filter_id) = rune_filter {
-                    if rune_id != filter_id {
-                        continue;
-                    }
-                }
-                let desc = description_line_for_id(&entry.description, rune_id);
-                println!(
-                    "{short_rev}  {ts}  {rune_id}  {author}  {desc}",
-                    author = entry.author
-                );
-            }
+            let desc = description_line_for_id(&entry.description, rune_id);
+            println!("{short_rev}  {ts}  {rune_id}  {desc}");
         }
     }
 }
@@ -1875,14 +2020,7 @@ fn run_restore(args: RestoreArgs) -> Result<()> {
     let short_rev = &revision[..revision.len().min(12)];
     println!("Restored {} to revision {short_rev}", doc.id);
     let default_msg = format!("Restore {} to revision {short_rev}", doc.id);
-    let commit_msg = message.as_deref().unwrap_or(&default_msg);
-    maybe_commit(
-        &store,
-        no_commit,
-        Some(commit_msg),
-        &[doc.id.clone()],
-        "Restore",
-    )?;
+    maybe_commit(&store, no_commit, message.as_deref(), &default_msg)?;
     Ok(())
 }
 

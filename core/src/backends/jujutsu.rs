@@ -9,7 +9,7 @@ use jj_lib::git::{
 };
 use jj_lib::gitignore::GitIgnoreFile;
 use jj_lib::matchers::EverythingMatcher;
-use jj_lib::merged_tree::MergedTree;
+use jj_lib::merged_tree::{MergedTree, TreeDiffIterator};
 use jj_lib::object_id::{HexPrefix, ObjectId, PrefixResolution};
 use jj_lib::refs::{classify_bookmark_push_action, BookmarkPushAction, LocalAndRemoteRef};
 use jj_lib::repo::Repo as _;
@@ -197,7 +197,18 @@ pub(super) fn jj_sdk_rich_log(store: &Store, limit: usize) -> Result<Vec<super::
             .map_err(|e| Error::new(format!("jj-lib changed-path query failed: {e}")))?
         {
             Some(paths) => paths.map(|p| p.as_internal_file_string().to_string()).collect(),
-            None => Vec::new(),
+            None => {
+                // Fallback: diff commit tree against parent tree
+                let parent_tree = commit.parent_tree(repo.as_ref())
+                    .map_err(|e| Error::new(format!("jj-lib parent tree failed: {e}")))?;
+                let commit_tree = commit.tree();
+                TreeDiffIterator::new(&parent_tree, &commit_tree, &EverythingMatcher)
+                    .filter_map(|entry| {
+                        let path_str = entry.path.as_internal_file_string().to_string();
+                        if path_str.ends_with(".md") { Some(path_str) } else { None }
+                    })
+                    .collect()
+            }
         };
         entries.push(super::LogEntry {
             revision: commit_id.hex(),
