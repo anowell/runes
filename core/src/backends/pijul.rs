@@ -346,21 +346,13 @@ fn pijul_file_at_revision_impl(
             Vec::new()
         }
         Err(e) => {
-            // Clean up before returning error
-            drop(temp_channel);
-            let _ = txn.write().drop_channel(&temp_name);
-            let _ = txn.commit();
             return Err(Error::new(format!("libpijul follow path failed: {e}")));
         }
     };
 
-    // Clean up the temp channel — must drop the reference first
-    drop(temp_channel);
-    txn.write()
-        .drop_channel(&temp_name)
-        .map_err(|e| Error::new(format!("libpijul drop temp channel failed: {e}")))?;
-    txn.commit()
-        .map_err(|e| Error::new(format!("libpijul commit failed: {e}")))?;
+    // Do NOT commit the transaction — unrecord corrupts shared tree/inode
+    // tables, so we let the transaction roll back to avoid polluting the
+    // working-copy tracking state of the real channel.
 
     String::from_utf8(bytes)
         .map_err(|e| Error::new(format!("file content is not valid UTF-8: {e}")))
