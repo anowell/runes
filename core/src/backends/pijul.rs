@@ -215,12 +215,106 @@ pub(super) fn pijul_sdk_file_at_revision(
     rel_path: &Path,
     revision: &str,
 ) -> Result<String> {
-    // For pijul, we'd need to reconstruct the file at a specific change.
-    // This is complex with libpijul — for now, return an error.
-    let _ = (store, rel_path);
-    Err(Error::new(format!(
-        "file_at_revision is not yet supported for pijul (revision: {revision})"
-    )))
+    let repo = open_pijul_repo(store)?;
+    let txn = (&repo.pristine)
+        .arc_txn_begin()
+        .map_err(|e| Error::new(format!("libpijul txn begin failed: {e}")))?;
+
+    let channel_name = txn
+        .read()
+        .current_channel()
+        .map_err(|e| Error::new(format!("libpijul current channel failed: {e}")))?
+        .to_string();
+    let channel = {
+        let txn_read = txn.read();
+        txn_read
+            .load_channel(&channel_name)
+            .map_err(|e| Error::new(format!("libpijul load channel failed: {e}")))?
+            .ok_or_else(|| Error::new(format!("missing pijul channel: {channel_name}")))?
+    };
+
+    // Resolve the target revision hash (supports prefix matching)
+    let (target_hash, _) = txn
+        .read()
+        .hash_from_prefix(revision)
+        .map_err(|e| Error::new(format!("could not resolve pijul revision '{revision}': {e}")))?;
+
+    // Find the log position of the target change by walking the reverse log
+    let target_n = {
+        let txn_read = txn.read();
+        let ch = channel.read();
+        let mut found = None;
+        for item in txn_read
+            .reverse_log(&*ch, None)
+            .map_err(|e| Error::new(format!("libpijul reverse log failed: {e}")))?
+        {
+            let (n, pair) =
+                item.map_err(|e| Error::new(format!("libpijul reverse log item failed: {e}")))?;
+            let hash: Hash = pair.0.into();
+            if hash == target_hash {
+                found = Some(n);
+                break;
+            }
+        }
+        found.ok_or_else(|| Error::new(format!("revision {revision} not found in channel log")))?
+    };
+
+    // Fork the channel to a temp channel
+    let temp_name = format!("_runes_temp_{}", std::process::id());
+    let temp_channel = txn
+        .write()
+        .fork(&channel, &temp_name)
+        .map_err(|e| Error::new(format!("libpijul fork channel failed: {e}")))?;
+
+    // Collect changes newer than target_n and unrecord them
+    let changes_to_unrecord: Vec<Hash> = {
+        let txn_read = txn.read();
+        let ch = temp_channel.read();
+        let mut to_remove = Vec::new();
+        for item in txn_read
+            .reverse_log(&*ch, None)
+            .map_err(|e| Error::new(format!("libpijul reverse log failed: {e}")))?
+        {
+            let (n, pair) =
+                item.map_err(|e| Error::new(format!("libpijul reverse log item failed: {e}")))?;
+            if n > target_n {
+                to_remove.push(pair.0.into());
+            } else {
+                break;
+            }
+        }
+        to_remove
+    };
+
+    let working_copy = PijulWorkingCopy::from_root(&repo.path);
+    for hash in &changes_to_unrecord {
+        txn.write()
+            .unrecord(&repo.changes, &temp_channel, hash, 0, &working_copy)
+            .map_err(|e| Error::new(format!("libpijul unrecord failed: {e}")))?;
+    }
+
+    // Read the file from the temp channel
+    let internal_path = rel_to_internal_path(rel_path)?;
+    let (pos, _ambiguous) = txn
+        .read()
+        .follow_oldest_path(&repo.changes, &temp_channel, &internal_path)
+        .map_err(|e| Error::new(format!("libpijul follow path failed: {e}")))?;
+
+    let mut writer = libpijul::vertex_buffer::Writer::new(Vec::<u8>::new());
+    libpijul::output::output_file(&repo.changes, &txn, &temp_channel, pos, &mut writer)
+        .map_err(|e| Error::new(format!("libpijul output file failed: {e}")))?;
+    let bytes = writer.into_inner();
+
+    // Clean up the temp channel — must drop the reference first
+    drop(temp_channel);
+    txn.write()
+        .drop_channel(&temp_name)
+        .map_err(|e| Error::new(format!("libpijul drop temp channel failed: {e}")))?;
+    txn.commit()
+        .map_err(|e| Error::new(format!("libpijul commit failed: {e}")))?;
+
+    String::from_utf8(bytes)
+        .map_err(|e| Error::new(format!("file content is not valid UTF-8: {e}")))
 }
 
 fn rel_to_internal_path(path: &Path) -> Result<String> {
