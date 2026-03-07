@@ -43,6 +43,8 @@ enum CliCommand {
     Delete(DeleteArgs),
     /// Show change log for store or a specific rune doc
     Log(LogArgs),
+    /// Show diff for a rune doc at a revision or between revisions
+    Diff(DiffArgs),
     /// Restore a rune doc to a previous revision
     Restore(RestoreArgs),
     /// Sync store with its backend
@@ -338,6 +340,21 @@ struct LogArgs {
 }
 
 #[derive(Debug, Parser)]
+struct DiffArgs {
+    /// Rune doc ID
+    id: String,
+    /// Show what changed in this specific revision
+    #[arg(short = 'r', long = "revision", conflicts_with_all = ["from", "to"])]
+    revision: Option<String>,
+    /// Diff from this revision (to working copy, or to --to revision)
+    #[arg(long)]
+    from: Option<String>,
+    /// Diff to this revision (requires --from)
+    #[arg(long, requires = "from")]
+    to: Option<String>,
+}
+
+#[derive(Debug, Parser)]
 struct RestoreArgs {
     /// Rune doc ID to restore
     id: String,
@@ -382,6 +399,7 @@ fn handle_command(command: CliCommand) -> Result<()> {
         CliCommand::Archive(args) => run_archive(args),
         CliCommand::Delete(args) => run_delete(args),
         CliCommand::Log(args) => run_log(args),
+        CliCommand::Diff(args) => run_diff(args),
         CliCommand::Restore(args) => run_restore(args),
         CliCommand::Sync(args) => run_sync(args),
         CliCommand::Store(store_cmd) => run_store(store_cmd),
@@ -2000,6 +2018,107 @@ fn run_log(args: LogArgs) -> Result<()> {
     print_log_entries(&entries, rune_filter.as_deref(), changed_by.as_deref());
     Ok(())
 }
+fn run_diff(args: DiffArgs) -> Result<()> {
+    let DiffArgs {
+        id,
+        revision,
+        from,
+        to,
+    } = args;
+    let (cfg, user_cfg, cwd) = load_context()?;
+    let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id)?;
+    let path = locate_doc(&store, &id)?;
+    let rel_path = path
+        .strip_prefix(&store.path)
+        .map_err(|e| Error::new(e.to_string()))?;
+
+    match store.backend {
+        BackendKind::Jj => run_diff_jj(&store, rel_path, revision, from, to),
+        BackendKind::Pijul => run_diff_sdk(&store, &path, rel_path, revision, from, to),
+    }
+}
+
+fn run_diff_jj(
+    store: &Store,
+    rel_path: &Path,
+    revision: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+) -> Result<()> {
+    let mut cmd = Command::new("jj");
+    cmd.arg("diff").current_dir(&store.path);
+    if let Some(rev) = revision {
+        cmd.arg("-r").arg(&rev);
+    } else if let Some(from_rev) = from {
+        cmd.arg("--from").arg(&from_rev);
+        if let Some(to_rev) = to {
+            cmd.arg("--to").arg(&to_rev);
+        }
+    }
+    cmd.arg("--").arg(rel_path);
+    let output = cmd.output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::new(format!("jj diff failed: {}", stderr.trim())));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    print!("{stdout}");
+    Ok(())
+}
+
+fn run_diff_sdk(
+    store: &Store,
+    abs_path: &Path,
+    rel_path: &Path,
+    revision: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+) -> Result<()> {
+    if let Some(rev) = revision {
+        // Single revision diff: state before vs state after
+        let before = backend::file_before_revision(store, rel_path, &rev)?;
+        let after = backend::file_at_revision(store, rel_path, &rev)?;
+        print_unified_diff(rel_path, &before, &after);
+    } else if let Some(from_rev) = from {
+        let before = backend::file_at_revision(store, rel_path, &from_rev)?;
+        let after = if let Some(to_rev) = to {
+            backend::file_at_revision(store, rel_path, &to_rev)?
+        } else {
+            fs::read_to_string(abs_path)?
+        };
+        print_unified_diff(rel_path, &before, &after);
+    } else {
+        // No revision specified — show uncommitted changes via backend CLI
+        let cmd_name = store.backend.as_str();
+        let mut cmd = Command::new(cmd_name);
+        cmd.arg("diff")
+            .arg("--")
+            .arg(rel_path)
+            .current_dir(&store.path);
+        let output = cmd.output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        print!("{stdout}");
+    }
+    Ok(())
+}
+
+fn print_unified_diff(rel_path: &Path, before: &str, after: &str) {
+    let diff = similar::TextDiff::from_lines(before, after);
+    let path_str = rel_path.display();
+    let mut has_changes = false;
+    for hunk in diff.unified_diff().context_radius(3).iter_hunks() {
+        if !has_changes {
+            println!("--- a/{path_str}");
+            println!("+++ b/{path_str}");
+            has_changes = true;
+        }
+        print!("{hunk}");
+    }
+    if !has_changes {
+        println!("(no changes)");
+    }
+}
+
 fn run_restore(args: RestoreArgs) -> Result<()> {
     let RestoreArgs {
         id,

@@ -260,6 +260,38 @@ pub(super) fn jj_sdk_file_at_revision(
     }
 }
 
+pub(super) fn jj_sdk_file_before_revision(
+    store: &Store,
+    rel_path: &Path,
+    revision: &str,
+) -> Result<String> {
+    let path_raw = rel_path.to_string_lossy().replace('\\', "/");
+    let repo_path = RepoPathBuf::from_internal_string(path_raw.clone())
+        .map_err(|_| Error::new(format!("invalid repo-relative path for jj: {path_raw}")))?;
+    let config = StackedConfig::with_defaults();
+    let settings = UserSettings::from_config(config).map_err(|e| Error::new(e.to_string()))?;
+    let store_factories = StoreFactories::default();
+    let wc_factories = default_working_copy_factories();
+    let workspace = Workspace::load(&settings, &store.path, &store_factories, &wc_factories)
+        .map_err(|e| Error::new(format!("jj-lib workspace load failed: {e}")))?;
+    let repo = workspace
+        .repo_loader()
+        .load_at_head()
+        .map_err(|e| Error::new(format!("jj-lib repo load failed: {e}")))?;
+    let resolved = jj_resolve_commit_id(repo.as_ref(), revision)?;
+    let commit = repo
+        .store()
+        .get_commit(&resolved)
+        .map_err(|e| Error::new(format!("jj-lib commit load failed: {e}")))?;
+    let parent_tree = commit
+        .parent_tree(repo.as_ref())
+        .map_err(|e| Error::new(format!("jj-lib parent tree failed: {e}")))?;
+    match jj_materialize_file(repo.store().as_ref(), &parent_tree, repo_path.as_ref())? {
+        Some(contents) => Ok(contents),
+        None => Ok(String::new()), // File didn't exist before this revision
+    }
+}
+
 fn jj_collect_commits_for_path(
     store: &Store,
     rel_path: &Path,

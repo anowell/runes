@@ -210,10 +210,14 @@ pub(super) fn pijul_sdk_rich_log(store: &Store, limit: usize) -> Result<Vec<supe
     Ok(entries)
 }
 
-pub(super) fn pijul_sdk_file_at_revision(
+/// Get file content at a specific revision state.
+/// If `inclusive` is true, the revision's change is included (state after the change).
+/// If `inclusive` is false, the revision's change is excluded (state before the change).
+fn pijul_file_at_revision_impl(
     store: &Store,
     rel_path: &Path,
     revision: &str,
+    inclusive: bool,
 ) -> Result<String> {
     let repo = open_pijul_repo(store)?;
     let txn = (&repo.pristine)
@@ -266,7 +270,8 @@ pub(super) fn pijul_sdk_file_at_revision(
         .fork(&channel, &temp_name)
         .map_err(|e| Error::new(format!("libpijul fork channel failed: {e}")))?;
 
-    // Collect changes newer than target_n and unrecord them
+    // Collect changes to unrecord: everything after target_n,
+    // plus the target itself if not inclusive
     let changes_to_unrecord: Vec<Hash> = {
         let txn_read = txn.read();
         let ch = temp_channel.read();
@@ -277,7 +282,7 @@ pub(super) fn pijul_sdk_file_at_revision(
         {
             let (n, pair) =
                 item.map_err(|e| Error::new(format!("libpijul reverse log item failed: {e}")))?;
-            if n > target_n {
+            if n > target_n || (!inclusive && n == target_n) {
                 to_remove.push(pair.0.into());
             } else {
                 break;
@@ -295,15 +300,29 @@ pub(super) fn pijul_sdk_file_at_revision(
 
     // Read the file from the temp channel
     let internal_path = rel_to_internal_path(rel_path)?;
-    let (pos, _ambiguous) = txn
+    let result = txn
         .read()
-        .follow_oldest_path(&repo.changes, &temp_channel, &internal_path)
-        .map_err(|e| Error::new(format!("libpijul follow path failed: {e}")))?;
+        .follow_oldest_path(&repo.changes, &temp_channel, &internal_path);
 
-    let mut writer = libpijul::vertex_buffer::Writer::new(Vec::<u8>::new());
-    libpijul::output::output_file(&repo.changes, &txn, &temp_channel, pos, &mut writer)
-        .map_err(|e| Error::new(format!("libpijul output file failed: {e}")))?;
-    let bytes = writer.into_inner();
+    let bytes = match result {
+        Ok((pos, _ambiguous)) => {
+            let mut writer = libpijul::vertex_buffer::Writer::new(Vec::<u8>::new());
+            libpijul::output::output_file(&repo.changes, &txn, &temp_channel, pos, &mut writer)
+                .map_err(|e| Error::new(format!("libpijul output file failed: {e}")))?;
+            writer.into_inner()
+        }
+        Err(_) if !inclusive => {
+            // File didn't exist before this revision — return empty
+            Vec::new()
+        }
+        Err(e) => {
+            // Clean up before returning error
+            drop(temp_channel);
+            let _ = txn.write().drop_channel(&temp_name);
+            let _ = txn.commit();
+            return Err(Error::new(format!("libpijul follow path failed: {e}")));
+        }
+    };
 
     // Clean up the temp channel — must drop the reference first
     drop(temp_channel);
@@ -315,6 +334,22 @@ pub(super) fn pijul_sdk_file_at_revision(
 
     String::from_utf8(bytes)
         .map_err(|e| Error::new(format!("file content is not valid UTF-8: {e}")))
+}
+
+pub(super) fn pijul_sdk_file_at_revision(
+    store: &Store,
+    rel_path: &Path,
+    revision: &str,
+) -> Result<String> {
+    pijul_file_at_revision_impl(store, rel_path, revision, true)
+}
+
+pub(super) fn pijul_sdk_file_before_revision(
+    store: &Store,
+    rel_path: &Path,
+    revision: &str,
+) -> Result<String> {
+    pijul_file_at_revision_impl(store, rel_path, revision, false)
 }
 
 fn rel_to_internal_path(path: &Path) -> Result<String> {
