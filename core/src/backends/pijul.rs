@@ -160,6 +160,69 @@ pub(super) fn pijul_sdk_show_change(store: &Store, change_id: &str) -> Result<St
     Ok(format!("{change:#?}"))
 }
 
+pub(super) fn pijul_sdk_rich_log(store: &Store, limit: usize) -> Result<Vec<super::LogEntry>> {
+    let repo = open_pijul_repo(store)?;
+    let txn = (&repo.pristine)
+        .txn_begin()
+        .map_err(|e| Error::new(format!("libpijul txn begin failed: {e}")))?;
+    let channel_name = txn
+        .current_channel()
+        .map_err(|e| Error::new(format!("libpijul current channel failed: {e}")))?
+        .to_string();
+    let channel = txn
+        .load_channel(&channel_name)
+        .map_err(|e| Error::new(format!("libpijul load channel failed: {e}")))?
+        .ok_or_else(|| Error::new(format!("missing pijul channel: {channel_name}")))?;
+    let changes = PijulChangeStore::from_root(&repo.path, 32);
+    let mut entries = Vec::new();
+    for item in txn
+        .reverse_log(&channel.read(), None)
+        .map_err(|e| Error::new(format!("libpijul reverse log failed: {e}")))?
+        .take(limit)
+    {
+        let (_n, pair) =
+            item.map_err(|e| Error::new(format!("libpijul reverse log item failed: {e}")))?;
+        let hash: Hash = pair.0.into();
+        let revision = hash.to_base32();
+        let (author, timestamp, description) = match changes.get_change(&hash) {
+            Ok(change) => {
+                let author_name = change
+                    .header
+                    .authors
+                    .first()
+                    .and_then(|a| a.0.get("name").or(a.0.get("key")))
+                    .cloned()
+                    .unwrap_or_default();
+                let ts = change.header.timestamp.as_second();
+                let desc = change.header.message.clone();
+                (author_name, ts, desc)
+            }
+            Err(_) => (String::new(), 0, String::new()),
+        };
+        entries.push(super::LogEntry {
+            revision,
+            timestamp,
+            author,
+            description,
+            changed_files: Vec::new(),
+        });
+    }
+    Ok(entries)
+}
+
+pub(super) fn pijul_sdk_file_at_revision(
+    store: &Store,
+    rel_path: &Path,
+    revision: &str,
+) -> Result<String> {
+    // For pijul, we'd need to reconstruct the file at a specific change.
+    // This is complex with libpijul — for now, return an error.
+    let _ = (store, rel_path);
+    Err(Error::new(format!(
+        "file_at_revision is not yet supported for pijul (revision: {revision})"
+    )))
+}
+
 fn rel_to_internal_path(path: &Path) -> Result<String> {
     let raw = path.to_string_lossy().replace('\\', "/");
     if raw.is_empty() || raw == "." {

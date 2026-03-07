@@ -2,7 +2,7 @@ mod user_config;
 use atty::Stream;
 use clap::{Parser, Subcommand};
 use pijul_interaction::{set_context, InteractiveContext};
-use runes_core::backend;
+use runes_core::backend::{self, LogEntry};
 use runes_core::cache;
 use runes_core::config::{ensure_dir, BackendKind, Config, Store};
 use runes_core::model::{
@@ -41,8 +41,10 @@ enum CliCommand {
     Archive(ArchiveArgs),
     /// Delete a rune doc
     Delete(DeleteArgs),
-    /// Show change log for a rune doc
+    /// Show change log for store or a specific rune doc
     Log(LogArgs),
+    /// Restore a rune doc to a previous revision
+    Restore(RestoreArgs),
     /// Sync store with its backend
     Sync(SyncArgs),
     /// Manage stores
@@ -219,6 +221,9 @@ struct ListArgs {
 struct ShowArgs {
     /// Rune doc ID (or store:id)
     id: String,
+    /// Show rune at a specific revision
+    #[arg(long)]
+    revision: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -319,14 +324,32 @@ struct DeleteArgs {
 
 #[derive(Debug, Parser)]
 struct LogArgs {
-    /// Rune doc ID
-    id: String,
+    /// Rune doc ID (optional; omit for store-wide log)
+    id: Option<String>,
     /// Max number of entries to show
     #[arg(long)]
     limit: Option<usize>,
-    /// Filter to a specific section
+    /// Filter to a specific section (requires rune ID)
     #[arg(long)]
     section: Option<String>,
+    /// Filter by change author
+    #[arg(long = "changed-by")]
+    changed_by: Option<String>,
+}
+
+#[derive(Debug, Parser)]
+struct RestoreArgs {
+    /// Rune doc ID to restore
+    id: String,
+    /// Revision to restore from
+    #[arg(long)]
+    revision: String,
+    /// Skip auto-commit after restore
+    #[arg(long = "no-commit")]
+    no_commit: bool,
+    /// Commit message (implies commit)
+    #[arg(short = 'm', long = "message")]
+    message: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -359,6 +382,7 @@ fn handle_command(command: CliCommand) -> Result<()> {
         CliCommand::Archive(args) => run_archive(args),
         CliCommand::Delete(args) => run_delete(args),
         CliCommand::Log(args) => run_log(args),
+        CliCommand::Restore(args) => run_restore(args),
         CliCommand::Sync(args) => run_sync(args),
         CliCommand::Store(store_cmd) => run_store(store_cmd),
         CliCommand::Config(config_cmd) => run_config(config_cmd),
@@ -1248,6 +1272,18 @@ fn run_show(args: ShowArgs) -> Result<()> {
     let (cfg, user_cfg, cwd) = load_context()?;
     let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &args.id)?;
     let path = locate_doc(&store, &id)?;
+    if let Some(revision) = &args.revision {
+        let rel_path = path
+            .strip_prefix(&store.path)
+            .map_err(|e| Error::new(e.to_string()))?;
+        let contents = backend::file_at_revision(&store, rel_path, revision)?;
+        let tmp_path = std::env::temp_dir().join(format!("runes-show-{}.md", &revision[..revision.len().min(12)]));
+        fs::write(&tmp_path, &contents)?;
+        let doc = parse_doc(&tmp_path)?;
+        let _ = fs::remove_file(&tmp_path);
+        println!("revision={}", &revision[..revision.len().min(12)]);
+        return print_doc_summary(&path, &doc);
+    }
     let doc = parse_doc(&path)?;
     let result = print_doc_summary(&path, &doc);
     warn_if_uncommitted(&store);
@@ -1643,47 +1679,213 @@ fn delete_rune(store: &Store, id: &str) -> Result<()> {
     println!("Deleted {}", doc.id);
     Ok(())
 }
+fn format_log_timestamp(epoch_secs: i64) -> String {
+    use std::time::{Duration, UNIX_EPOCH};
+    let dt = UNIX_EPOCH + Duration::from_secs(epoch_secs as u64);
+    let elapsed = dt
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs();
+    // Simple UTC formatting: YYYY-MM-DD HH:MM
+    let secs_per_day = 86400u64;
+    let days = elapsed / secs_per_day;
+    let day_secs = elapsed % secs_per_day;
+    let hours = day_secs / 3600;
+    let minutes = (day_secs % 3600) / 60;
+    // Days since epoch to date (simplified)
+    let mut y = 1970i64;
+    let mut remaining = days as i64;
+    loop {
+        let year_days = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
+        if remaining < year_days {
+            break;
+        }
+        remaining -= year_days;
+        y += 1;
+    }
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let month_days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut m = 0usize;
+    for &md in &month_days {
+        if remaining < md as i64 {
+            break;
+        }
+        remaining -= md as i64;
+        m += 1;
+    }
+    format!("{y:04}-{:02}-{:02} {hours:02}:{minutes:02}", m + 1, remaining + 1)
+}
+
+fn rune_id_from_path(file_path: &str) -> Option<String> {
+    let name = file_path.rsplit('/').next().unwrap_or(file_path);
+    let stem = name.strip_suffix(".md")?;
+    if stem == "_milestone" {
+        // For milestones, the rune ID is derived from the parent dir
+        return None;
+    }
+    let short = stem.split("--").next()?;
+    // We need the project prefix from the path
+    let parts: Vec<&str> = file_path.split('/').collect();
+    if parts.len() >= 2 {
+        let project = parts[0];
+        Some(format!("{project}-{short}"))
+    } else {
+        None
+    }
+}
+
+fn description_line_for_id<'a>(description: &'a str, id: &str) -> &'a str {
+    for line in description.lines() {
+        if line.contains(id) {
+            return line.trim();
+        }
+    }
+    description.lines().next().unwrap_or("").trim()
+}
+
+fn print_log_entries(entries: &[LogEntry], rune_filter: Option<&str>, author_filter: Option<&str>) {
+    for entry in entries {
+        if let Some(author) = author_filter {
+            if !entry.author.eq_ignore_ascii_case(author) {
+                continue;
+            }
+        }
+        let short_rev = &entry.revision[..entry.revision.len().min(12)];
+        let ts = format_log_timestamp(entry.timestamp);
+        if entry.changed_files.is_empty() {
+            // No file info available (e.g. pijul) — show entry as-is
+            if rune_filter.is_some() {
+                // Can't filter by rune without changed_files
+                continue;
+            }
+            let desc = entry.description.lines().next().unwrap_or("").trim();
+            println!("{short_rev}  {ts}  {author}  {desc}", author = entry.author);
+        } else {
+            let rune_ids: Vec<String> = entry
+                .changed_files
+                .iter()
+                .filter_map(|f| rune_id_from_path(f))
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+            if rune_ids.is_empty() {
+                continue;
+            }
+            if let Some(filter_id) = rune_filter {
+                if !rune_ids.iter().any(|rid| rid == filter_id) {
+                    continue;
+                }
+            }
+            for rune_id in &rune_ids {
+                if let Some(filter_id) = rune_filter {
+                    if rune_id != filter_id {
+                        continue;
+                    }
+                }
+                let desc = description_line_for_id(&entry.description, rune_id);
+                println!(
+                    "{short_rev}  {ts}  {rune_id}  {author}  {desc}",
+                    author = entry.author
+                );
+            }
+        }
+    }
+}
+
 fn run_log(args: LogArgs) -> Result<()> {
-    let LogArgs { id, limit, section } = args;
-    let limit = limit.unwrap_or(20);
+    let LogArgs {
+        id,
+        limit,
+        section,
+        changed_by,
+    } = args;
+    let limit = limit.unwrap_or(50);
+    let (cfg, user_cfg, cwd) = load_context()?;
+
+    // Section filter requires a rune ID
+    if section.is_some() && id.is_none() {
+        return Err(Error::new("--section requires a rune ID"));
+    }
+
+    // If section is specified, use the old section-diff logic
+    if let (Some(id_value), Some(section_raw)) = (&id, section) {
+        let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, id_value)?;
+        let path = locate_doc(&store, &id)?;
+        let rel_path = path
+            .strip_prefix(&store.path)
+            .map_err(|e| Error::new(e.to_string()))?;
+        let marker = if section_raw.starts_with('#') {
+            section_raw
+        } else {
+            format!("## {section_raw}")
+        };
+        let change_ids = backend::file_change_ids(&store, &rel_path, limit)?;
+        let mut printed = 0usize;
+        for change_id in change_ids {
+            let details = backend::show_change(&store, &change_id, &rel_path)?;
+            let section_hit = details.lines().any(|line| {
+                line.contains(&marker)
+                    && (line.starts_with('+') || line.starts_with('-') || line.contains("Hunks"))
+            });
+            if section_hit {
+                println!("Change {change_id}");
+                for line in details.lines().take(30) {
+                    println!("{line}");
+                }
+                println!();
+                printed += 1;
+            }
+        }
+        if printed == 0 {
+            println!("No matching section edits found for '{marker}'");
+        }
+        return Ok(());
+    }
+
+    // Rich log: store-wide or filtered to a specific rune
+    let store = resolve_store_with_context(&cfg, &user_cfg, &cwd, None)?;
+    let rune_filter = match &id {
+        Some(id_value) => {
+            let (_, resolved) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, id_value)?;
+            Some(resolved)
+        }
+        None => None,
+    };
+    let entries = backend::rich_log(&store, limit)?;
+    print_log_entries(&entries, rune_filter.as_deref(), changed_by.as_deref());
+    Ok(())
+}
+fn run_restore(args: RestoreArgs) -> Result<()> {
+    let RestoreArgs {
+        id,
+        revision,
+        no_commit,
+        message,
+    } = args;
     let (cfg, user_cfg, cwd) = load_context()?;
     let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id)?;
     let path = locate_doc(&store, &id)?;
     let rel_path = path
         .strip_prefix(&store.path)
         .map_err(|e| Error::new(e.to_string()))?;
-    if section.is_none() {
-        print!("{}", backend::file_log(&store, &rel_path, limit)?);
-        return Ok(());
-    }
-    let section_raw = section.unwrap();
-    let marker = if section_raw.starts_with('#') {
-        section_raw
-    } else {
-        format!("## {section_raw}")
-    };
-    let change_ids = backend::file_change_ids(&store, &rel_path, limit)?;
-    let mut printed = 0usize;
-    for change_id in change_ids {
-        let details = backend::show_change(&store, &change_id, &rel_path)?;
-        let section_hit = details.lines().any(|line| {
-            line.contains(&marker)
-                && (line.starts_with('+') || line.starts_with('-') || line.contains("Hunks"))
-        });
-        if section_hit {
-            println!("Change {change_id}");
-            for line in details.lines().take(30) {
-                println!("{line}");
-            }
-            println!();
-            printed += 1;
-        }
-    }
-    if printed == 0 {
-        println!("No matching section edits found for '{marker}'");
-    }
+    let contents = backend::file_at_revision(&store, rel_path, &revision)?;
+    fs::write(&path, &contents)?;
+    let doc = parse_doc(&path)?;
+    let _final_path = reconcile_filename(&path, &doc.id)?;
+    let short_rev = &revision[..revision.len().min(12)];
+    println!("Restored {} to revision {short_rev}", doc.id);
+    let default_msg = format!("Restore {} to revision {short_rev}", doc.id);
+    let commit_msg = message.as_deref().unwrap_or(&default_msg);
+    maybe_commit(
+        &store,
+        no_commit,
+        Some(commit_msg),
+        &[doc.id.clone()],
+        "Restore",
+    )?;
     Ok(())
 }
+
 fn run_sync(args: SyncArgs) -> Result<()> {
     let SyncArgs { store, all } = args;
     let (cfg, user_cfg, cwd) = load_context()?;

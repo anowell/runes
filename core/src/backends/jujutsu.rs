@@ -149,6 +149,106 @@ pub(super) fn jj_sdk_log(store: &Store, limit: usize) -> Result<String> {
     Ok(lines.join("\n") + "\n")
 }
 
+pub(super) fn jj_sdk_rich_log(store: &Store, limit: usize) -> Result<Vec<super::LogEntry>> {
+    let config = StackedConfig::with_defaults();
+    let settings = UserSettings::from_config(config).map_err(|e| Error::new(e.to_string()))?;
+    let store_factories = StoreFactories::default();
+    let wc_factories = default_working_copy_factories();
+    let workspace = Workspace::load(&settings, &store.path, &store_factories, &wc_factories)
+        .map_err(|e| Error::new(format!("jj-lib workspace load failed: {e}")))?;
+    let repo = workspace
+        .repo_loader()
+        .load_at_head()
+        .map_err(|e| Error::new(format!("jj-lib repo load failed: {e}")))?;
+    let mut queue: VecDeque<_> = repo.view().heads().iter().cloned().collect();
+    let mut seen = HashSet::new();
+    let mut entries = Vec::new();
+    while let Some(commit_id) = queue.pop_front() {
+        if entries.len() >= limit {
+            break;
+        }
+        if !seen.insert(commit_id.clone()) {
+            continue;
+        }
+        let commit = repo
+            .store()
+            .get_commit(&commit_id)
+            .map_err(|e| Error::new(format!("jj-lib commit load failed: {e}")))?;
+        let desc = commit.description().trim().to_string();
+        if desc.is_empty() && commit.parent_ids().len() <= 1 {
+            // Skip empty working copy changes
+            for parent_id in commit.parent_ids() {
+                if !seen.contains(parent_id) {
+                    queue.push_back(parent_id.clone());
+                }
+            }
+            continue;
+        }
+        let author = commit.author();
+        let author_name = if author.name.is_empty() {
+            author.email.clone()
+        } else {
+            author.name.clone()
+        };
+        let timestamp = author.timestamp.timestamp.0 / 1000;
+        let changed_files = match repo
+            .index()
+            .changed_paths_in_commit(&commit_id)
+            .map_err(|e| Error::new(format!("jj-lib changed-path query failed: {e}")))?
+        {
+            Some(paths) => paths.map(|p| p.as_internal_file_string().to_string()).collect(),
+            None => Vec::new(),
+        };
+        entries.push(super::LogEntry {
+            revision: commit_id.hex(),
+            timestamp,
+            author: author_name,
+            description: desc,
+            changed_files,
+        });
+        for parent_id in commit.parent_ids() {
+            if !seen.contains(parent_id) {
+                queue.push_back(parent_id.clone());
+            }
+        }
+    }
+    Ok(entries)
+}
+
+pub(super) fn jj_sdk_file_at_revision(
+    store: &Store,
+    rel_path: &Path,
+    revision: &str,
+) -> Result<String> {
+    let path_raw = rel_path.to_string_lossy().replace('\\', "/");
+    let repo_path = RepoPathBuf::from_internal_string(path_raw.clone())
+        .map_err(|_| Error::new(format!("invalid repo-relative path for jj: {path_raw}")))?;
+    let config = StackedConfig::with_defaults();
+    let settings = UserSettings::from_config(config).map_err(|e| Error::new(e.to_string()))?;
+    let store_factories = StoreFactories::default();
+    let wc_factories = default_working_copy_factories();
+    let workspace = Workspace::load(&settings, &store.path, &store_factories, &wc_factories)
+        .map_err(|e| Error::new(format!("jj-lib workspace load failed: {e}")))?;
+    let repo = workspace
+        .repo_loader()
+        .load_at_head()
+        .map_err(|e| Error::new(format!("jj-lib repo load failed: {e}")))?;
+    let resolved = jj_resolve_commit_id(repo.as_ref(), revision)?;
+    let commit = repo
+        .store()
+        .get_commit(&resolved)
+        .map_err(|e| Error::new(format!("jj-lib commit load failed: {e}")))?;
+    let tree = commit.tree();
+    match jj_materialize_file(repo.store().as_ref(), &tree, repo_path.as_ref())? {
+        Some(contents) => Ok(contents),
+        None => Err(Error::new(format!(
+            "file '{}' not found at revision {}",
+            path_raw,
+            &revision[..revision.len().min(12)]
+        ))),
+    }
+}
+
 fn jj_collect_commits_for_path(
     store: &Store,
     rel_path: &Path,

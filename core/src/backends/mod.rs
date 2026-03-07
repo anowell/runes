@@ -9,14 +9,25 @@ mod jujutsu;
 mod pijul;
 
 use jujutsu::{
-    jj_sdk_commit_paths, jj_sdk_file_change_ids, jj_sdk_file_log,
-    jj_sdk_has_uncommitted_changes, jj_sdk_log, jj_sdk_show_change, jj_sdk_status, jj_sdk_sync,
-    probe_jj_workspace,
+    jj_sdk_commit_paths, jj_sdk_file_at_revision, jj_sdk_file_change_ids, jj_sdk_file_log,
+    jj_sdk_has_uncommitted_changes, jj_sdk_log, jj_sdk_rich_log, jj_sdk_show_change,
+    jj_sdk_status, jj_sdk_sync, probe_jj_workspace,
 };
 use pijul::{
-    pijul_sdk_commit_paths, pijul_sdk_file_change_ids, pijul_sdk_file_log, pijul_sdk_log,
-    pijul_sdk_remove_path, pijul_sdk_show_change, pijul_sdk_status, pijul_sdk_sync,
+    pijul_sdk_commit_paths, pijul_sdk_file_at_revision, pijul_sdk_file_change_ids,
+    pijul_sdk_file_log, pijul_sdk_log, pijul_sdk_remove_path, pijul_sdk_rich_log,
+    pijul_sdk_show_change, pijul_sdk_status, pijul_sdk_sync,
 };
+
+/// A structured log entry from the backend.
+#[derive(Clone, Debug)]
+pub struct LogEntry {
+    pub revision: String,
+    pub timestamp: i64,
+    pub author: String,
+    pub description: String,
+    pub changed_files: Vec<String>,
+}
 
 pub trait BackendAdapter {
     fn name(&self) -> &'static str;
@@ -27,9 +38,11 @@ pub trait BackendAdapter {
     fn has_uncommitted_changes(&self, store: &Store) -> Result<bool>;
     fn status(&self, store: &Store) -> Result<String>;
     fn log(&self, store: &Store, limit: usize) -> Result<String>;
+    fn rich_log(&self, store: &Store, limit: usize) -> Result<Vec<LogEntry>>;
     fn file_log(&self, store: &Store, rel_path: &Path, limit: usize) -> Result<String>;
     fn file_change_ids(&self, store: &Store, rel_path: &Path, limit: usize) -> Result<Vec<String>>;
     fn show_change(&self, store: &Store, change_id: &str, rel_path: &Path) -> Result<String>;
+    fn file_at_revision(&self, store: &Store, rel_path: &Path, revision: &str) -> Result<String>;
     fn sync(&self, store: &Store) -> Result<()>;
 }
 
@@ -163,6 +176,13 @@ impl BackendAdapter for CliBackend {
         }
     }
 
+    fn rich_log(&self, store: &Store, limit: usize) -> Result<Vec<LogEntry>> {
+        match self.kind {
+            BackendKind::Jj => jj_sdk_rich_log(store, limit),
+            BackendKind::Pijul => pijul_sdk_rich_log(store, limit),
+        }
+    }
+
     fn file_log(&self, store: &Store, rel_path: &Path, limit: usize) -> Result<String> {
         match self.kind {
             BackendKind::Jj => jj_sdk_file_log(store, rel_path, limit),
@@ -181,6 +201,13 @@ impl BackendAdapter for CliBackend {
         match self.kind {
             BackendKind::Jj => jj_sdk_show_change(store, change_id, rel_path),
             BackendKind::Pijul => pijul_sdk_show_change(store, change_id),
+        }
+    }
+
+    fn file_at_revision(&self, store: &Store, rel_path: &Path, revision: &str) -> Result<String> {
+        match self.kind {
+            BackendKind::Jj => jj_sdk_file_at_revision(store, rel_path, revision),
+            BackendKind::Pijul => pijul_sdk_file_at_revision(store, rel_path, revision),
         }
     }
 
@@ -266,6 +293,14 @@ pub fn file_change_ids(store: &Store, rel_path: &Path, limit: usize) -> Result<V
 
 pub fn show_change(store: &Store, change_id: &str, rel_path: &Path) -> Result<String> {
     adapter_for(store).show_change(store, change_id, rel_path)
+}
+
+pub fn rich_log(store: &Store, limit: usize) -> Result<Vec<LogEntry>> {
+    adapter_for(store).rich_log(store, limit)
+}
+
+pub fn file_at_revision(store: &Store, rel_path: &Path, revision: &str) -> Result<String> {
+    adapter_for(store).file_at_revision(store, rel_path, revision)
 }
 
 pub fn has_uncommitted_changes(store: &Store) -> Result<bool> {
