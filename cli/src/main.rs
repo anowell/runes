@@ -21,7 +21,7 @@ use user_config::UserConfig;
 #[command(name = "runes", version, about = "A local-first issue tracker stored as markdown rune docs", propagate_version = true)]
 struct Cli {
     #[command(subcommand)]
-    command: CliCommand,
+    command: Option<CliCommand>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -189,7 +189,7 @@ struct NewArgs {
     message: Option<String>,
 }
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Default, Parser)]
 struct ListArgs {
     /// Named query/view to apply
     #[arg(value_name = "view")]
@@ -392,7 +392,8 @@ struct SyncArgs {
 fn main() {
     set_context(InteractiveContext::Terminal);
     let cli = Cli::parse();
-    if let Err(err) = handle_command(cli.command) {
+    let command = cli.command.unwrap_or(CliCommand::List(ListArgs::default()));
+    if let Err(err) = handle_command(command) {
         eprintln!("error: {err}");
         std::process::exit(1);
     }
