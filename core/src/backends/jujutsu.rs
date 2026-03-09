@@ -408,23 +408,48 @@ pub(super) fn jj_sdk_file_rich_log(
         if !seen.insert(commit_id.clone()) {
             continue;
         }
-        let mut changed = false;
-        if let Some(paths) = repo
-            .index()
-            .changed_paths_in_commit(&commit_id)
-            .map_err(|e| Error::new(format!("jj-lib changed-path query failed: {e}")))?
-        {
-            for p in paths {
-                if p == target || p.starts_with(target.as_ref()) || target.starts_with(p.as_ref()) {
-                    changed = true;
-                    break;
-                }
-            }
-        }
         let commit = repo
             .store()
             .get_commit(&commit_id)
             .map_err(|e| Error::new(format!("jj-lib commit load failed: {e}")))?;
+        let (changed, all_changed_files) = match repo
+            .index()
+            .changed_paths_in_commit(&commit_id)
+            .map_err(|e| Error::new(format!("jj-lib changed-path query failed: {e}")))?
+        {
+            Some(paths) => {
+                let mut found = false;
+                let mut files = Vec::new();
+                for p in paths {
+                    let s = p.as_internal_file_string().to_string();
+                    if p == target || p.starts_with(target.as_ref()) || target.starts_with(p.as_ref()) {
+                        found = true;
+                    }
+                    if s.ends_with(".md") {
+                        files.push(s);
+                    }
+                }
+                (found, files)
+            }
+            None => {
+                // Fallback: diff commit tree against parent tree
+                let parent_tree = commit.parent_tree(repo.as_ref())
+                    .map_err(|e| Error::new(format!("jj-lib parent tree failed: {e}")))?;
+                let commit_tree = commit.tree();
+                let mut found = false;
+                let mut files = Vec::new();
+                for entry in TreeDiffIterator::new(&parent_tree, &commit_tree, &EverythingMatcher) {
+                    let s = entry.path.as_internal_file_string().to_string();
+                    if s == path_raw || s.starts_with(&format!("{path_raw}/")) {
+                        found = true;
+                    }
+                    if s.ends_with(".md") {
+                        files.push(s);
+                    }
+                }
+                (found, files)
+            }
+        };
         if changed {
             let desc = commit.description().trim().to_string();
             let author = commit.author();
@@ -439,7 +464,7 @@ pub(super) fn jj_sdk_file_rich_log(
                 timestamp,
                 author: author_name,
                 description: desc,
-                changed_files: Vec::new(),
+                changed_files: all_changed_files,
             });
         }
         for parent_id in commit.parent_ids() {

@@ -1660,12 +1660,6 @@ fn split_rune_doc(content: &str) -> (String, String) {
     (frontmatter, body_normalized)
 }
 
-fn print_highlighted_rune_doc(content: &str) {
-    let (frontmatter, body) = split_rune_doc(content);
-    color::highlight_kdl(&frontmatter);
-    color::highlight_markdown(&body);
-}
-
 fn format_timestamp_local(epoch_secs: i64) -> String {
     use jiff::Timestamp;
     let Ok(ts) = Timestamp::from_second(epoch_secs) else {
@@ -1681,20 +1675,20 @@ fn print_annotated_rune_doc(
     store: &Store,
     rel_path: &Path,
 ) {
-    if history.is_empty() {
-        print_highlighted_rune_doc(content);
+    let (frontmatter, body) = split_rune_doc(content);
+    let is_uncommitted = history.is_empty();
+
+    if is_uncommitted {
+        // Never-committed rune: show frontmatter with red "<not committed>" marker
+        inject_frontmatter_metadata(&frontmatter, "  created_at \"<not committed>\"\n", true);
+        print_annotated_body(&body, &[], &[], "");
         return;
     }
-
-    let (frontmatter, body) = split_rune_doc(content);
 
     // Oldest entry = created, newest = last update
     let created = history.last().unwrap();
     let updated = history.first().unwrap();
 
-    // Print KDL frontmatter with injected metadata
-    let fm_lines: Vec<&str> = frontmatter.trim_end().lines().collect();
-    // Insert metadata before the closing `---`
     let mut injected = String::new();
     if !created.author.is_empty() {
         injected.push_str(&format!("  created_by \"{}\"\n", created.author));
@@ -1702,15 +1696,49 @@ fn print_annotated_rune_doc(
     if created.timestamp > 0 {
         injected.push_str(&format!("  created_at \"{}\"\n", format_timestamp_local(created.timestamp)));
     }
-    if updated.timestamp != created.timestamp && updated.timestamp > 0 {
-        injected.push_str(&format!("  updated_at \"{}\"\n", format_timestamp_local(updated.timestamp)));
+    if updated.revision != created.revision {
+        if !updated.author.is_empty() && updated.author != created.author {
+            injected.push_str(&format!("  updated_by \"{}\"\n", updated.author));
+        }
+        if updated.timestamp > 0 {
+            injected.push_str(&format!("  updated_at \"{}\"\n", format_timestamp_local(updated.timestamp)));
+        }
     }
 
-    // Find closing --- and insert before it
+    // Check if current disk content differs from latest committed version
+    let has_pending = has_pending_changes(store, rel_path, &updated.revision);
+    if has_pending {
+        injected.push_str("  pending_changes true\n");
+    }
+
+    inject_frontmatter_metadata(&frontmatter, &injected, false);
+
+    // Build section-level and comment attribution by diffing consecutive revisions
+    let (section_annotations, comment_attributions) =
+        build_annotations(history, store, rel_path, &body, created, has_pending);
+
+    // Print body with section and comment annotations
+    print_annotated_body(&body, &section_annotations, &comment_attributions, &created.revision);
+}
+
+/// Check if the current disk content of a rune file differs from the latest committed version.
+fn has_pending_changes(store: &Store, rel_path: &Path, latest_revision: &str) -> bool {
+    let disk_content = match fs::read_to_string(store.path.join(rel_path)) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let committed_content = match backend::file_at_revision(store, rel_path, latest_revision) {
+        Ok(c) => c,
+        Err(_) => return true,
+    };
+    disk_content != committed_content
+}
+
+/// Print KDL frontmatter with injected metadata lines before the closing `}`.
+fn inject_frontmatter_metadata(frontmatter: &str, injected: &str, use_red: bool) {
+    let fm_lines: Vec<&str> = frontmatter.trim_end().lines().collect();
     if let Some(close_idx) = fm_lines.iter().rposition(|l| l.trim() == "---") {
-        // Find the closing `}` before `---`
         if let Some(brace_idx) = fm_lines[..close_idx].iter().rposition(|l| l.trim() == "}") {
-            // Insert before closing brace
             let before = &fm_lines[..brace_idx];
             let after = &fm_lines[brace_idx..];
             let mut annotated_fm = String::new();
@@ -1718,25 +1746,28 @@ fn print_annotated_rune_doc(
                 annotated_fm.push_str(line);
                 annotated_fm.push('\n');
             }
-            annotated_fm.push_str(&injected);
+            if use_red {
+                // Print what we have so far with KDL highlighting, then the red part, then rest
+                color::highlight_kdl(&annotated_fm);
+                println!("{}", color::red(injected.trim_end()));
+                let mut rest = String::new();
+                for line in after {
+                    rest.push_str(line);
+                    rest.push('\n');
+                }
+                color::highlight_kdl(&rest);
+                return;
+            }
+            annotated_fm.push_str(injected);
             for line in after {
                 annotated_fm.push_str(line);
                 annotated_fm.push('\n');
             }
             color::highlight_kdl(&annotated_fm);
-        } else {
-            color::highlight_kdl(&frontmatter);
+            return;
         }
-    } else {
-        color::highlight_kdl(&frontmatter);
     }
-
-    // Build section-level and comment attribution by diffing consecutive revisions
-    let (section_annotations, comment_attributions) =
-        build_annotations(history, store, rel_path, &body, created);
-
-    // Print body with section and comment annotations
-    print_annotated_body(&body, &section_annotations, &comment_attributions);
+    color::highlight_kdl(frontmatter);
 }
 
 /// A section heading annotation
@@ -1747,6 +1778,10 @@ struct SectionAnnotation {
     last_editor: String,
     /// Timestamp of last edit
     last_edited_at: i64,
+    /// Revision of last edit (for comparing against created revision)
+    last_edit_revision: String,
+    /// Whether this section has uncommitted changes
+    uncommitted: bool,
 }
 
 /// Attribution for a single comment block
@@ -1758,6 +1793,8 @@ struct CommentAttribution {
     author: String,
     /// Timestamp when this comment was added
     timestamp: i64,
+    /// Whether this comment has not yet been committed
+    uncommitted: bool,
 }
 
 fn build_annotations(
@@ -1766,6 +1803,7 @@ fn build_annotations(
     rel_path: &Path,
     current_body: &str,
     created: &LogEntry,
+    has_pending: bool,
 ) -> (Vec<SectionAnnotation>, Vec<CommentAttribution>) {
     let current_sections = parse_sections(current_body);
     if current_sections.is_empty() {
@@ -1781,14 +1819,22 @@ fn build_annotations(
         }
     }
 
+    // Get the last committed body for uncommitted change detection
+    let last_committed_body = revisions_content.last().map(|(_, b)| b.clone());
+    let last_committed_sections = last_committed_body
+        .as_deref()
+        .map(parse_sections)
+        .unwrap_or_default();
+
     // Section annotations: find the last revision that changed each section
     let mut section_annotations = Vec::new();
-    for (heading, _current_text) in &current_sections {
+    for (heading, current_text) in &current_sections {
         if heading == "Comments" || heading.is_empty() {
             continue;
         }
         let mut last_editor = created.author.clone();
         let mut last_edited_at = created.timestamp;
+        let mut last_edit_revision = created.revision.clone();
         let mut prev_section_text: Option<String> = None;
 
         for (entry, body) in &revisions_content {
@@ -1802,21 +1848,31 @@ fn build_annotations(
                 if prev_section_text.as_ref() != Some(text) {
                     last_editor = entry.author.clone();
                     last_edited_at = entry.timestamp;
+                    last_edit_revision = entry.revision.clone();
                 }
             }
             prev_section_text = section_text;
         }
 
+        // Check if this section has uncommitted changes
+        let section_uncommitted = has_pending && {
+            let committed_text = last_committed_sections
+                .iter()
+                .find(|(h, _)| h == heading)
+                .map(|(_, t)| t.as_str());
+            committed_text != Some(current_text.as_str())
+        };
+
         section_annotations.push(SectionAnnotation {
             heading: heading.clone(),
             last_editor,
             last_edited_at,
+            last_edit_revision,
+            uncommitted: section_uncommitted,
         });
     }
 
-    // Comment attributions: split Comments section by --- separators
-    // and find when each comment block was last modified (same approach as sections).
-    // Walk oldest-to-newest, tracking when each comment's content last changed.
+    // Comment attributions
     let mut comment_attributions = Vec::new();
     let comments_text = current_sections
         .iter()
@@ -1824,9 +1880,16 @@ fn build_annotations(
         .map(|(_, t)| t.clone())
         .unwrap_or_default();
     let current_comments = split_comments(&comments_text);
+
+    // Get last committed comments for uncommitted detection
+    let committed_comments_text = last_committed_sections
+        .iter()
+        .find(|(h, _)| h == "Comments")
+        .map(|(_, t)| t.clone())
+        .unwrap_or_default();
+    let committed_comments = split_comments(&committed_comments_text);
+
     if !current_comments.is_empty() {
-        // For each current comment (by index position), walk revisions to
-        // find the last revision that changed its content.
         for (ci, comment) in current_comments.iter().enumerate() {
             let mut author = created.author.clone();
             let mut timestamp = created.timestamp;
@@ -1851,10 +1914,18 @@ fn build_annotations(
                 prev_text = rev_text;
             }
 
+            // A comment is uncommitted if it doesn't exist in committed version
+            // or its content differs
+            let comment_uncommitted = has_pending && {
+                let committed_text = committed_comments.get(ci).map(|c| c.trim());
+                committed_text != Some(comment.trim())
+            };
+
             comment_attributions.push(CommentAttribution {
                 text: comment.clone(),
                 author,
                 timestamp,
+                uncommitted: comment_uncommitted,
             });
         }
     }
@@ -1920,6 +1991,7 @@ fn print_annotated_body(
     body: &str,
     annotations: &[SectionAnnotation],
     comment_attrs: &[CommentAttribution],
+    created_revision: &str,
 ) {
     let lines: Vec<&str> = body.lines().collect();
     let mut i = 0;
@@ -1952,11 +2024,15 @@ fn print_annotated_body(
             // Find annotation for this heading
             if let Some(ann) = annotations.iter().find(|a| a.heading == heading_text) {
                 color::highlight_markdown(&format!("{line}\n"));
-                let ts = format_timestamp_local(ann.last_edited_at);
-                if ann.last_editor.is_empty() {
-                    println!("{}", color::gray(&format!("Last edited on {ts}")));
-                } else {
-                    println!("{}", color::gray(&format!("Last edited by {} on {}", ann.last_editor, ts)));
+                if ann.uncommitted {
+                    println!("{}", color::red("pending uncommitted changes"));
+                } else if ann.last_edit_revision != created_revision && ann.last_edited_at != 0 {
+                    let ts = format_timestamp_local(ann.last_edited_at);
+                    if ann.last_editor.is_empty() {
+                        println!("{}", color::gray(&format!("Edited on {ts}")));
+                    } else {
+                        println!("{}", color::gray(&format!("Edited by {} on {}", ann.last_editor, ts)));
+                    }
                 }
                 i += 1;
                 continue;
@@ -2000,16 +2076,19 @@ fn flush_comment_buf(
 
     // Print attribution header
     if let Some(attr) = comment_attrs.get(*comment_idx) {
-        let ts = format_timestamp_local(attr.timestamp);
-        if attr.author.is_empty() {
-            println!("{}", color::gray(&format!("On {ts}")));
+        if attr.uncommitted {
+            println!("{}", color::red("<not committed>"));
         } else {
-            println!(
-                "{}{}{}",
-                color::gray(&format!("On {ts} by ")),
-                color::yellow(&attr.author),
-                color::gray(""),
-            );
+            let ts = format_timestamp_local(attr.timestamp);
+            if attr.author.is_empty() {
+                println!("{}", color::gray(&format!("On {ts}")));
+            } else {
+                println!(
+                    "{}{}",
+                    color::gray(&format!("On {ts} by ")),
+                    color::yellow(&attr.author),
+                );
+            }
         }
         println!();
         *header_printed = true;
@@ -2586,34 +2665,6 @@ fn description_line_for_id<'a>(description: &'a str, id: &str) -> &'a str {
     description.lines().next().unwrap_or("").trim()
 }
 
-/// Try to extract a rune ID from a commit description.
-/// Matches patterns like "Add runes-x3s", "Update runes-tfc", "Record dli-zwc.5"
-fn rune_id_from_description(desc: &str) -> Option<String> {
-    let first_line = desc.lines().next().unwrap_or("").trim();
-    for token in first_line.split_whitespace() {
-        // Match <project>-<shortid> or <project>-<shortid>.<child>
-        if let Some((proj, rest)) = token.split_once('-') {
-            if proj.is_empty() || !proj.chars().all(|c| c.is_alphanumeric()) {
-                continue;
-            }
-            // rest may be "zwc" or "zwc.3" — validate the short part and optional child suffix
-            let (short, child) = match rest.split_once('.') {
-                Some((s, c)) => (s, Some(c)),
-                None => (rest, None),
-            };
-            if short.is_empty() || !short.chars().all(|c| c.is_alphanumeric()) {
-                continue;
-            }
-            if let Some(c) = child {
-                if !c.is_empty() && c.chars().all(|ch| ch.is_alphanumeric()) {
-                    return Some(format!("{proj}-{short}.{c}"));
-                }
-            }
-            return Some(format!("{proj}-{short}"));
-        }
-    }
-    None
-}
 
 fn print_log_entries_json(
     entries: &[LogEntry],
@@ -2628,17 +2679,13 @@ fn print_log_entries_json(
                 continue;
             }
         }
-        let rune_ids: Vec<String> = if !entry.changed_files.is_empty() {
-            entry
-                .changed_files
-                .iter()
-                .filter_map(|f| rune_id_from_path(f))
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
-                .collect()
-        } else {
-            rune_id_from_description(&entry.description).into_iter().collect()
-        };
+        let rune_ids: Vec<String> = entry
+            .changed_files
+            .iter()
+            .filter_map(|f| rune_id_from_path(f))
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
         if let Some(filter_id) = rune_filter {
             if !rune_ids.iter().any(|rid| rid == filter_id) {
                 continue;
@@ -2682,17 +2729,13 @@ fn format_log_entries(
         let author_colored = color::yellow(&entry.author);
 
         // Derive rune IDs from changed files, falling back to description parsing
-        let rune_ids: Vec<String> = if !entry.changed_files.is_empty() {
-            entry
-                .changed_files
-                .iter()
-                .filter_map(|f| rune_id_from_path(f))
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
-                .collect()
-        } else {
-            rune_id_from_description(&entry.description).into_iter().collect()
-        };
+        let rune_ids: Vec<String> = entry
+            .changed_files
+            .iter()
+            .filter_map(|f| rune_id_from_path(f))
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
 
         if rune_ids.is_empty() {
             if rune_filter.is_some() || project_prefix.is_some() {

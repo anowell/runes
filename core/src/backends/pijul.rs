@@ -8,7 +8,7 @@ use pijul_identity::Complete as CompleteIdentity;
 use pijul_interaction::{self, Spinner};
 use pijul_remote::{self as pijul_remote, RemoteRepo};
 use pijul_repository::{Repository as PijulRepository, CHANGES_DIR};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tokio::runtime::Runtime;
@@ -59,6 +59,31 @@ fn resolve_pijul_author(
         .or(author_map.get("key"))
         .cloned()
         .unwrap_or_default()
+}
+
+/// Extract changed file paths from a pijul Change by inspecting its hunks.
+fn extract_changed_files(change: &libpijul::change::Change) -> Vec<String> {
+    let mut paths = HashSet::new();
+    for hunk in &change.changes {
+        let path = match hunk {
+            libpijul::change::BaseHunk::FileMove { path, .. }
+            | libpijul::change::BaseHunk::FileDel { path, .. }
+            | libpijul::change::BaseHunk::FileUndel { path, .. }
+            | libpijul::change::BaseHunk::FileAdd { path, .. }
+            | libpijul::change::BaseHunk::SolveNameConflict { path, .. }
+            | libpijul::change::BaseHunk::UnsolveNameConflict { path, .. } => path.clone(),
+            libpijul::change::BaseHunk::Edit { local, .. }
+            | libpijul::change::BaseHunk::Replacement { local, .. }
+            | libpijul::change::BaseHunk::SolveOrderConflict { local, .. }
+            | libpijul::change::BaseHunk::UnsolveOrderConflict { local, .. }
+            | libpijul::change::BaseHunk::ResurrectZombies { local, .. } => local.path.clone(),
+            _ => continue,
+        };
+        if !path.is_empty() {
+            paths.insert(path);
+        }
+    }
+    paths.into_iter().collect()
 }
 
 fn open_pijul_repo(store: &Store) -> Result<PijulRepository> {
@@ -195,30 +220,35 @@ pub(super) fn pijul_sdk_file_rich_log(
     rel_path: &Path,
     limit: usize,
 ) -> Result<Vec<super::LogEntry>> {
-    // Try actual file-path-based history via libpijul's rev_log_for_path first
+    let path_str = rel_path.to_string_lossy().replace('\\', "/");
+
+    // Strategy 1: libpijul's rev_log_for_path (fast, index-backed)
     let hashes = pijul_sdk_path_hashes(store, rel_path, limit)?;
     if !hashes.is_empty() {
         return enrich_hashes(store, &hashes);
     }
-    // Fallback: pijul's rev_log_for_path can be unreliable, so walk the
-    // store-wide log and check which revisions actually changed this file's
-    // content by comparing file_at_revision across consecutive entries.
-    // Walk all commits (not just ones mentioning the rune in their description)
-    // since bulk commits like "Bootstrap" or "Record changes" won't reference
-    // individual rune IDs.
-    let candidates = pijul_sdk_rich_log(store, 200)?;
-    if candidates.is_empty() {
-        return Ok(Vec::new());
+
+    // Strategy 2: Filter rich_log by changed_files (hunk-extracted paths)
+    let all_entries = pijul_sdk_rich_log(store, 500)?;
+    let mut matched: Vec<_> = all_entries
+        .into_iter()
+        .filter(|e| e.changed_files.iter().any(|f| f == &path_str))
+        .collect();
+    if !matched.is_empty() {
+        matched.truncate(limit);
+        return Ok(matched);
     }
-    // Walk candidates newest-to-oldest, check if file content actually changed
+
+    // Strategy 3: Content-diff walk (expensive, last resort for legacy commits
+    // that predate proper path tracking)
+    let candidates = pijul_sdk_rich_log(store, 500)?;
     let mut entries = Vec::new();
     let mut prev_content: Option<String> = None;
-    // Walk oldest-to-newest for consistent diffing
     for entry in candidates.iter().rev() {
         let content = pijul_sdk_file_at_revision(store, rel_path, &entry.revision)
             .unwrap_or_default();
         let changed = match &prev_content {
-            None => !content.is_empty(), // First time seeing the file
+            None => !content.is_empty(),
             Some(prev) => prev != &content,
         };
         if changed {
@@ -228,7 +258,6 @@ pub(super) fn pijul_sdk_file_rich_log(
             prev_content = Some(content);
         }
     }
-    // Return newest-first order
     entries.reverse();
     entries.truncate(limit);
     Ok(entries)
@@ -243,7 +272,7 @@ fn enrich_hashes(store: &Store, hashes: &[String]) -> Result<Vec<super::LogEntry
         let hash = hash_str
             .parse::<Hash>()
             .map_err(|e| Error::new(format!("invalid pijul change hash: {e}")))?;
-        let (author, timestamp, description) = match changes.get_change(&hash) {
+        let (author, timestamp, description, changed_files) = match changes.get_change(&hash) {
             Ok(change) => {
                 let author_name = change
                     .header
@@ -253,16 +282,17 @@ fn enrich_hashes(store: &Store, hashes: &[String]) -> Result<Vec<super::LogEntry
                     .unwrap_or_default();
                 let ts = change.header.timestamp.as_second();
                 let desc = change.header.message.clone();
-                (author_name, ts, desc)
+                let files = extract_changed_files(&change);
+                (author_name, ts, desc, files)
             }
-            Err(_) => (String::new(), 0, String::new()),
+            Err(_) => (String::new(), 0, String::new(), Vec::new()),
         };
         entries.push(super::LogEntry {
             revision: hash_str.clone(),
             timestamp,
             author,
             description,
-            changed_files: Vec::new(),
+            changed_files,
         });
     }
     Ok(entries)
@@ -308,7 +338,7 @@ pub(super) fn pijul_sdk_rich_log(store: &Store, limit: usize) -> Result<Vec<supe
             item.map_err(|e| Error::new(format!("libpijul reverse log item failed: {e}")))?;
         let hash: Hash = pair.0.into();
         let revision = hash.to_base32();
-        let (author, timestamp, description) = match changes.get_change(&hash) {
+        let (author, timestamp, description, changed_files) = match changes.get_change(&hash) {
             Ok(change) => {
                 let author_name = change
                     .header
@@ -318,16 +348,17 @@ pub(super) fn pijul_sdk_rich_log(store: &Store, limit: usize) -> Result<Vec<supe
                     .unwrap_or_default();
                 let ts = change.header.timestamp.as_second();
                 let desc = change.header.message.clone();
-                (author_name, ts, desc)
+                let files = extract_changed_files(&change);
+                (author_name, ts, desc, files)
             }
-            Err(_) => (String::new(), 0, String::new()),
+            Err(_) => (String::new(), 0, String::new(), Vec::new()),
         };
         entries.push(super::LogEntry {
             revision,
             timestamp,
             author,
             description,
-            changed_files: Vec::new(),
+            changed_files,
         });
     }
     Ok(entries)

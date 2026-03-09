@@ -75,6 +75,7 @@ pub fn dim(s: &str) -> String { wrap(DIM, s) }
 pub fn green(s: &str) -> String { wrap(GREEN, s) }
 pub fn yellow(s: &str) -> String { wrap(YELLOW, s) }
 pub fn teal(s: &str) -> String { wrap(CYAN, s) }
+pub fn red(s: &str) -> String { wrap(RED, s) }
 pub fn gray(s: &str) -> String { wrap(BRIGHT_BLACK, s) }
 pub fn bright_black(s: &str) -> String { wrap(BRIGHT_BLACK, s) }
 
