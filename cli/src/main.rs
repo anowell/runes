@@ -1722,7 +1722,7 @@ fn print_annotated_rune_doc(
         build_annotations(history, store, rel_path, &body, created);
 
     // Print body with section and comment annotations
-    print_annotated_body(&body, &section_annotations, &comment_attributions, created);
+    print_annotated_body(&body, &section_annotations, &comment_attributions);
 }
 
 /// A section heading annotation
@@ -1801,7 +1801,8 @@ fn build_annotations(
     }
 
     // Comment attributions: split Comments section by --- separators
-    // and find when each comment block was first introduced
+    // and find when each comment block was last modified (same approach as sections).
+    // Walk oldest-to-newest, tracking when each comment's content last changed.
     let mut comment_attributions = Vec::new();
     let comments_text = current_sections
         .iter()
@@ -1810,12 +1811,12 @@ fn build_annotations(
         .unwrap_or_default();
     let current_comments = split_comments(&comments_text);
     if !current_comments.is_empty() {
-        // For each comment, walk revisions oldest-to-newest to find when it first appeared
-        for comment in &current_comments {
+        // For each current comment (by index position), walk revisions to
+        // find the last revision that changed its content.
+        for (ci, comment) in current_comments.iter().enumerate() {
             let mut author = created.author.clone();
             let mut timestamp = created.timestamp;
-            let mut found = false;
-            let mut prev_comments_count = 0;
+            let mut prev_text: Option<String> = None;
 
             for (entry, body) in &revisions_content {
                 let sections = parse_sections(body);
@@ -1825,19 +1826,15 @@ fn build_annotations(
                     .map(|(_, t)| t.clone())
                     .unwrap_or_default();
                 let rev_comments = split_comments(&rev_comments_text);
+                let rev_text = rev_comments.get(ci).map(|c| c.trim().to_string());
 
-                // Check if this comment exists in this revision
-                if rev_comments.iter().any(|c| c.trim() == comment.trim()) {
-                    if !found || rev_comments.len() > prev_comments_count {
-                        // First time we see this comment, or comments grew
-                        if !found {
-                            author = entry.author.clone();
-                            timestamp = entry.timestamp;
-                            found = true;
-                        }
+                if let Some(ref text) = rev_text {
+                    if prev_text.as_ref() != Some(text) {
+                        author = entry.author.clone();
+                        timestamp = entry.timestamp;
                     }
-                    prev_comments_count = rev_comments.len();
                 }
+                prev_text = rev_text;
             }
 
             comment_attributions.push(CommentAttribution {
@@ -1876,13 +1873,19 @@ fn split_comments(text: &str) -> Vec<String> {
 
 /// Parse markdown body into sections keyed by heading text.
 /// Returns vec of (heading_text, section_content) pairs.
+/// Headings inside fenced code blocks (``` or ~~~) are ignored.
 fn parse_sections(body: &str) -> Vec<(String, String)> {
     let mut sections: Vec<(String, String)> = Vec::new();
     let mut current_heading = String::new();
     let mut current_content = String::new();
+    let mut in_code_fence = false;
 
     for line in body.lines() {
-        if line.starts_with('#') {
+        if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
+            in_code_fence = !in_code_fence;
+            current_content.push_str(line);
+            current_content.push('\n');
+        } else if !in_code_fence && line.starts_with('#') {
             if !current_heading.is_empty() || !current_content.trim().is_empty() {
                 sections.push((current_heading.clone(), current_content.clone()));
             }
@@ -1903,11 +1906,11 @@ fn print_annotated_body(
     body: &str,
     annotations: &[SectionAnnotation],
     comment_attrs: &[CommentAttribution],
-    created: &LogEntry,
 ) {
     let lines: Vec<&str> = body.lines().collect();
     let mut i = 0;
     let mut in_comments = false;
+    let mut in_code_fence = false;
     let mut comment_idx = 0;
     let mut comment_buf: Vec<&str> = Vec::new();
     let mut comment_header_printed = false;
@@ -1915,8 +1918,13 @@ fn print_annotated_body(
     while i < lines.len() {
         let line = lines[i];
 
-        // Check if this is a heading
-        if line.starts_with('#') {
+        // Track code fences to avoid treating headings inside them as real headings
+        if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
+            in_code_fence = !in_code_fence;
+        }
+
+        // Check if this is a heading (outside code fences)
+        if !in_code_fence && line.starts_with('#') {
             let heading_text = line.trim_start_matches('#').trim();
 
             // Check for Comments section
@@ -1929,20 +1937,15 @@ fn print_annotated_body(
 
             // Find annotation for this heading
             if let Some(ann) = annotations.iter().find(|a| a.heading == heading_text) {
-                // Skip annotation if section was never edited after creation
-                let skip = ann.last_edited_at == created.timestamp;
-                if !skip {
-                    let ts = format_timestamp_local(ann.last_edited_at);
-                    color::highlight_markdown(&format!("{line}"));
-                    if ann.last_editor.is_empty() {
-                        print!("{}", color::dim(&format!(" _(Last edited on {ts})_")));
-                    } else {
-                        print!("{}", color::dim(&format!(" _(Last edited by {} on {})_", ann.last_editor, ts)));
-                    }
-                    println!();
-                    i += 1;
-                    continue;
+                color::highlight_markdown(&format!("{line}\n"));
+                let ts = format_timestamp_local(ann.last_edited_at);
+                if ann.last_editor.is_empty() {
+                    println!("{}", color::gray(&format!("Last edited on {ts}")));
+                } else {
+                    println!("{}", color::gray(&format!("Last edited by {} on {}", ann.last_editor, ts)));
                 }
+                i += 1;
+                continue;
             }
         }
 
@@ -1951,7 +1954,7 @@ fn print_annotated_body(
                 // Flush buffered comment with attribution
                 flush_comment_buf(&mut comment_buf, comment_attrs, &mut comment_idx, &mut comment_header_printed);
                 // Print separator
-                println!("{}", color::dim("---"));
+                println!("{}", color::gray("---"));
             } else {
                 comment_buf.push(line);
             }
@@ -1981,23 +1984,21 @@ fn flush_comment_buf(
         return;
     }
 
-    // Find matching attribution
+    // Print attribution header
     if let Some(attr) = comment_attrs.get(*comment_idx) {
-        if !*header_printed || true {
-            // Print attribution header
-            let ts = format_timestamp_local(attr.timestamp);
-            if attr.author.is_empty() {
-                println!("{}", color::dim(&format!("On {ts}")));
-            } else {
-                print!("{}", color::dim("On "));
-                print!("{}", color::dim(&format!("{ts} ")));
-                print!("{}", color::dim("by "));
-                print!("{}", color::yellow(&attr.author));
-                println!();
-            }
-            println!();
-            *header_printed = true;
+        let ts = format_timestamp_local(attr.timestamp);
+        if attr.author.is_empty() {
+            println!("{}", color::gray(&format!("On {ts}")));
+        } else {
+            println!(
+                "{}{}{}",
+                color::gray(&format!("On {ts} by ")),
+                color::yellow(&attr.author),
+                color::gray(""),
+            );
         }
+        println!();
+        *header_printed = true;
         *comment_idx += 1;
     }
 
