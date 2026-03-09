@@ -203,16 +203,10 @@ pub(super) fn pijul_sdk_file_rich_log(
     // Fallback: pijul's rev_log_for_path can be unreliable, so walk the
     // store-wide log and check which revisions actually changed this file's
     // content by comparing file_at_revision across consecutive entries.
-    let rune_id = rune_id_from_rel_path(rel_path);
-    if rune_id.is_empty() {
-        return Ok(Vec::new());
-    }
-    // Get candidate entries that mention this rune
-    let candidates = pijul_sdk_rich_log(store, limit * 10)?;
-    let candidates: Vec<_> = candidates
-        .into_iter()
-        .filter(|e| e.description.contains(&rune_id))
-        .collect();
+    // Walk all commits (not just ones mentioning the rune in their description)
+    // since bulk commits like "Bootstrap" or "Record changes" won't reference
+    // individual rune IDs.
+    let candidates = pijul_sdk_rich_log(store, 200)?;
     if candidates.is_empty() {
         return Ok(Vec::new());
     }
@@ -276,24 +270,6 @@ fn enrich_hashes(store: &Store, hashes: &[String]) -> Result<Vec<super::LogEntry
 
 /// Extract a rune ID like "project-shortid" from a store-relative path
 /// like "project/shortid--slug.md"
-fn rune_id_from_rel_path(rel_path: &Path) -> String {
-    let project = rel_path
-        .parent()
-        .and_then(|p| p.file_name())
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    let short_id = rel_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .split("--")
-        .next()
-        .unwrap_or("");
-    if project.is_empty() || short_id.is_empty() {
-        return String::new();
-    }
-    format!("{project}-{short_id}")
-}
 
 pub(super) fn pijul_sdk_show_change(store: &Store, change_id: &str) -> Result<String> {
     let repo = open_pijul_repo(store)?;
