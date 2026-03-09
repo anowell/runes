@@ -434,7 +434,7 @@ fn home_dir() -> Result<PathBuf> {
 }
 
 fn default_store_path(name: &str) -> Result<PathBuf> {
-    Ok(home_dir()?.join(".runes").join("workspaces").join(name))
+    Ok(home_dir()?.join(".runes").join("stores").join(name))
 }
 
 fn load_context() -> Result<(Config, UserConfig, PathBuf)> {

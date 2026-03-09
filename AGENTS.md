@@ -10,19 +10,19 @@ This repo models the entire rune lifecycle. Always drive changes through the `ru
 - `docs/backend-sdk-plan.md`: tracks which backend operations already run via `libpijul`/`jj-lib` and which ones are still CLI-backed; reference it when touching backend behavior.
 
 ## Standard operating environment
-- Default store: `proj` located at `~/.runes/workspaces/proj` (a `pijul` repo).
-- Target project: `runes` inside that store (path `~/.runes/workspaces/proj/runes`).
+- Default store: `proj` located at `~/.runes/stores/proj` (a `pijul` repo).
+- Target project: `runes` inside that store (path `~/.runes/stores/proj/runes`).
 - Always build the CLI before invoking commands, for example `cargo build` or `cargo run -p runes -- help` to ensure CLI behavior matches the code you edit.
 
 ## CLI-first rune lifecycle (follow this order)
 1. Run `runes list --store proj --project runes` to see existing runes and avoid duplication. If you need backend context, run `runes backend status proj` or `runes backend capabilities proj` first.
 2. Create new runes exclusively through the CLI: `runes new --project runes "Title" --store proj [--status <state>] [--label <label>] [--type issue|milestone]`. If `--project` is omitted the CLI uses `RUNES_PROJECT`, `default_project`, the current directory name, or the repo root name (in that order) to infer the target project, then lets `runes new` pick the canonical filename and metadata.
-3. After `runes new` returns, rerun `runes list...` to confirm the ID and path generated inside `~/.runes/workspaces/proj/runes`. Capture the file path reported so future edits happen on that doc.
+3. After `runes new` returns, rerun `runes list...` to confirm the ID and path generated inside `~/.runes/stores/proj/runes`. Capture the file path reported so future edits happen on that doc.
 4. Use CLI helpers to change metadata when possible (`runes issue edit`, `runes issue move`, etc.). Only open the generated markdown if you must add or remove sections that the CLI does not cover yet.
 5. When a change requires editing the underlying backend behavior, coordinate with `runes backend ...` commands (`status`, `log`, `sync`, `probe-sdk`), and mention in the rune body whether the feature remains CLI-backed (see `docs/backend-sdk-plan.md`).
 
 ## Documentation discipline
-- Never author or modify rune files directly under `docs/runes/` (those are stores' mirrors, not canonical). All canonical rune files live in `~/.runes/workspaces/proj/runes/...` and are managed via the CLI.
+- Never author or modify rune files directly under `docs/runes/` (those are stores' mirrors, not canonical). All canonical rune files live in `~/.runes/stores/proj/runes/...` and are managed via the CLI.
 - Refer to `docs/schema.md` when editing runes to ensure KDL frontmatter fields (id, status, labels, relations, links) remain consistent.
 - If you need to describe backend capabilities or migration gaps, mention them in the rune body and cite `docs/backend-sdk-plan.md` so future readers know why the CLI flow differs from SDK-backed code.
 

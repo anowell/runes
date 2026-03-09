@@ -10,7 +10,7 @@
 ## Store Layout
 
 ```text
-~/.runes/workspaces/
+~/.runes/stores/
   proj/                               # store repo
     myproject/                        # project directory
       _archive/                       # archived runes

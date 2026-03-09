@@ -4,7 +4,7 @@ Runes currently provides a pragmatic bootstrap CLI for self-hosting project mana
 
 ## Key Concepts
 
-- `store`: named workspace with backend (`pijul` or `jj`)
+- `store`: named store with backend (`pijul` or `jj`)
 - `project`: folder inside a store
 - `rune`: markdown doc with KDL frontmatter
 - canonical id: `<project>-<short>` (example `runes-cx3`)
@@ -58,4 +58,4 @@ runes backend sync <store>
 - Backend integration currently shells out to `jj`/`pijul` CLI and is tracked for migration to SDK/library adapters.
 - `backend adapter <store>` prints active adapter implementation.
 - `backend capabilities <store>` prints a capability matrix for the active adapter.
-- `backend probe-sdk <store>` runs a backend SDK probe (currently `jj-lib` workspace load for jj stores).
+- `backend probe-sdk <store>` runs a backend SDK probe (currently `jj-lib` probe for jj stores).

@@ -31,7 +31,7 @@ defaults {
 
 store "proj" {
   backend "jj"
-  path "/Users/you/.runes/workspaces/proj"
+  path "/Users/you/.runes/stores/proj"
 }
 
 new {
