@@ -2793,10 +2793,8 @@ fn run_log(args: LogArgs) -> Result<()> {
     //   None → default project (unless --all)
     let (rune_filter, project_filter) = match &id {
         Some(spec) if split_store_prefix(spec).1.contains('-') => {
-            // rune_id (with optional store prefix)
+            // rune_id (with optional store prefix) — don't require file to exist (may be deleted)
             let (_, resolved) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, spec)?;
-            let store = resolve_store_with_context(&cfg, &user_cfg, &cwd, split_store_prefix(spec).0.as_deref())?;
-            let _ = locate_doc(&store, &resolved)?;
             (Some(resolved), None)
         }
         Some(proj) => {
