@@ -153,29 +153,77 @@ pub(super) fn pijul_sdk_file_rich_log(
     rel_path: &Path,
     limit: usize,
 ) -> Result<Vec<super::LogEntry>> {
-    // Use the store-wide rich_log and filter by description mentioning the file
-    // since pijul's path-based log can be unreliable for newer files
-    let rel_str = rel_path.to_string_lossy();
-    // Extract rune ID from path like "runes/bix--default-to-runes-list.md"
-    let file_stem = rel_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    let rune_id = file_stem
-        .split("--")
-        .next()
-        .unwrap_or(file_stem);
-    // Get all entries and filter to those that mention this rune
+    // Try actual file-path-based history via libpijul's rev_log_for_path first
+    let hashes = pijul_sdk_path_hashes(store, rel_path, limit)?;
+    if !hashes.is_empty() {
+        // Enrich each hash with change metadata (author, timestamp, description)
+        let repo = open_pijul_repo(store)?;
+        let changes = PijulChangeStore::from_root(&repo.path, 32);
+        let mut entries = Vec::new();
+        for hash_str in &hashes {
+            let hash = hash_str
+                .parse::<Hash>()
+                .map_err(|e| Error::new(format!("invalid pijul change hash: {e}")))?;
+            let (author, timestamp, description) = match changes.get_change(&hash) {
+                Ok(change) => {
+                    let author_name = change
+                        .header
+                        .authors
+                        .first()
+                        .and_then(|a| a.0.get("email").or(a.0.get("name")).or(a.0.get("key")))
+                        .cloned()
+                        .unwrap_or_default();
+                    let ts = change.header.timestamp.as_second();
+                    let desc = change.header.message.clone();
+                    (author_name, ts, desc)
+                }
+                Err(_) => (String::new(), 0, String::new()),
+            };
+            entries.push(super::LogEntry {
+                revision: hash_str.clone(),
+                timestamp,
+                author,
+                description,
+                changed_files: Vec::new(),
+            });
+        }
+        return Ok(entries);
+    }
+    // Fallback: pijul's rev_log_for_path can be unreliable, so filter
+    // the store-wide rich_log by rune ID derived from the file path.
+    // Path format: "<project>/<shortid>--<slug>.md" → rune ID "<project>-<shortid>"
+    let rune_id = rune_id_from_rel_path(rel_path);
+    if rune_id.is_empty() {
+        return Ok(Vec::new());
+    }
     let all_entries = pijul_sdk_rich_log(store, limit * 10)?;
     let filtered: Vec<_> = all_entries
         .into_iter()
-        .filter(|e| {
-            e.description.contains(rune_id)
-                || e.changed_files.iter().any(|f| f.contains(&*rel_str))
-        })
+        .filter(|e| e.description.contains(&rune_id))
         .take(limit)
         .collect();
     Ok(filtered)
+}
+
+/// Extract a rune ID like "project-shortid" from a store-relative path
+/// like "project/shortid--slug.md"
+fn rune_id_from_rel_path(rel_path: &Path) -> String {
+    let project = rel_path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let short_id = rel_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .split("--")
+        .next()
+        .unwrap_or("");
+    if project.is_empty() || short_id.is_empty() {
+        return String::new();
+    }
+    format!("{project}-{short_id}")
 }
 
 pub(super) fn pijul_sdk_show_change(store: &Store, change_id: &str) -> Result<String> {
