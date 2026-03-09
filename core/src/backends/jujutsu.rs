@@ -120,33 +120,45 @@ pub(super) fn jj_sdk_status(store: &Store) -> Result<String> {
         .load_at_head()
         .map_err(|e| Error::new(format!("jj-lib repo load failed: {e}")))?;
     let workspace_name = workspace.workspace_name().as_str();
-    let heads_count = repo.view().heads().len();
-    let mut lines = vec![
-        format!("workspace={workspace_name}"),
-        format!("heads={heads_count}"),
-    ];
-    if let Some(wc_commit_id) = repo.view().get_wc_commit_id(workspace.workspace_name()) {
+    let mut lines = vec![format!("workspace = \"{workspace_name}\"")];
+
+    // Count total changes by walking the commit graph
+    let mut queue: VecDeque<_> = repo.view().heads().iter().cloned().collect();
+    let mut seen = HashSet::new();
+    let mut latest_non_empty: Option<jj_lib::commit::Commit> = None;
+    while let Some(commit_id) = queue.pop_front() {
+        if !seen.insert(commit_id.clone()) {
+            continue;
+        }
         let commit = repo
             .store()
-            .get_commit(wc_commit_id)
-            .map_err(|e| Error::new(format!("jj-lib wc commit load failed: {e}")))?;
-        let wc_tree = workspace
-            .working_copy()
-            .tree()
-            .map_err(|e| Error::new(format!("jj-lib working copy state failed: {e}")))?;
-        let clean = wc_tree.tree_ids_and_labels() == commit.tree().tree_ids_and_labels();
-        let state = if clean { "clean" } else { "dirty" };
-        lines.push(format!("working_copy={state}"));
-        lines.push(format!("wc_commit={}", wc_commit_id.hex()));
-    } else {
-        lines.push("working_copy=unknown".to_string());
+            .get_commit(&commit_id)
+            .map_err(|e| Error::new(format!("jj-lib commit load failed: {e}")))?;
+        // Track the first non-empty commit as latest
+        if latest_non_empty.is_none() && !commit.description().trim().is_empty() {
+            latest_non_empty = Some(commit.clone());
+        }
+        for parent_id in commit.parent_ids() {
+            if !seen.contains(parent_id) {
+                queue.push_back(parent_id.clone());
+            }
+        }
     }
+    // Subtract 1 for the root commit
+    let changes = seen.len().saturating_sub(1);
+    lines.push(format!("changes = {changes}"));
+
+    if let Some(latest) = &latest_non_empty {
+        lines.push(format!("latest_change = \"{}\"", latest.change_id().reverse_hex()));
+        lines.push(format!("latest_commit = \"{}\"", latest.id().hex()));
+    }
+
     // List remotes
     let remotes = get_all_remote_names(repo.store())
         .unwrap_or_default();
     if !remotes.is_empty() {
         let remote_strs: Vec<&str> = remotes.iter().map(|r| r.as_ref()).collect();
-        lines.push(format!("remotes={}", remote_strs.join(",")));
+        lines.push(format!("remotes = [{}]", remote_strs.iter().map(|r| format!("\"{r}\"")).collect::<Vec<_>>().join(", ")));
     }
     Ok(lines.join("\n") + "\n")
 }

@@ -82,8 +82,8 @@ enum StoreCommand {
     List,
     /// Show store details
     Info {
-        /// Store name
-        name: String,
+        /// Store name (uses default store if omitted)
+        name: Option<String>,
     },
     /// Remove a store from config
     Remove {
@@ -3030,6 +3030,7 @@ fn run_store(command: StoreCommand) -> Result<()> {
         } => store_init(name, backend, path, default),
         StoreCommand::List => store_list(),
         StoreCommand::Info { name } => store_info(name),
+
         StoreCommand::Remove { name } => store_remove(name),
         StoreCommand::Doctor { store } => cache_rebuild(store),
     }
@@ -3077,23 +3078,33 @@ fn store_list() -> Result<()> {
     Ok(())
 }
 
-fn store_info(name: String) -> Result<()> {
+fn store_info(name: Option<String>) -> Result<()> {
     let stores = discover_stores()?;
-    let store = get_store(&stores, &name)?;
-    println!("name={}", store.name);
-    println!("backend={}", backend::adapter_name(&store));
-    println!("path={}", store.path.display());
-    println!("status:");
+    let store = if let Some(name) = name {
+        get_store(&stores, &name)?
+    } else {
+        let cwd = std::env::current_dir().map_err(|e| Error::new(e.to_string()))?;
+        let user_cfg = UserConfig::load_from_dir(&cwd)?;
+        resolve_store_with_context(&stores, &user_cfg, &cwd, None)?
+    };
+    println!("[store]");
+    println!("name = \"{}\"", store.name);
+    println!("backend = \"{}\"", backend::adapter_name(&store));
+    println!("path = \"{}\"", store.path.display());
+    println!();
+    println!("[status]");
     print!("{}", backend::status(&store)?);
-    // List uncommitted runes
+    println!();
+    println!("[uncommitted]");
     match backend::uncommitted_rune_paths(&store) {
         Ok(paths) if !paths.is_empty() => {
-            println!("uncommitted_runes:");
             for p in &paths {
-                println!("  {}", p.display());
+                println!("{}", p.display());
             }
         }
-        _ => {}
+        _ => {
+            println!("(none)");
+        }
     }
     Ok(())
 }
