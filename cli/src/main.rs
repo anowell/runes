@@ -58,6 +58,8 @@ enum CliCommand {
     Config(ConfigCommand),
     /// Initialize runes for a repo or globally
     Init(InitArgs),
+    /// Add a comment to a rune doc
+    Comment(CommentArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -389,6 +391,21 @@ struct RestoreArgs {
 }
 
 #[derive(Debug, Parser)]
+struct CommentArgs {
+    /// Rune doc ID (or store:id)
+    id: String,
+    /// Comment text
+    #[arg(short = 'm', long = "message")]
+    message: Option<String>,
+    /// Read comment from file (use - for stdin)
+    #[arg(short = 'f', long = "file", conflicts_with = "message")]
+    file: Option<PathBuf>,
+    /// Skip auto-commit after commenting
+    #[arg(long = "no-commit")]
+    no_commit: bool,
+}
+
+#[derive(Debug, Parser)]
 struct SyncArgs {
     /// Store to sync
     #[arg(long)]
@@ -425,6 +442,7 @@ fn handle_command(command: CliCommand) -> Result<()> {
         CliCommand::Store(store_cmd) => run_store(store_cmd),
         CliCommand::Config(config_cmd) => run_config(config_cmd),
         CliCommand::Init(args) => run_init(args),
+        CliCommand::Comment(args) => run_comment(args),
     }
 }
 fn home_dir() -> Result<PathBuf> {
@@ -2006,6 +2024,134 @@ fn run_edit(args: EditArgs) -> Result<()> {
     let snippets = edit_change_snippets(&original_doc, &doc);
     let default_msg = build_commit_message("Update", &doc.id, &snippets);
     maybe_commit(&store, no_commit, message.as_deref(), &default_msg, &user_cfg)?;
+    Ok(())
+}
+
+fn run_comment(args: CommentArgs) -> Result<()> {
+    let CommentArgs {
+        id,
+        message,
+        file,
+        no_commit,
+    } = args;
+    let (cfg, user_cfg, cwd) = load_context()?;
+    let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id)?;
+    let path = locate_doc(&store, &id)?;
+    let mut doc = parse_doc(&path)?;
+
+    // Get comment text from -m, -f, or editor
+    let comment_text = if let Some(msg) = message {
+        msg
+    } else if let Some(file_path) = file {
+        if file_path == Path::new("-") {
+            read_from_stdin()?
+        } else {
+            fs::read_to_string(&file_path)?
+        }
+    } else if editor_available() {
+        let tmp_dir = std::env::temp_dir();
+        let tmp_path = tmp_dir.join(format!("runes-comment-{}.md", &id));
+        fs::write(&tmp_path, "")?;
+        open_editor(&tmp_path)?;
+        let text = fs::read_to_string(&tmp_path)?;
+        let _ = fs::remove_file(&tmp_path);
+        if text.trim().is_empty() {
+            return Err(Error::new("Empty comment, aborting"));
+        }
+        text
+    } else {
+        return Err(Error::new(
+            "No comment provided. Use -m <message> or -f <file>, or run from a terminal.",
+        ));
+    };
+
+    let comment_text = comment_text.trim_end().to_string();
+
+    // Find or create the Comments section in the body
+    let body = &doc.body;
+    let mut comments_heading_pos = None;
+    let mut comments_heading_level = None;
+    for (i, line) in body.lines().enumerate() {
+        // Match any heading level where the text lowercases to "comments"
+        if let Some(rest) = line.strip_prefix('#') {
+            let mut hashes = 1;
+            let mut rest = rest;
+            while let Some(r) = rest.strip_prefix('#') {
+                hashes += 1;
+                rest = r;
+            }
+            if rest.trim().to_lowercase() == "comments" {
+                // Use the highest heading level (lowest number) that matches
+                if comments_heading_level.is_none() || hashes < comments_heading_level.unwrap() {
+                    comments_heading_pos = Some(i);
+                    comments_heading_level = Some(hashes);
+                }
+            }
+        }
+    }
+
+    let lines: Vec<&str> = body.lines().collect();
+    let mut new_body = String::new();
+
+    if let Some(pos) = comments_heading_pos {
+        // Find the end of the comments section content (next heading of same or higher level, or EOF)
+        let level = comments_heading_level.unwrap();
+        let mut section_end = lines.len();
+        for i in (pos + 1)..lines.len() {
+            if let Some(rest) = lines[i].strip_prefix('#') {
+                let mut h = 1;
+                let mut r = rest;
+                while let Some(next) = r.strip_prefix('#') {
+                    h += 1;
+                    r = next;
+                }
+                if h <= level && !r.is_empty() && r.starts_with(' ') {
+                    section_end = i;
+                    break;
+                }
+            }
+        }
+
+        // Build new body: lines before section_end, then append comment, then rest
+        for line in &lines[..section_end] {
+            new_body.push_str(line);
+            new_body.push('\n');
+        }
+
+        // Check if there's existing content in the section (non-empty lines after heading)
+        let has_existing_content = lines[(pos + 1)..section_end]
+            .iter()
+            .any(|l| !l.trim().is_empty());
+
+        if has_existing_content {
+            // Separate from previous comment with horizontal rule
+            new_body.push_str("\n---\n\n");
+        } else {
+            new_body.push('\n');
+        }
+        new_body.push_str(&comment_text);
+        new_body.push('\n');
+
+        // Append remaining lines after the section
+        if section_end < lines.len() {
+            new_body.push('\n');
+            for line in &lines[section_end..] {
+                new_body.push_str(line);
+                new_body.push('\n');
+            }
+        }
+    } else {
+        // No Comments heading found — append one at the end
+        new_body.push_str(body.trim_end());
+        new_body.push_str("\n\n## Comments\n\n");
+        new_body.push_str(&comment_text);
+        new_body.push('\n');
+    }
+
+    doc.body = new_body;
+    fs::write(&path, render_doc(&doc))?;
+    let default_msg = build_commit_message("Comment on", &doc.id, &[]);
+    maybe_commit(&store, no_commit, None, &default_msg, &user_cfg)?;
     Ok(())
 }
 
