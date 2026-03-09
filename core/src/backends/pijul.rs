@@ -156,53 +156,80 @@ pub(super) fn pijul_sdk_file_rich_log(
     // Try actual file-path-based history via libpijul's rev_log_for_path first
     let hashes = pijul_sdk_path_hashes(store, rel_path, limit)?;
     if !hashes.is_empty() {
-        // Enrich each hash with change metadata (author, timestamp, description)
-        let repo = open_pijul_repo(store)?;
-        let changes = PijulChangeStore::from_root(&repo.path, 32);
-        let mut entries = Vec::new();
-        for hash_str in &hashes {
-            let hash = hash_str
-                .parse::<Hash>()
-                .map_err(|e| Error::new(format!("invalid pijul change hash: {e}")))?;
-            let (author, timestamp, description) = match changes.get_change(&hash) {
-                Ok(change) => {
-                    let author_name = change
-                        .header
-                        .authors
-                        .first()
-                        .and_then(|a| a.0.get("email").or(a.0.get("name")).or(a.0.get("key")))
-                        .cloned()
-                        .unwrap_or_default();
-                    let ts = change.header.timestamp.as_second();
-                    let desc = change.header.message.clone();
-                    (author_name, ts, desc)
-                }
-                Err(_) => (String::new(), 0, String::new()),
-            };
-            entries.push(super::LogEntry {
-                revision: hash_str.clone(),
-                timestamp,
-                author,
-                description,
-                changed_files: Vec::new(),
-            });
-        }
-        return Ok(entries);
+        return enrich_hashes(store, &hashes);
     }
-    // Fallback: pijul's rev_log_for_path can be unreliable, so filter
-    // the store-wide rich_log by rune ID derived from the file path.
-    // Path format: "<project>/<shortid>--<slug>.md" → rune ID "<project>-<shortid>"
+    // Fallback: pijul's rev_log_for_path can be unreliable, so walk the
+    // store-wide log and check which revisions actually changed this file's
+    // content by comparing file_at_revision across consecutive entries.
     let rune_id = rune_id_from_rel_path(rel_path);
     if rune_id.is_empty() {
         return Ok(Vec::new());
     }
-    let all_entries = pijul_sdk_rich_log(store, limit * 10)?;
-    let filtered: Vec<_> = all_entries
+    // Get candidate entries that mention this rune
+    let candidates = pijul_sdk_rich_log(store, limit * 10)?;
+    let candidates: Vec<_> = candidates
         .into_iter()
         .filter(|e| e.description.contains(&rune_id))
-        .take(limit)
         .collect();
-    Ok(filtered)
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Walk candidates newest-to-oldest, check if file content actually changed
+    let mut entries = Vec::new();
+    let mut prev_content: Option<String> = None;
+    // Walk oldest-to-newest for consistent diffing
+    for entry in candidates.iter().rev() {
+        let content = pijul_sdk_file_at_revision(store, rel_path, &entry.revision)
+            .unwrap_or_default();
+        let changed = match &prev_content {
+            None => !content.is_empty(), // First time seeing the file
+            Some(prev) => prev != &content,
+        };
+        if changed {
+            entries.push(entry.clone());
+        }
+        if !content.is_empty() {
+            prev_content = Some(content);
+        }
+    }
+    // Return newest-first order
+    entries.reverse();
+    entries.truncate(limit);
+    Ok(entries)
+}
+
+fn enrich_hashes(store: &Store, hashes: &[String]) -> Result<Vec<super::LogEntry>> {
+    let repo = open_pijul_repo(store)?;
+    let changes = PijulChangeStore::from_root(&repo.path, 32);
+    let mut entries = Vec::new();
+    for hash_str in hashes {
+        let hash = hash_str
+            .parse::<Hash>()
+            .map_err(|e| Error::new(format!("invalid pijul change hash: {e}")))?;
+        let (author, timestamp, description) = match changes.get_change(&hash) {
+            Ok(change) => {
+                let author_name = change
+                    .header
+                    .authors
+                    .first()
+                    .and_then(|a| a.0.get("email").or(a.0.get("name")).or(a.0.get("key")))
+                    .cloned()
+                    .unwrap_or_default();
+                let ts = change.header.timestamp.as_second();
+                let desc = change.header.message.clone();
+                (author_name, ts, desc)
+            }
+            Err(_) => (String::new(), 0, String::new()),
+        };
+        entries.push(super::LogEntry {
+            revision: hash_str.clone(),
+            timestamp,
+            author,
+            description,
+            changed_files: Vec::new(),
+        });
+    }
+    Ok(entries)
 }
 
 /// Extract a rune ID like "project-shortid" from a store-relative path

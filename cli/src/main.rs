@@ -1717,11 +1717,12 @@ fn print_annotated_rune_doc(
         color::highlight_kdl(&frontmatter);
     }
 
-    // Build section-level attribution by diffing consecutive revisions
-    let section_annotations = build_section_annotations(history, store, rel_path, &body, created);
+    // Build section-level and comment attribution by diffing consecutive revisions
+    let (section_annotations, comment_attributions) =
+        build_annotations(history, store, rel_path, &body, created);
 
-    // Print body with section annotations
-    print_annotated_body(&body, &section_annotations, created);
+    // Print body with section and comment annotations
+    print_annotated_body(&body, &section_annotations, &comment_attributions, created);
 }
 
 /// A section heading annotation
@@ -1732,25 +1733,32 @@ struct SectionAnnotation {
     last_editor: String,
     /// Timestamp of last edit
     last_edited_at: i64,
-    /// Unique editors in order of edits
-    editors: Vec<String>,
 }
 
-fn build_section_annotations(
+/// Attribution for a single comment block
+struct CommentAttribution {
+    /// The comment text (lines between --- separators), used for matching
+    #[allow(dead_code)]
+    text: String,
+    /// Author who added this comment
+    author: String,
+    /// Timestamp when this comment was added
+    timestamp: i64,
+}
+
+fn build_annotations(
     history: &[LogEntry],
     store: &Store,
     rel_path: &Path,
     current_body: &str,
     created: &LogEntry,
-) -> Vec<SectionAnnotation> {
-    // Parse current body into sections
+) -> (Vec<SectionAnnotation>, Vec<CommentAttribution>) {
     let current_sections = parse_sections(current_body);
     if current_sections.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
 
-    // Get file content at each revision and track section changes
-    // history is newest-first, we want to walk oldest-to-newest for attribution
+    // Get file content at each revision, oldest-to-newest for attribution
     let mut revisions_content: Vec<(&LogEntry, String)> = Vec::new();
     for entry in history.iter().rev() {
         if let Ok(content) = backend::file_at_revision(store, rel_path, &entry.revision) {
@@ -1759,15 +1767,14 @@ fn build_section_annotations(
         }
     }
 
-    // For each current section heading, find the last revision that changed it
-    let mut annotations = Vec::new();
+    // Section annotations: find the last revision that changed each section
+    let mut section_annotations = Vec::new();
     for (heading, _current_text) in &current_sections {
         if heading == "Comments" || heading.is_empty() {
             continue;
         }
         let mut last_editor = created.author.clone();
         let mut last_edited_at = created.timestamp;
-        let mut editors: Vec<String> = vec![created.author.clone()];
         let mut prev_section_text: Option<String> = None;
 
         for (entry, body) in &revisions_content {
@@ -1781,22 +1788,90 @@ fn build_section_annotations(
                 if prev_section_text.as_ref() != Some(text) {
                     last_editor = entry.author.clone();
                     last_edited_at = entry.timestamp;
-                    if !editors.contains(&entry.author) {
-                        editors.push(entry.author.clone());
-                    }
                 }
             }
             prev_section_text = section_text;
         }
 
-        annotations.push(SectionAnnotation {
+        section_annotations.push(SectionAnnotation {
             heading: heading.clone(),
             last_editor,
             last_edited_at,
-            editors,
         });
     }
-    annotations
+
+    // Comment attributions: split Comments section by --- separators
+    // and find when each comment block was first introduced
+    let mut comment_attributions = Vec::new();
+    let comments_text = current_sections
+        .iter()
+        .find(|(h, _)| h == "Comments")
+        .map(|(_, t)| t.clone())
+        .unwrap_or_default();
+    let current_comments = split_comments(&comments_text);
+    if !current_comments.is_empty() {
+        // For each comment, walk revisions oldest-to-newest to find when it first appeared
+        for comment in &current_comments {
+            let mut author = created.author.clone();
+            let mut timestamp = created.timestamp;
+            let mut found = false;
+            let mut prev_comments_count = 0;
+
+            for (entry, body) in &revisions_content {
+                let sections = parse_sections(body);
+                let rev_comments_text = sections
+                    .iter()
+                    .find(|(h, _)| h == "Comments")
+                    .map(|(_, t)| t.clone())
+                    .unwrap_or_default();
+                let rev_comments = split_comments(&rev_comments_text);
+
+                // Check if this comment exists in this revision
+                if rev_comments.iter().any(|c| c.trim() == comment.trim()) {
+                    if !found || rev_comments.len() > prev_comments_count {
+                        // First time we see this comment, or comments grew
+                        if !found {
+                            author = entry.author.clone();
+                            timestamp = entry.timestamp;
+                            found = true;
+                        }
+                    }
+                    prev_comments_count = rev_comments.len();
+                }
+            }
+
+            comment_attributions.push(CommentAttribution {
+                text: comment.clone(),
+                author,
+                timestamp,
+            });
+        }
+    }
+
+    (section_annotations, comment_attributions)
+}
+
+/// Split comment section text into individual comment blocks separated by ---
+fn split_comments(text: &str) -> Vec<String> {
+    let mut comments = Vec::new();
+    let mut current = String::new();
+    for line in text.lines() {
+        if line.trim() == "---" {
+            let trimmed = current.trim().to_string();
+            if !trimmed.is_empty() {
+                comments.push(trimmed);
+            }
+            current = String::new();
+        } else {
+            current.push_str(line);
+            current.push('\n');
+        }
+    }
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        comments.push(trimmed);
+    }
+    comments
 }
 
 /// Parse markdown body into sections keyed by heading text.
@@ -1824,11 +1899,18 @@ fn parse_sections(body: &str) -> Vec<(String, String)> {
     sections
 }
 
-fn print_annotated_body(body: &str, annotations: &[SectionAnnotation], created: &LogEntry) {
+fn print_annotated_body(
+    body: &str,
+    annotations: &[SectionAnnotation],
+    comment_attrs: &[CommentAttribution],
+    created: &LogEntry,
+) {
     let lines: Vec<&str> = body.lines().collect();
     let mut i = 0;
     let mut in_comments = false;
+    let mut comment_idx = 0;
     let mut comment_buf: Vec<&str> = Vec::new();
+    let mut comment_header_printed = false;
 
     while i < lines.len() {
         let line = lines[i];
@@ -1847,10 +1929,8 @@ fn print_annotated_body(body: &str, annotations: &[SectionAnnotation], created: 
 
             // Find annotation for this heading
             if let Some(ann) = annotations.iter().find(|a| a.heading == heading_text) {
-                // Skip annotation if single editor matches created_by and timestamp matches
-                let skip = ann.editors.len() <= 1
-                    && ann.last_editor == created.author
-                    && ann.last_edited_at == created.timestamp;
+                // Skip annotation if section was never edited after creation
+                let skip = ann.last_edited_at == created.timestamp;
                 if !skip {
                     let ts = format_timestamp_local(ann.last_edited_at);
                     color::highlight_markdown(&format!("{line}"));
@@ -1867,16 +1947,11 @@ fn print_annotated_body(body: &str, annotations: &[SectionAnnotation], created: 
         }
 
         if in_comments {
-            // Collect and render comment blocks
-            // Comments are separated by --- and each should get an author/date header
             if line.trim() == "---" {
-                // Print buffered comment
-                if !comment_buf.is_empty() {
-                    let comment_text = comment_buf.join("\n");
-                    color::highlight_markdown(&format!("{comment_text}\n"));
-                    comment_buf.clear();
-                }
-                color::highlight_markdown(&format!("{line}\n"));
+                // Flush buffered comment with attribution
+                flush_comment_buf(&mut comment_buf, comment_attrs, &mut comment_idx, &mut comment_header_printed);
+                // Print separator
+                println!("{}", color::dim("---"));
             } else {
                 comment_buf.push(line);
             }
@@ -1887,10 +1962,47 @@ fn print_annotated_body(body: &str, annotations: &[SectionAnnotation], created: 
     }
 
     // Flush remaining comment buffer
-    if !comment_buf.is_empty() {
-        let comment_text = comment_buf.join("\n");
-        color::highlight_markdown(&format!("{comment_text}\n"));
+    flush_comment_buf(&mut comment_buf, comment_attrs, &mut comment_idx, &mut comment_header_printed);
+}
+
+fn flush_comment_buf(
+    buf: &mut Vec<&str>,
+    comment_attrs: &[CommentAttribution],
+    comment_idx: &mut usize,
+    header_printed: &mut bool,
+) {
+    if buf.is_empty() {
+        return;
     }
+    let text = buf.join("\n");
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        buf.clear();
+        return;
+    }
+
+    // Find matching attribution
+    if let Some(attr) = comment_attrs.get(*comment_idx) {
+        if !*header_printed || true {
+            // Print attribution header
+            let ts = format_timestamp_local(attr.timestamp);
+            if attr.author.is_empty() {
+                println!("{}", color::dim(&format!("On {ts}")));
+            } else {
+                print!("{}", color::dim("On "));
+                print!("{}", color::dim(&format!("{ts} ")));
+                print!("{}", color::dim("by "));
+                print!("{}", color::yellow(&attr.author));
+                println!();
+            }
+            println!();
+            *header_printed = true;
+        }
+        *comment_idx += 1;
+    }
+
+    color::highlight_markdown(&format!("{trimmed}\n"));
+    buf.clear();
 }
 
 fn list_container_children(container: &Path) -> Result<Vec<String>> {
