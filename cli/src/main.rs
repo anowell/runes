@@ -281,8 +281,14 @@ struct EditArgs {
 
 #[derive(Debug, Parser)]
 struct CommitArgs {
-    /// Store or store:project to commit (defaults to all pending)
+    /// Rune ID to commit (commits just that rune)
     target: Option<String>,
+    /// Commit all runes in a specific store
+    #[arg(long = "store")]
+    store: Option<String>,
+    /// Commit all runes in a specific project (within the default store)
+    #[arg(long = "project")]
+    project: Option<String>,
     /// Commit message
     #[arg(short = 'm', long = "message")]
     message: Option<String>,
@@ -745,8 +751,8 @@ fn resolve_commit_author(user_cfg: &UserConfig, author_override: Option<&str>) -
     ))
 }
 
-fn commit_store_changes(store: &Store, message: &str, author_name: &str, author_email: &str) -> Result<()> {
-    backend::commit_paths(store, &[], message, author_name, author_email)?;
+fn commit_store_changes(store: &Store, paths: &[PathBuf], message: &str, author_name: &str, author_email: &str) -> Result<()> {
+    backend::commit_paths(store, paths, message, author_name, author_email)?;
     cache::rebuild_cache(store)?;
     Ok(())
 }
@@ -914,6 +920,7 @@ fn maybe_commit(
     user_message: Option<&str>,
     default_message: &str,
     user_cfg: &UserConfig,
+    rune_path: Option<&Path>,
 ) -> Result<()> {
     if no_commit && user_message.is_none() {
         eprintln!("hint: uncommitted changes pending. Will be included in next commit or `runes commit`.");
@@ -921,7 +928,14 @@ fn maybe_commit(
     }
     let msg = user_message.unwrap_or(default_message);
     let (author_name, author_email) = resolve_commit_author(user_cfg, None)?;
-    commit_store_changes(store, msg, &author_name, &author_email)
+    let paths: Vec<PathBuf> = match rune_path {
+        Some(p) => {
+            let rel = p.strip_prefix(&store.path).unwrap_or(p);
+            vec![rel.to_path_buf()]
+        }
+        None => vec![],
+    };
+    commit_store_changes(store, &paths, msg, &author_name, &author_email)
 }
 
 fn warn_if_uncommitted(store: &Store) {
@@ -1136,9 +1150,9 @@ fn run_new(args: NewArgs) -> Result<()> {
         doc.title = effective_title;
         fs::write(&doc_path, render_doc(&doc))?;
     }
-    let _final_path = reconcile_filename(&doc_path, &identifier)?;
+    let final_path = reconcile_filename(&doc_path, &identifier)?;
     let default_msg = build_commit_message("Add", &identifier, &[status.clone()]);
-    maybe_commit(&store, no_commit, message.as_deref(), &default_msg, &user_cfg)?;
+    maybe_commit(&store, no_commit, message.as_deref(), &default_msg, &user_cfg, Some(&final_path))?;
     println!("{identifier}");
     Ok(())
 }
@@ -2133,10 +2147,10 @@ fn run_edit(args: EditArgs) -> Result<()> {
     } else {
         return Err(Error::new("No edits specified and no editor available"));
     }
-    let _final_path = reconcile_filename(&path, &doc.id)?;
+    let final_path = reconcile_filename(&path, &doc.id)?;
     let snippets = edit_change_snippets(&original_doc, &doc);
     let default_msg = build_commit_message("Update", &doc.id, &snippets);
-    maybe_commit(&store, no_commit, message.as_deref(), &default_msg, &user_cfg)?;
+    maybe_commit(&store, no_commit, message.as_deref(), &default_msg, &user_cfg, Some(&final_path))?;
     Ok(())
 }
 
@@ -2264,53 +2278,78 @@ fn run_comment(args: CommentArgs) -> Result<()> {
     doc.body = new_body;
     fs::write(&path, render_doc(&doc))?;
     let default_msg = build_commit_message("Comment on", &doc.id, &[]);
-    maybe_commit(&store, no_commit, None, &default_msg, &user_cfg)?;
+    maybe_commit(&store, no_commit, None, &default_msg, &user_cfg, Some(&path))?;
     Ok(())
-}
-
-fn store_exists(config: &Config, name: &str) -> bool {
-    config.stores.iter().any(|store| store.name == name)
 }
 
 fn run_commit(args: CommitArgs) -> Result<()> {
-    let CommitArgs { target, message, author } = args;
+    let CommitArgs { target, store: store_flag, project: project_flag, message, author } = args;
     let (cfg, user_cfg, cwd) = load_context()?;
-    let (store, scope_label) = match &target {
-        Some(spec) if spec.contains(':') || spec.contains('/') => {
-            let (store_hint, id_part) = split_store_prefix(spec);
-            if let Some(store_name) = store_hint.as_deref() {
-                if store_name.is_empty() {
-                    return Err(Error::new("Store name may not be empty"));
-                }
-            }
-            let s = resolve_store_with_context(&cfg, &user_cfg, &cwd, store_hint.as_deref())?;
-            let label = if id_part.is_empty() {
-                s.name.clone()
+
+    // Determine scope: specific rune, project directory, or entire store
+    let (store, paths, scope_label) = if let Some(rune_id) = &target {
+        // `runes commit <rune_id>` → commit a specific rune file
+        let (store_hint, id_part) = split_store_prefix(rune_id);
+        let s = resolve_store_with_context(&cfg, &user_cfg, &cwd, store_hint.as_deref())?;
+        let doc_path = locate_doc(&s, &id_part)?;
+        let rel = doc_path.strip_prefix(&s.path)
+            .map_err(|e| Error::new(e.to_string()))?;
+        (s, vec![rel.to_path_buf()], id_part.to_string())
+    } else if let Some(store_name) = &store_flag {
+        // `runes commit --store <name>` → commit all files in the entire store
+        let s = resolve_store_with_context(&cfg, &user_cfg, &cwd, Some(store_name))?;
+        let paths = discover_store_paths(&s)?;
+        let label = s.name.clone();
+        (s, paths, label)
+    } else if let Some(proj) = &project_flag {
+        // `runes commit --project <name>` → commit all runes in default_store/project
+        let s = resolve_store_with_context(&cfg, &user_cfg, &cwd, None)?;
+        let project_root = s.path.join(proj);
+        let paths = discover_dir_paths(&s.path, &project_root)?;
+        (s, paths, proj.clone())
+    } else {
+        // `runes commit` (no args) → commit default store's default project
+        let s = resolve_store_with_context(&cfg, &user_cfg, &cwd, None)?;
+        if let Some(default_spec) = user_cfg.default_project.as_deref() {
+            // default_project may be "store:project" or just "project"
+            let project_name = if default_spec.contains(':') {
+                default_spec.split(':').nth(1).unwrap_or(default_spec)
             } else {
-                id_part.to_string()
+                default_spec
             };
-            (s, label)
-        }
-        Some(spec) if store_exists(&cfg, spec) => {
-            let s = resolve_store_with_context(&cfg, &user_cfg, &cwd, Some(spec))?;
+            let project_root = s.path.join(project_name);
+            let paths = discover_dir_paths(&s.path, &project_root)?;
+            (s, paths, project_name.to_string())
+        } else {
+            // No default project — commit entire store
+            let paths = discover_store_paths(&s)?;
             let label = s.name.clone();
-            (s, label)
-        }
-        Some(spec) => {
-            let s = resolve_store_with_context(&cfg, &user_cfg, &cwd, None)?;
-            (s, spec.clone())
-        }
-        None => {
-            let s = resolve_store_with_context(&cfg, &user_cfg, &cwd, None)?;
-            let label = s.name.clone();
-            (s, label)
+            (s, paths, label)
         }
     };
+
     let msg = message.unwrap_or_else(|| format!("Record changes for {scope_label}"));
     let (author_name, author_email) = resolve_commit_author(&user_cfg, author.as_deref())?;
-    commit_store_changes(&store, &msg, &author_name, &author_email)?;
+    commit_store_changes(&store, &paths, &msg, &author_name, &author_email)?;
     println!("Committed changes in {}", store.name);
     Ok(())
+}
+
+/// Discover all markdown files in a store, returning paths relative to the store root.
+fn discover_store_paths(store: &Store) -> Result<Vec<PathBuf>> {
+    discover_dir_paths(&store.path, &store.path)
+}
+
+/// Discover all markdown files under `dir`, returning paths relative to `base`.
+fn discover_dir_paths(base: &Path, dir: &Path) -> Result<Vec<PathBuf>> {
+    let docs = discover_project_docs(dir)?;
+    let mut rel_paths = Vec::new();
+    for doc in docs {
+        if let Ok(rel) = doc.strip_prefix(base) {
+            rel_paths.push(rel.to_path_buf());
+        }
+    }
+    Ok(rel_paths)
 }
 fn find_container_dir(project_root: &Path, full_id: &str) -> Result<PathBuf> {
     let parsed = parse_full_id(full_id)?;
@@ -2395,16 +2434,16 @@ fn run_move(args: MoveArgs) -> Result<()> {
     move_rune(&from_store, &to_store, &id, &project, parent.as_deref())?;
     let move_msg = format!("Move {id} to {project}");
     if from_store.name == to_store.name {
-        maybe_commit(&from_store, no_commit, message.as_deref(), &move_msg, &user_cfg)?;
+        maybe_commit(&from_store, no_commit, message.as_deref(), &move_msg, &user_cfg, None)?;
     } else {
         let move_in_msg = format!("Move in {id} from {}", from_store.name);
-        maybe_commit(&to_store, no_commit, message.as_deref(), &move_in_msg, &user_cfg)?;
+        maybe_commit(&to_store, no_commit, message.as_deref(), &move_in_msg, &user_cfg, None)?;
         // Commit the removal from the source store
         if !no_commit || message.is_some() {
             let default_from_msg = format!("Move out {id} to {}", to_store.name);
             let from_msg = message.as_deref().unwrap_or(&default_from_msg);
             let (author_name, author_email) = resolve_commit_author(&user_cfg, None)?;
-            commit_store_changes(&from_store, from_msg, &author_name, &author_email)?;
+            commit_store_changes(&from_store, &[], from_msg, &author_name, &author_email)?;
         }
     }
     Ok(())
@@ -2415,7 +2454,7 @@ fn run_archive(args: ArchiveArgs) -> Result<()> {
     let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id)?;
     archive_rune(&store, &id)?;
     let default_msg = format!("Archive {id}");
-    maybe_commit(&store, no_commit, message.as_deref(), &default_msg, &user_cfg)?;
+    maybe_commit(&store, no_commit, message.as_deref(), &default_msg, &user_cfg, None)?;
     Ok(())
 }
 
@@ -2460,7 +2499,7 @@ fn run_delete(args: DeleteArgs) -> Result<()> {
     let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id)?;
     delete_rune(&store, &id)?;
     let default_msg = format!("Delete {id}");
-    maybe_commit(&store, no_commit, message.as_deref(), &default_msg, &user_cfg)?;
+    maybe_commit(&store, no_commit, message.as_deref(), &default_msg, &user_cfg, None)?;
     Ok(())
 }
 
@@ -2915,11 +2954,11 @@ fn run_restore(args: RestoreArgs) -> Result<()> {
     let contents = backend::file_at_revision(&store, rel_path, &revision)?;
     fs::write(&path, &contents)?;
     let doc = parse_doc(&path)?;
-    let _final_path = reconcile_filename(&path, &doc.id)?;
+    let final_path = reconcile_filename(&path, &doc.id)?;
     let short_rev = &revision[..revision.len().min(12)];
     println!("Restored {} to revision {short_rev}", doc.id);
     let default_msg = format!("Restore {} to revision {short_rev}", doc.id);
-    maybe_commit(&store, no_commit, message.as_deref(), &default_msg, &user_cfg)?;
+    maybe_commit(&store, no_commit, message.as_deref(), &default_msg, &user_cfg, Some(&final_path))?;
     Ok(())
 }
 

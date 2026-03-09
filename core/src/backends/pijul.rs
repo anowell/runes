@@ -491,6 +491,35 @@ pub(super) fn pijul_sdk_file_before_revision(
     pijul_file_at_revision_impl(store, rel_path, revision, false)
 }
 
+/// Walk a store directory and return all `.md` file paths relative to `root`.
+fn discover_store_md_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    walk_md_files(root, root, &mut out)?;
+    Ok(out)
+}
+
+fn walk_md_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if path.is_dir() {
+            if name == ".pijul" || name == ".git" || name == ".jj" {
+                continue;
+            }
+            walk_md_files(root, &path, out)?;
+        } else if path.extension().and_then(|s| s.to_str()) == Some("md") {
+            if let Ok(rel) = path.strip_prefix(root) {
+                out.push(rel.to_path_buf());
+            }
+        }
+    }
+    Ok(())
+}
+
 fn rel_to_internal_path(path: &Path) -> Result<String> {
     let raw = path.to_string_lossy().replace('\\', "/");
     if raw.is_empty() || raw == "." {
@@ -504,6 +533,20 @@ pub(super) fn pijul_sdk_has_uncommitted_changes(store: &Store) -> Result<bool> {
     let txn = (&repo.pristine)
         .arc_txn_begin()
         .map_err(|e| Error::new(format!("libpijul txn begin failed: {e}")))?;
+
+    // First check for untracked files on disk
+    let disk_files = discover_store_md_files(&store.path)?;
+    for rel_path in &disk_files {
+        let internal = match rel_to_internal_path(rel_path) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if !txn.read().is_tracked(&internal).unwrap_or(false) {
+            return Ok(true);
+        }
+    }
+
+    // Then check tracked files for modifications
     let channel_name = txn
         .read()
         .current_channel()
@@ -546,10 +589,27 @@ pub(super) fn pijul_sdk_commit_paths(
         .map_err(|e| Error::new(format!("libpijul txn begin failed: {e}")))?;
 
     let changes = repo.changes.clone();
-    for rel_path in paths {
+    // Ensure paths are tracked before recording. Pijul only records
+    // changes to tracked files, so we must `add` them first.
+    // When paths is empty, discover all markdown files in the store.
+    let effective_paths: Vec<PathBuf> = if paths.is_empty() {
+        discover_store_md_files(&store.path)?
+    } else {
+        paths.to_vec()
+    };
+    for rel_path in &effective_paths {
         let full = store.path.join(rel_path);
         if !full.exists() {
             continue;
+        }
+        // Add all ancestor directories
+        let mut ancestor = rel_path.parent();
+        while let Some(dir) = ancestor {
+            if dir == Path::new("") {
+                break;
+            }
+            let _ = txn.write().add(&rel_to_internal_path(dir)?, true, 0);
+            ancestor = dir.parent();
         }
         let internal = rel_to_internal_path(rel_path)?;
         let is_dir = full.is_dir();
