@@ -13,11 +13,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tokio::runtime::Runtime;
 
-fn pijul_identity_names() -> Vec<String> {
-    CompleteIdentity::load_all()
-        .map(|mut identities| identities.drain(..).map(|identity| identity.name).collect())
-        .unwrap_or_default()
-}
 
 /// Build a map from public key → display name for all local pijul identities.
 /// Display name prefers: display_name > "name <email>" > email > identity name.
@@ -114,29 +109,26 @@ pub(super) fn pijul_sdk_status(store: &Store) -> Result<String> {
         .next()
         .transpose()
         .map_err(|e| Error::new(format!("libpijul reverse log next failed: {e}")))?;
-    let mut lines = vec![
-        "backend=libpijul".to_string(),
-        format!("repo={}", repo.path.display()),
-        format!("channel={channel_name}"),
-    ];
+    let mut lines = vec![format!("channel={channel_name}")];
     if let Some((n, (hash, _))) = latest {
-        lines.push(format!("latest_n={n}"));
+        lines.push(format!("patches={n}"));
         lines.push(format!("latest_hash={hash:?}"));
     } else {
-        lines.push("latest_n=none".to_string());
+        lines.push("patches=0".to_string());
     }
+    // Collect remote names
+    let mut remote_names = Vec::new();
     if let Some(default_remote) = &repo.config.default_remote {
-        lines.push(format!("default_remote={default_remote}"));
+        remote_names.push(default_remote.clone());
     }
-    if let Some(colors) = &repo.config.colors {
-        lines.push(format!("colors={colors:?}"));
+    for rc in &repo.config.remotes {
+        let name = rc.name().to_string();
+        if !remote_names.contains(&name) {
+            remote_names.push(name);
+        }
     }
-    if let Some(pager) = &repo.config.pager {
-        lines.push(format!("pager={pager:?}"));
-    }
-    let identities = pijul_identity_names();
-    if !identities.is_empty() {
-        lines.push(format!("identities={}", identities.join(",")));
+    if !remote_names.is_empty() {
+        lines.push(format!("remotes={}", remote_names.join(",")));
     }
     Ok(lines.join("\n") + "\n")
 }
@@ -581,6 +573,61 @@ pub(super) fn pijul_sdk_has_uncommitted_changes(store: &Store) -> Result<bool> {
         .map_err(|e| Error::new(format!("libpijul record failed: {e}")))?;
     let recorded = record.finish();
     Ok(!recorded.actions.is_empty())
+}
+
+pub(super) fn pijul_sdk_uncommitted_rune_paths(store: &Store) -> Result<Vec<PathBuf>> {
+    let repo = open_pijul_repo(store)?;
+    let txn = (&repo.pristine)
+        .arc_txn_begin()
+        .map_err(|e| Error::new(format!("libpijul txn begin failed: {e}")))?;
+
+    let disk_files = discover_store_md_files(&store.path)?;
+    let mut uncommitted = Vec::new();
+
+    let channel_name = txn
+        .read()
+        .current_channel()
+        .map_err(|e| Error::new(format!("libpijul current channel failed: {e}")))?
+        .to_string();
+    let channel = txn
+        .read()
+        .load_channel(&channel_name)
+        .map_err(|e| Error::new(format!("libpijul load channel failed: {e}")))?
+        .ok_or_else(|| Error::new(format!("missing pijul channel: {channel_name}")))?;
+
+    for rel_path in &disk_files {
+        let internal = match rel_to_internal_path(rel_path) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if !txn.read().is_tracked(&internal).unwrap_or(false) {
+            // Untracked file = uncommitted
+            uncommitted.push(rel_path.clone());
+            continue;
+        }
+        // Compare disk content to committed content
+        let disk_content = match fs::read_to_string(store.path.join(rel_path)) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let changes = PijulChangeStore::from_root(&repo.path, 32);
+        let committed = match txn.read().follow_oldest_path(&changes, &channel, &internal) {
+            Ok((pos, _)) => {
+                let mut writer = libpijul::vertex_buffer::Writer::new(Vec::<u8>::new());
+                if libpijul::output::output_file(&changes, &txn, &channel, pos, &mut writer).is_err() {
+                    continue;
+                }
+                String::from_utf8_lossy(&writer.into_inner()).to_string()
+            }
+            Err(_) => continue,
+        };
+        if disk_content != committed {
+            uncommitted.push(rel_path.clone());
+        }
+    }
+
+    uncommitted.sort();
+    Ok(uncommitted)
 }
 
 pub(super) fn pijul_sdk_commit_paths(

@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 use pijul_interaction::{set_context, InteractiveContext};
 use runes_core::backend::{self, LogEntry};
 use runes_core::cache;
-use runes_core::config::{ensure_dir, BackendKind, Config, Store};
+use runes_core::config::{ensure_dir, discover_stores, get_store, BackendKind, Store};
 use runes_core::model::{
     discover_project_docs, ensure_title, new_issue_doc, new_milestone_doc, next_short_id, parse_doc,
     parse_full_id, render_doc, replace_title, resolve_issue_path, slugify, RuneDoc,
@@ -461,11 +461,11 @@ fn default_store_path(name: &str) -> Result<PathBuf> {
     Ok(home_dir()?.join(".runes").join("stores").join(name))
 }
 
-fn load_context() -> Result<(Config, UserConfig, PathBuf)> {
-    let mut config = Config::load()?;
+fn load_context() -> Result<(Vec<Store>, UserConfig, PathBuf)> {
+    let mut stores = discover_stores()?;
     let cwd = std::env::current_dir().map_err(|e| Error::new(e.to_string()))?;
     let user_cfg = UserConfig::load_from_dir(&cwd)?;
-    // Merge store definitions from KDL config into Config
+    // Merge store definitions from KDL config (overrides discovered stores)
     for store_def in &user_cfg.stores {
         if !store_def.backend.is_empty() && !store_def.path.is_empty() {
             if let Ok(backend) = BackendKind::parse(&store_def.backend) {
@@ -474,17 +474,15 @@ fn load_context() -> Result<(Config, UserConfig, PathBuf)> {
                     backend,
                     path: PathBuf::from(&store_def.path),
                 };
-                config.upsert_store(store);
+                if let Some(existing) = stores.iter_mut().find(|s| s.name == store.name) {
+                    *existing = store;
+                } else {
+                    stores.push(store);
+                }
             }
         }
     }
-    // Also use default_store from user config if config.txt doesn't have one
-    if config.default_store.is_none() {
-        if let Some(ds) = &user_cfg.default_store {
-            config.default_store = Some(ds.clone());
-        }
-    }
-    Ok((config, user_cfg, cwd))
+    Ok((stores, user_cfg, cwd))
 }
 fn split_store_prefix(spec: &str) -> (Option<String>, &str) {
     if let Some((store, rest)) = spec.split_once(':') {
@@ -497,25 +495,28 @@ fn split_store_prefix(spec: &str) -> (Option<String>, &str) {
 }
 
 fn resolve_store_with_context(
-    config: &Config,
+    stores: &[Store],
     user_config: &UserConfig,
     cwd: &Path,
     store_hint: Option<&str>,
 ) -> Result<Store> {
     if let Some(name) = store_hint {
-        return config.get_store(name);
+        return get_store(stores, name);
     }
     if let Some(name) = user_config.store_for_path(cwd) {
-        return config.get_store(&name);
+        return get_store(stores, &name);
     }
     if let Some(name) = user_config.default_store.as_deref() {
-        return config.get_store(name);
+        return get_store(stores, name);
     }
-    config.default_store()
+    if stores.len() == 1 {
+        return Ok(stores[0].clone());
+    }
+    Err(Error::new("No default store configured. Set defaults.store in runes.kdl or ~/.runes/config.kdl"))
 }
 
 fn resolve_store_and_project(
-    config: &Config,
+    stores: &[Store],
     user_config: &UserConfig,
     cwd: &Path,
     store_hint: Option<&str>,
@@ -527,15 +528,15 @@ fn resolve_store_and_project(
             return Err(Error::new("Project name may not be empty"));
         }
         let hint = project_store_hint.as_deref().or(store_hint);
-        let store = resolve_store_with_context(config, user_config, cwd, hint)?;
+        let store = resolve_store_with_context(stores, user_config, cwd, hint)?;
         return Ok((store, Some(project.to_string())));
     }
-    let store = resolve_store_with_context(config, user_config, cwd, store_hint)?;
+    let store = resolve_store_with_context(stores, user_config, cwd, store_hint)?;
     Ok((store, None))
 }
 
 fn resolve_store_and_project_required(
-    config: &Config,
+    stores: &[Store],
     user_config: &UserConfig,
     cwd: &Path,
     store_hint: Option<&str>,
@@ -546,12 +547,12 @@ fn resolve_store_and_project_required(
         return Err(Error::new("Project name may not be empty"));
     }
     let hint = project_store_hint.as_deref().or(store_hint);
-    let store = resolve_store_with_context(config, user_config, cwd, hint)?;
+    let store = resolve_store_with_context(stores, user_config, cwd, hint)?;
     Ok((store, project.to_string()))
 }
 
 fn resolve_store_and_id(
-    config: &Config,
+    stores: &[Store],
     user_config: &UserConfig,
     cwd: &Path,
     store_hint: Option<&str>,
@@ -562,7 +563,7 @@ fn resolve_store_and_id(
         return Err(Error::new("ID may not be empty"));
     }
     let hint = project_store_hint.as_deref().or(store_hint);
-    let store = resolve_store_with_context(config, user_config, cwd, hint)?;
+    let store = resolve_store_with_context(stores, user_config, cwd, hint)?;
     Ok((store, id_part.to_string()))
 }
 
@@ -1158,7 +1159,7 @@ fn run_new(args: NewArgs) -> Result<()> {
 }
 
 fn resolve_store_and_project_from_spec(
-    config: &Config,
+    stores: &[Store],
     user_config: &UserConfig,
     cwd: &Path,
     store_hint: Option<&str>,
@@ -1178,25 +1179,25 @@ fn resolve_store_and_project_from_spec(
         .map(str::trim)
         .filter(|value| !value.is_empty());
     let hint = override_hint.or(store_hint);
-    let store = resolve_store_with_context(config, user_config, cwd, hint)?;
+    let store = resolve_store_with_context(stores, user_config, cwd, hint)?;
     Ok((store, project_trimmed.to_string()))
 }
 
 fn resolve_project_for_new(
-    config: &Config,
+    stores: &[Store],
     user_config: &UserConfig,
     cwd: &Path,
     store_hint: Option<&str>,
     project_arg: Option<&String>,
 ) -> Result<(Store, String)> {
     if let Some(spec) = project_arg {
-        return resolve_store_and_project_from_spec(config, user_config, cwd, store_hint, spec);
+        return resolve_store_and_project_from_spec(stores, user_config, cwd, store_hint, spec);
     }
     if let Ok(env_value) = std::env::var("RUNES_PROJECT") {
         let trimmed = env_value.trim();
         if !trimmed.is_empty() {
             return resolve_store_and_project_from_spec(
-                config,
+                stores,
                 user_config,
                 cwd,
                 store_hint,
@@ -1208,7 +1209,7 @@ fn resolve_project_for_new(
         let trimmed = default_spec.trim();
         if !trimmed.is_empty() {
             return resolve_store_and_project_from_spec(
-                config,
+                stores,
                 user_config,
                 cwd,
                 store_hint,
@@ -1216,7 +1217,7 @@ fn resolve_project_for_new(
             );
         }
     }
-    let store = resolve_store_with_context(config, user_config, cwd, store_hint)?;
+    let store = resolve_store_with_context(stores, user_config, cwd, store_hint)?;
     let projects = all_projects(&store)?;
     if let Some(name) = cwd.file_name().and_then(|n| n.to_str()) {
         if projects.iter().any(|proj| proj == name) {
@@ -3007,8 +3008,8 @@ fn run_sync(args: SyncArgs) -> Result<()> {
     let SyncArgs { store, all } = args;
     let (cfg, user_cfg, cwd) = load_context()?;
     if all {
-        for store in cfg.stores {
-            backend::sync(&store)?;
+        for store in &cfg {
+            backend::sync(store)?;
             println!("Synced {}", store.name);
         }
         return Ok(());
@@ -3046,24 +3047,21 @@ fn store_init(
     };
     let backend_kind = BackendKind::parse(&backend_s)?;
     backend::init_store(&path, backend_kind.clone())?;
-    let mut cfg = Config::load()?;
-    cfg.upsert_store(Store {
-        name: name.clone(),
-        backend: backend_kind,
-        path: path.clone(),
-    });
-    if set_default || cfg.default_store.is_none() {
-        cfg.default_store = Some(name.clone());
+    if set_default {
+        let global_path = user_config::global_config_path()?;
+        user_config::config_set(&global_path, "defaults.store", &name)?;
     }
-    cfg.save()?;
     println!("Initialized store {name}");
     Ok(())
 }
 
 fn store_list() -> Result<()> {
-    let cfg = Config::load()?;
-    for store in cfg.stores {
-        let marker = if cfg.default_store.as_deref() == Some(store.name.as_str()) {
+    let stores = discover_stores()?;
+    let cwd = std::env::current_dir().map_err(|e| Error::new(e.to_string()))?;
+    let user_cfg = UserConfig::load_from_dir(&cwd)?;
+    let default_store = user_cfg.default_store.as_deref();
+    for store in &stores {
+        let marker = if default_store == Some(store.name.as_str()) {
             "*"
         } else {
             " "
@@ -3080,37 +3078,31 @@ fn store_list() -> Result<()> {
 }
 
 fn store_info(name: String) -> Result<()> {
-    let cfg = Config::load()?;
-    let store = cfg.get_store(&name)?;
+    let stores = discover_stores()?;
+    let store = get_store(&stores, &name)?;
     println!("name={}", store.name);
     println!("backend={}", backend::adapter_name(&store));
     println!("path={}", store.path.display());
     println!("status:");
     print!("{}", backend::status(&store)?);
-    let caps = backend::adapter_capabilities(&store);
-    println!("capabilities:");
-    println!("  cli_backed={}", caps.cli_backed);
-    println!("  sdk_probe={}", caps.sdk_probe);
-    println!("  file_scoped_log={}", caps.file_scoped_log);
-    println!("  file_change_inspection={}", caps.file_change_inspection);
-    println!("  sync_supported={}", caps.sync_supported);
-    println!("  remove_path_supported={}", caps.remove_path_supported);
+    // List uncommitted runes
+    match backend::uncommitted_rune_paths(&store) {
+        Ok(paths) if !paths.is_empty() => {
+            println!("uncommitted_runes:");
+            for p in &paths {
+                println!("  {}", p.display());
+            }
+        }
+        _ => {}
+    }
     Ok(())
 }
 
 fn store_remove(name: String) -> Result<()> {
-    let mut cfg = Config::load()?;
-    let index = cfg
-        .stores
-        .iter()
-        .position(|s| s.name == name)
-        .ok_or_else(|| Error::new(format!("Unknown store '{name}'")))?;
-    cfg.stores.remove(index);
-    if cfg.default_store.as_deref() == Some(name.as_str()) {
-        cfg.default_store = None;
-    }
-    cfg.save()?;
-    println!("Removed store {name}");
+    let stores = discover_stores()?;
+    let store = get_store(&stores, &name)?;
+    eprintln!("To remove store '{name}', delete its directory:");
+    eprintln!("  rm -rf {}", store.path.display());
     Ok(())
 }
 fn cache_rebuild(store_name: String) -> Result<()> {
@@ -3121,7 +3113,8 @@ fn cache_rebuild(store_name: String) -> Result<()> {
 }
 
 fn load_store(name: &str) -> Result<Store> {
-    Config::load()?.get_store(name)
+    let stores = discover_stores()?;
+    get_store(&stores, name)
 }
 
 fn run_config(cmd: ConfigCommand) -> Result<()> {
@@ -3253,17 +3246,8 @@ fn run_init(args: InitArgs) -> Result<()> {
 
         // Initialize the store
         let backend_kind = BackendKind::parse(backend)?;
-        backend::init_store(&store_path, backend_kind.clone())?;
-        let mut cfg = Config::load()?;
-        cfg.upsert_store(Store {
-            name: store_name.to_string(),
-            backend: backend_kind,
-            path: store_path,
-        });
-        if cfg.default_store.is_none() {
-            cfg.default_store = Some(store_name.to_string());
-        }
-        cfg.save()?;
+        backend::init_store(&store_path, backend_kind)?;
+        user_config::config_set(&global_path, "defaults.store", store_name)?;
         println!("Global config created.");
     } else {
         println!("Global config already exists at {}", global_path.display());

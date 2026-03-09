@@ -65,6 +65,49 @@ pub(super) fn jj_sdk_has_uncommitted_changes(store: &Store) -> Result<bool> {
     }
 }
 
+pub(super) fn jj_sdk_uncommitted_rune_paths(store: &Store) -> Result<Vec<PathBuf>> {
+    let config = StackedConfig::with_defaults();
+    let settings = UserSettings::from_config(config).map_err(|e| Error::new(e.to_string()))?;
+    let store_factories = StoreFactories::default();
+    let wc_factories = default_working_copy_factories();
+    let workspace = Workspace::load(&settings, &store.path, &store_factories, &wc_factories)
+        .map_err(|e| Error::new(format!("jj-lib workspace load failed: {e}")))?;
+    let repo = workspace
+        .repo_loader()
+        .load_at_head()
+        .map_err(|e| Error::new(format!("jj-lib repo load failed: {e}")))?;
+    let wc_commit_id = match repo.view().get_wc_commit_id(workspace.workspace_name()) {
+        Some(id) => id.clone(),
+        None => return Ok(Vec::new()),
+    };
+    let commit = repo
+        .store()
+        .get_commit(&wc_commit_id)
+        .map_err(|e| Error::new(format!("jj-lib wc commit load failed: {e}")))?;
+    let wc_tree = workspace
+        .working_copy()
+        .tree()
+        .map_err(|e| Error::new(format!("jj-lib working copy state failed: {e}")))?;
+    let commit_tree = commit.tree();
+
+    if wc_tree.tree_ids_and_labels() == commit_tree.tree_ids_and_labels() {
+        return Ok(Vec::new());
+    }
+
+    let mut paths: Vec<PathBuf> = TreeDiffIterator::new(&commit_tree, &wc_tree, &EverythingMatcher)
+        .filter_map(|entry| {
+            let path_str = entry.path.as_internal_file_string();
+            if path_str.ends_with(".md") {
+                Some(PathBuf::from(path_str))
+            } else {
+                None
+            }
+        })
+        .collect();
+    paths.sort();
+    Ok(paths)
+}
+
 pub(super) fn jj_sdk_status(store: &Store) -> Result<String> {
     let config = StackedConfig::with_defaults();
     let settings = UserSettings::from_config(config).map_err(|e| Error::new(e.to_string()))?;
@@ -79,9 +122,7 @@ pub(super) fn jj_sdk_status(store: &Store) -> Result<String> {
     let workspace_name = workspace.workspace_name().as_str();
     let heads_count = repo.view().heads().len();
     let mut lines = vec![
-        "backend=jj-sdk".to_string(),
-        format!("workspace={}", workspace.workspace_root().display()),
-        format!("workspace_name={workspace_name}"),
+        format!("workspace={workspace_name}"),
         format!("heads={heads_count}"),
     ];
     if let Some(wc_commit_id) = repo.view().get_wc_commit_id(workspace.workspace_name()) {
@@ -99,6 +140,13 @@ pub(super) fn jj_sdk_status(store: &Store) -> Result<String> {
         lines.push(format!("wc_commit={}", wc_commit_id.hex()));
     } else {
         lines.push("working_copy=unknown".to_string());
+    }
+    // List remotes
+    let remotes = get_all_remote_names(repo.store())
+        .unwrap_or_default();
+    if !remotes.is_empty() {
+        let remote_strs: Vec<&str> = remotes.iter().map(|r| r.as_ref()).collect();
+        lines.push(format!("remotes={}", remote_strs.join(",")));
     }
     Ok(lines.join("\n") + "\n")
 }
