@@ -19,6 +19,48 @@ fn pijul_identity_names() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Build a map from public key → display name for all local pijul identities.
+/// Display name prefers: display_name > "name <email>" > email > identity name.
+fn load_identity_map() -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    if let Ok(identities) = CompleteIdentity::load_all() {
+        for ident in identities {
+            let author = &ident.config.author;
+            let display = if !author.display_name.is_empty() {
+                author.display_name.clone()
+            } else if !author.email.is_empty() {
+                author.email.clone()
+            } else {
+                ident.name.clone()
+            };
+            map.insert(ident.public_key.key.clone(), display);
+        }
+    }
+    map
+}
+
+/// Resolve author from a pijul change's author map.
+/// Strategy: if key is present, look up the local identity first;
+/// fall back to email/name from the author map.
+fn resolve_pijul_author(
+    author_map: &std::collections::BTreeMap<String, String>,
+    identity_map: &std::collections::HashMap<String, String>,
+) -> String {
+    // Try key → identity lookup first
+    if let Some(key) = author_map.get("key") {
+        if let Some(display) = identity_map.get(key) {
+            return display.clone();
+        }
+    }
+    // Fall back to email > name > key
+    author_map
+        .get("email")
+        .or(author_map.get("name"))
+        .or(author_map.get("key"))
+        .cloned()
+        .unwrap_or_default()
+}
+
 fn open_pijul_repo(store: &Store) -> Result<PijulRepository> {
     PijulRepository::find_root(Some(&store.path))
         .map_err(|e| Error::new(format!("pijul repository open failed: {e}")))
@@ -201,6 +243,7 @@ pub(super) fn pijul_sdk_file_rich_log(
 fn enrich_hashes(store: &Store, hashes: &[String]) -> Result<Vec<super::LogEntry>> {
     let repo = open_pijul_repo(store)?;
     let changes = PijulChangeStore::from_root(&repo.path, 32);
+    let id_map = load_identity_map();
     let mut entries = Vec::new();
     for hash_str in hashes {
         let hash = hash_str
@@ -212,8 +255,7 @@ fn enrich_hashes(store: &Store, hashes: &[String]) -> Result<Vec<super::LogEntry
                     .header
                     .authors
                     .first()
-                    .and_then(|a| a.0.get("email").or(a.0.get("name")).or(a.0.get("key")))
-                    .cloned()
+                    .map(|a| resolve_pijul_author(&a.0, &id_map))
                     .unwrap_or_default();
                 let ts = change.header.timestamp.as_second();
                 let desc = change.header.message.clone();
@@ -279,6 +321,7 @@ pub(super) fn pijul_sdk_rich_log(store: &Store, limit: usize) -> Result<Vec<supe
         .map_err(|e| Error::new(format!("libpijul load channel failed: {e}")))?
         .ok_or_else(|| Error::new(format!("missing pijul channel: {channel_name}")))?;
     let changes = PijulChangeStore::from_root(&repo.path, 32);
+    let id_map = load_identity_map();
     let mut entries = Vec::new();
     for item in txn
         .reverse_log(&channel.read(), None)
@@ -295,8 +338,7 @@ pub(super) fn pijul_sdk_rich_log(store: &Store, limit: usize) -> Result<Vec<supe
                     .header
                     .authors
                     .first()
-                    .and_then(|a| a.0.get("email").or(a.0.get("name")).or(a.0.get("key")))
-                    .cloned()
+                    .map(|a| resolve_pijul_author(&a.0, &id_map))
                     .unwrap_or_default();
                 let ts = change.header.timestamp.as_second();
                 let desc = change.header.message.clone();
