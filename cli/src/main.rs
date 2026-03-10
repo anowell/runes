@@ -3087,26 +3087,41 @@ fn store_info(name: Option<String>) -> Result<()> {
         let user_cfg = UserConfig::load_from_dir(&cwd)?;
         resolve_store_with_context(&stores, &user_cfg, &cwd, None)?
     };
-    println!("[store]");
-    println!("name = \"{}\"", store.name);
-    println!("backend = \"{}\"", backend::adapter_name(&store));
-    println!("path = \"{}\"", store.path.display());
-    println!();
-    println!("[status]");
-    print!("{}", backend::status(&store)?);
-    println!();
-    println!("[uncommitted]");
+    println!("store \"{}\" {{", store.name);
+    println!("  backend \"{}\"", backend::adapter_name(&store));
+    println!("  path \"{}\"", store.path.display());
+    // Status
+    let status = backend::status(&store)?;
+    println!("  status {{");
+    for line in status.trim().lines() {
+        println!("    {line}");
+    }
+    // Uncommitted runes
     match backend::uncommitted_rune_paths(&store) {
         Ok(paths) if !paths.is_empty() => {
             for p in &paths {
-                println!("{}", p.display());
+                let rune_id = rune_id_from_store_path(p);
+                if let Some(id) = &rune_id {
+                    println!("    uncommitted \"{id}\" path=\"{}\"", p.display());
+                } else {
+                    println!("    uncommitted path=\"{}\"", p.display());
+                }
             }
         }
-        _ => {
-            println!("(none)");
-        }
+        _ => {}
     }
+    println!("  }}");
+    println!("}}");
     Ok(())
+}
+
+/// Extract a rune ID from a store-relative path like `project/short--slug.md` → `project-short`
+fn rune_id_from_store_path(rel_path: &Path) -> Option<String> {
+    let project = rel_path.parent()?.file_name()?.to_str()?;
+    let filename = rel_path.file_name()?.to_str()?;
+    let stem = filename.strip_suffix(".md")?;
+    let short = stem.split("--").next()?;
+    Some(format!("{project}-{short}"))
 }
 
 fn store_remove(name: String) -> Result<()> {
