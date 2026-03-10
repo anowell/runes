@@ -1,0 +1,8 @@
+// Default runes schema
+// Override by placing .kinds/schema.kdl in your store or project directory.
+
+status "todo" "in-progress" "done"
+
+kind "task"
+kind "bug"
+kind "milestone"

@@ -328,10 +328,11 @@ pub fn render_doc(doc: &RuneDoc) -> String {
     out
 }
 
-pub fn new_issue_doc(id: &str, title: &str, milestone: Option<&str>) -> RuneDoc {
-    let body = format!("# {title}\n\n## Summary\n\n## Design\n\n## Acceptance\n\n## Comments\n");
+/// Create a new rune doc with a specific kind and body template.
+pub fn new_rune_doc(id: &str, kind: &str, title: &str, body_template: &str, milestone: Option<&str>) -> RuneDoc {
+    let body = format!("# {title}\n\n{body_template}");
     RuneDoc {
-        kind: "task".to_string(),
+        kind: kind.to_string(),
         id: id.to_string(),
         status: "todo".to_string(),
         labels: Vec::new(),
@@ -353,8 +354,8 @@ pub fn new_milestone_doc(id: &str, title: &str) -> RuneDoc {
     RuneDoc {
         kind: "milestone".to_string(),
         id: id.to_string(),
-        status: "active".to_string(),
-        labels: vec!["v1".to_string()],
+        status: "todo".to_string(),
+        labels: Vec::new(),
         milestone: None,
         relations: Vec::new(),
         deps: Vec::new(),
@@ -427,7 +428,7 @@ fn walk_markdown(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
         let path = entry.path();
         let file_name = entry.file_name().to_string_lossy().to_string();
         if path.is_dir() {
-            if file_name == ".git" || file_name == ".jj" || file_name == ".pijul" {
+            if file_name == ".git" || file_name == ".jj" || file_name == ".pijul" || file_name == ".kinds" {
                 continue;
             }
             walk_markdown(&path, out)?;

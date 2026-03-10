@@ -3,6 +3,7 @@ pub use backends as backend;
 pub mod cache;
 pub mod config;
 pub mod model;
+pub mod schema;
 
 use std::fmt::{Display, Formatter};
 use std::io;

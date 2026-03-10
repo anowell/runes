@@ -7,9 +7,11 @@ use runes_core::backend::{self, LogEntry};
 use runes_core::cache;
 use runes_core::config::{ensure_dir, discover_stores, get_store, BackendKind, Store};
 use runes_core::model::{
-    discover_project_docs, ensure_title, new_issue_doc, new_milestone_doc, next_short_id, parse_doc,
-    parse_full_id, render_doc, replace_title, resolve_issue_path, slugify, RuneDoc,
+    discover_project_docs, ensure_title, new_milestone_doc, new_rune_doc,
+    next_short_id, parse_doc, parse_full_id, render_doc, replace_title, resolve_issue_path,
+    slugify, RuneDoc,
 };
+use runes_core::schema::{load_kind_template, load_schema};
 use runes_core::{Error, Result};
 use std::fs;
 use std::io::{self, Read};
@@ -975,10 +977,12 @@ fn read_from_stdin() -> Result<String> {
     Ok(buffer)
 }
 
-fn create_issue(
+fn create_rune(
     store: &Store,
     project: &str,
+    kind: &str,
     title: &str,
+    body_template: &str,
     status: &str,
     parent: Option<&str>,
     milestone: Option<&str>,
@@ -1010,7 +1014,7 @@ fn create_issue(
     ensure_dir(&parent_dir)?;
     let file_name = format!("{short}--{slug}.md");
     let path = parent_dir.join(&file_name);
-    let mut doc = new_issue_doc(&full_id, title, milestone);
+    let mut doc = new_rune_doc(&full_id, kind, title, body_template, milestone);
     doc.status = status.to_string();
     doc.labels = labels.to_vec();
     doc.relations = relations.to_vec();
@@ -1076,18 +1080,18 @@ fn run_new(args: NewArgs) -> Result<()> {
         .or_else(|| creation_defaults.kind.clone())
         .unwrap_or_else(|| "issue".to_string());
     let is_milestone = kind_value.eq_ignore_ascii_case("milestone");
-    let kind = if is_milestone { "milestone" } else { "issue" };
-    let mut status_value = status_flag
+    // Normalize "issue" to "task" for the kind field
+    let kind = if is_milestone {
+        "milestone".to_string()
+    } else if kind_value == "issue" {
+        "task".to_string()
+    } else {
+        kind_value.clone()
+    };
+    let status = status_flag
         .clone()
-        .or_else(|| creation_defaults.status.clone());
-    if status_value.is_none() {
-        status_value = Some(if kind == "milestone" {
-            "active".to_string()
-        } else {
-            "todo".to_string()
-        });
-    }
-    let status = status_value.unwrap();
+        .or_else(|| creation_defaults.status.clone())
+        .unwrap_or_else(|| "todo".to_string());
     let mut combined_labels = creation_defaults.labels.clone();
     combined_labels.extend(labels);
     let assignee_value = assignee
@@ -1108,6 +1112,12 @@ fn run_new(args: NewArgs) -> Result<()> {
     if file.is_some() && edit {
         return Err(Error::new("Cannot use both --file and --edit"));
     }
+
+    // Load schema and validate kind/status
+    let schema = load_schema(&store.path, Some(&project_name))?;
+    schema.validate_kind(&kind)?;
+    schema.validate_status(&kind, &status)?;
+
     let (identifier, doc_path) = if kind == "milestone" {
         create_milestone(
             &store,
@@ -1118,10 +1128,14 @@ fn run_new(args: NewArgs) -> Result<()> {
             id_override.as_deref(),
         )?
     } else {
-        create_issue(
+        // Use kind template for body
+        let body_template = load_kind_template(&store.path, Some(&project_name), &kind);
+        create_rune(
             &store,
             &project_name,
+            &kind,
             &title,
+            &body_template,
             &status,
             parent.as_deref(),
             milestone.as_deref(),
@@ -1144,12 +1158,34 @@ fn run_new(args: NewArgs) -> Result<()> {
         doc.title = effective_title;
         fs::write(&doc_path, render_doc(&doc))?;
     } else if edit {
-        open_editor(&doc_path)?;
-        let mut doc = parse_doc(&doc_path)?;
+        // Use a tmp file so the original stays clean until validation passes
+        let tmp_dir = std::env::temp_dir();
+        let tmp_path = tmp_dir.join(format!("runes-new-{}.md", &identifier));
+        fs::copy(&doc_path, &tmp_path)?;
+        open_editor(&tmp_path)?;
+        let edited_doc = parse_doc(&tmp_path)?;
+        // Validate after editor changes
+        if let Err(e) = schema.validate_status(&edited_doc.kind, &edited_doc.status) {
+            eprintln!("error: {e}");
+            eprintln!("Your edits are saved in: {}", tmp_path.display());
+            eprintln!("Fix and apply with: runes edit {identifier} -f {}", tmp_path.display());
+            // Clean up the newly created doc since it was never valid
+            let _ = fs::remove_file(&doc_path);
+            return Err(Error::new("Validation failed after editor edit"));
+        }
+        if let Err(e) = schema.validate_custom_fields(&edited_doc.kind, &edited_doc.frontmatter_extra) {
+            eprintln!("error: {e}");
+            eprintln!("Your edits are saved in: {}", tmp_path.display());
+            eprintln!("Fix and apply with: runes edit {identifier} -f {}", tmp_path.display());
+            let _ = fs::remove_file(&doc_path);
+            return Err(Error::new("Validation failed after editor edit"));
+        }
+        let mut doc = edited_doc;
         let (body, effective_title) = ensure_title(&doc.body, &title);
         doc.body = body;
         doc.title = effective_title;
         fs::write(&doc_path, render_doc(&doc))?;
+        let _ = fs::remove_file(&tmp_path);
     }
     let final_path = reconcile_filename(&doc_path, &identifier)?;
     let default_msg = build_commit_message("Add", &identifier, &[status.clone()]);
@@ -2155,8 +2191,13 @@ fn run_edit(args: EditArgs) -> Result<()> {
             "Cannot mix field edits with --file or --edit",
         ));
     }
+    // Load schema for validation
+    let parsed_id = parse_full_id(&id)?;
+    let schema = load_schema(&store.path, Some(&parsed_id.project))?;
+
     if has_field_edits {
         if let Some(status_value) = status {
+            schema.validate_status(&doc.kind, &status_value)?;
             doc.status = status_value;
         }
         if let Some(assignee_value) = assignee {
@@ -2218,12 +2259,33 @@ fn run_edit(args: EditArgs) -> Result<()> {
         doc.title = effective_title;
         fs::write(&path, render_doc(&doc))?;
     } else if edit || editor_available() {
-        open_editor(&path)?;
-        doc = parse_doc(&path)?;
+        // Use a tmp file for editor-based edits so we can validate before writing
+        let tmp_dir = std::env::temp_dir();
+        let tmp_path = tmp_dir.join(format!("runes-edit-{}.md", &id));
+        fs::copy(&path, &tmp_path)?;
+        open_editor(&tmp_path)?;
+        let edited_doc = parse_doc(&tmp_path)?;
+        // Validate status after editor changes
+        if let Err(e) = schema.validate_status(&edited_doc.kind, &edited_doc.status) {
+            eprintln!("error: {e}");
+            eprintln!("Your edits are saved in: {}", tmp_path.display());
+            eprintln!("Fix and apply with: runes edit {} -f {}", id, tmp_path.display());
+            return Err(Error::new("Validation failed after editor edit"));
+        }
+        // Validate custom fields
+        if let Err(e) = schema.validate_custom_fields(&edited_doc.kind, &edited_doc.frontmatter_extra) {
+            eprintln!("error: {e}");
+            eprintln!("Your edits are saved in: {}", tmp_path.display());
+            eprintln!("Fix and apply with: runes edit {} -f {}", id, tmp_path.display());
+            return Err(Error::new("Validation failed after editor edit"));
+        }
+        doc = edited_doc;
         let (body, effective_title) = ensure_title(&doc.body, &original_title);
         doc.body = body;
         doc.title = effective_title;
         fs::write(&path, render_doc(&doc))?;
+        // Clean up tmp file on success
+        let _ = fs::remove_file(&tmp_path);
     } else {
         return Err(Error::new("No edits specified and no editor available"));
     }
