@@ -3087,7 +3087,9 @@ fn store_info(name: Option<String>) -> Result<()> {
         let user_cfg = UserConfig::load_from_dir(&cwd)?;
         resolve_store_with_context(&stores, &user_cfg, &cwd, None)?
     };
-    println!("store \"{}\" backend=\"{}\" path=\"{}\" {{", store.name, backend::adapter_name(&store), store.path.display());
+    println!("store \"{}\" {{", store.name);
+    println!("  backend=\"{}\"", backend::adapter_name(&store));
+    println!("  path=\"{}\"", store.path.display());
     // Status
     let status = backend::status(&store)?;
     println!("  status {{");

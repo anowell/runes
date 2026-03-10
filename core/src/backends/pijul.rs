@@ -109,12 +109,12 @@ pub(super) fn pijul_sdk_status(store: &Store) -> Result<String> {
         .next()
         .transpose()
         .map_err(|e| Error::new(format!("libpijul reverse log next failed: {e}")))?;
-    let mut lines = vec![format!("channel \"{channel_name}\"")];
+    let mut lines = vec![format!("channel=\"{channel_name}\"")];
     if let Some((n, (hash, _))) = latest {
-        lines.push(format!("patches {n}"));
-        lines.push(format!("latest_hash \"{hash:?}\""));
+        lines.push(format!("patches={n}"));
+        lines.push(format!("latest_hash=\"{hash:?}\""));
     } else {
-        lines.push("patches 0".to_string());
+        lines.push("patches=0".to_string());
     }
     // Collect remote names
     let mut remote_names = Vec::new();
