@@ -11,7 +11,7 @@ use runes_core::model::{
     next_short_id, parse_doc, parse_full_id, render_doc, replace_title, resolve_issue_path,
     slugify, RuneDoc,
 };
-use runes_core::schema::{load_kind_template, load_schema};
+use runes_core::schema::{find_kind_template_path, load_kind_template, load_schema};
 use runes_core::{Error, Result};
 use std::fs;
 use std::io::{self, Read};
@@ -1049,7 +1049,8 @@ fn create_milestone(
     let container_dir = project_root.join(format!("{short}--{slug}"));
     ensure_dir(&container_dir)?;
     let path = container_dir.join("_milestone.md");
-    let mut doc = new_milestone_doc(&full_id, title);
+    let body_template = load_kind_template(&store.path, Some(project), "milestone");
+    let mut doc = new_milestone_doc(&full_id, title, &body_template);
     doc.status = status.to_string();
     if !labels.is_empty() {
         doc.labels = labels.to_vec();
@@ -3542,46 +3543,71 @@ fn run_quickstart() -> Result<()> {
     println!();
 
     // -- Schema info --
-    if let Some(ref schema) = schema {
+    {
         println!("SCHEMA");
         println!("======");
         println!();
-        let kinds = schema.available_kinds();
-        if !kinds.is_empty() {
-            println!("  Kinds: {}", kinds.join(", "));
-        }
-        let global_statuses = &schema.statuses;
-        if !global_statuses.is_empty() {
-            println!("  Statuses: {}", global_statuses.join(", "));
-        }
-        // Show kind-specific status overrides
-        for kind in &kinds {
-            if let Some(kind_def) = schema.kinds.get(kind.as_str()) {
-                if let Some(status_field) = kind_def.fields.get("status") {
-                    if !status_field.values.is_empty() {
-                        println!("  Statuses for {}: {}", kind, status_field.values.join(", "));
+
+        if let Some(ref schema) = schema {
+            let kinds = schema.available_kinds();
+            if !kinds.is_empty() {
+                println!("  Kinds: {}", kinds.join(", "));
+            }
+            let global_statuses = &schema.statuses;
+            if !global_statuses.is_empty() {
+                println!("  Statuses: {}", global_statuses.join(", "));
+            }
+            // Show kind-specific status overrides
+            for kind in &kinds {
+                if let Some(kind_def) = schema.kinds.get(kind.as_str()) {
+                    if let Some(status_field) = kind_def.fields.get("status") {
+                        if !status_field.values.is_empty() {
+                            println!("  Statuses for {}: {}", kind, status_field.values.join(", "));
+                        }
                     }
                 }
             }
-        }
-        // Show custom fields
-        if !schema.fields.is_empty() {
+            // Show custom fields
+            if !schema.fields.is_empty() {
+                println!();
+                println!("  Custom fields:");
+                let mut field_names: Vec<&String> = schema.fields.keys().collect();
+                field_names.sort();
+                for name in field_names {
+                    let field = &schema.fields[name];
+                    let mut desc = String::new();
+                    if !field.values.is_empty() {
+                        desc.push_str(&format!(" ({})", field.values.join(", ")));
+                    }
+                    if field.optional {
+                        desc.push_str(" [optional]");
+                    }
+                    println!("    {}{}", name, desc);
+                }
+            }
             println!();
-            println!("  Custom fields:");
-            let mut field_names: Vec<&String> = schema.fields.keys().collect();
-            field_names.sort();
-            for name in field_names {
-                let field = &schema.fields[name];
-                let mut desc = String::new();
-                if !field.values.is_empty() {
-                    desc.push_str(&format!(" ({})", field.values.join(", ")));
+
+            // Show kind templates with custom paths if any exist
+            if let Some(store) = active_store {
+                let has_custom_templates = kinds.iter().any(|kind| {
+                    find_kind_template_path(&store.path, default_project, kind).is_some()
+                });
+
+                if has_custom_templates {
+                    println!("  Kind templates:");
+                    for kind in &kinds {
+                        if let Some(path) = find_kind_template_path(&store.path, default_project, kind) {
+                            println!("    {}: {}", kind, path.display());
+                        } else {
+                            println!("    {}: (builtin default)", kind);
+                        }
+                    }
+                    println!();
                 }
-                if field.optional {
-                    desc.push_str(" [optional]");
-                }
-                println!("    {}{}", name, desc);
             }
         }
+
+        println!("  Default rune template is markdown with \"## Description\" and \"## Acceptance\" sections.");
         println!();
     }
 

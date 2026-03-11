@@ -3,12 +3,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-// Built-in kind templates (content after "# {title}\n\n")
-const BUILTIN_TASK_TEMPLATE: &str = "## Summary\n\n## Design\n\n## Acceptance\n\n## Comments\n";
-const BUILTIN_BUG_TEMPLATE: &str =
-    "## Summary\n\n## Steps to Reproduce\n\n## Expected Behavior\n\n## Actual Behavior\n\n## Comments\n";
-const BUILTIN_MILESTONE_TEMPLATE: &str =
-    "## Goal\n\n## Exit Criteria\n\n## Scope\n\n## Risks\n\n## Tracking\n- Active\n";
+// Built-in kind template (content after "# {title}\n\n")
+const BUILTIN_TEMPLATE: &str = "## Description\n\n\n\n## Acceptance\n\n- [ ] ...\n";
 
 /// A field definition from the schema: either status or a custom property.
 #[derive(Clone, Debug)]
@@ -203,6 +199,28 @@ impl StoreSchema {
     }
 }
 
+/// Return the built-in default template used when no custom template file exists.
+pub fn builtin_template() -> &'static str {
+    BUILTIN_TEMPLATE
+}
+
+/// Find the path to a custom kind template file, if one exists.
+/// Searches project `.kinds/` first, then store `.kinds/`.
+/// Returns `None` if only built-in defaults would be used.
+pub fn find_kind_template_path(store_path: &Path, project: Option<&str>, kind: &str) -> Option<PathBuf> {
+    if let Some(proj) = project {
+        let project_template = store_path.join(proj).join(".kinds").join(format!("{kind}.md"));
+        if project_template.exists() {
+            return Some(project_template);
+        }
+    }
+    let store_template = store_path.join(".kinds").join(format!("{kind}.md"));
+    if store_template.exists() {
+        return Some(store_template);
+    }
+    None
+}
+
 /// Load the body template for a given kind.
 /// Searches project `.kinds/` first, then store `.kinds/`, then built-in defaults.
 /// Returns the body content (after `# {title}\n\n`).
@@ -221,13 +239,8 @@ pub fn load_kind_template(store_path: &Path, project: Option<&str>, kind: &str) 
         return content;
     }
 
-    // Fall back to built-in defaults
-    match kind {
-        "task" => BUILTIN_TASK_TEMPLATE.to_string(),
-        "bug" => BUILTIN_BUG_TEMPLATE.to_string(),
-        "milestone" => BUILTIN_MILESTONE_TEMPLATE.to_string(),
-        _ => "## Summary\n\n## Comments\n".to_string(),
-    }
+    // Fall back to built-in default
+    BUILTIN_TEMPLATE.to_string()
 }
 
 /// Load the schema from `.kinds/schema.kdl`.
@@ -509,14 +522,21 @@ kind "bug" {
     #[test]
     fn builtin_templates() {
         let task = load_kind_template(Path::new("/nonexistent"), None, "task");
-        assert!(task.contains("## Summary"));
-        assert!(task.contains("## Design"));
+        assert!(task.contains("## Description"));
+        assert!(task.contains("## Acceptance"));
 
         let bug = load_kind_template(Path::new("/nonexistent"), None, "bug");
-        assert!(bug.contains("## Steps to Reproduce"));
+        assert!(bug.contains("## Description"));
+        assert!(bug.contains("## Acceptance"));
 
         let milestone = load_kind_template(Path::new("/nonexistent"), None, "milestone");
-        assert!(milestone.contains("## Goal"));
+        assert!(milestone.contains("## Description"));
+        assert!(milestone.contains("## Acceptance"));
+
+        // Unknown kinds also use the same builtin template
+        let custom = load_kind_template(Path::new("/nonexistent"), None, "custom");
+        assert!(custom.contains("## Description"));
+        assert!(custom.contains("## Acceptance"));
     }
 
     #[test]

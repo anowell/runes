@@ -113,18 +113,12 @@ Inside the block:
 
 The `# Title` heading is the source of truth for the document title.
 
-Recommended sections for tasks:
-- `## Summary`
-- `## Design`
+The default body template for all kinds is:
+- `## Description`
 - `## Acceptance`
-- `## Comments`
 
-Recommended sections for milestones:
-- `## Goal`
-- `## Exit Criteria`
-- `## Scope`
-- `## Risks`
-- `## Tracking`
+Custom kind templates can be placed at `<store>/<project>/.kinds/<kind>.md`
+or `<store>/.kinds/<kind>.md` to override the default.
 
 ## Hierarchy
 

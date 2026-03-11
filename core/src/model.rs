@@ -347,10 +347,8 @@ pub fn new_rune_doc(id: &str, kind: &str, title: &str, body_template: &str, mile
     }
 }
 
-pub fn new_milestone_doc(id: &str, title: &str) -> RuneDoc {
-    let body = format!(
-        "# {title}\n\n## Goal\n\n## Exit Criteria\n\n## Scope\n\n## Risks\n\n## Tracking\n- Active\n"
-    );
+pub fn new_milestone_doc(id: &str, title: &str, body_template: &str) -> RuneDoc {
+    let body = format!("# {title}\n\n{body_template}");
     RuneDoc {
         kind: "milestone".to_string(),
         id: id.to_string(),
