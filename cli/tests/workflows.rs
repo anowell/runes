@@ -295,7 +295,7 @@ fn jj_milestone_hierarchy_and_progress() {
             "Principles, schema, and bootstrap",
             "--id",
             "m01",
-            "--type",
+            "--kind",
             "milestone",
         ],
     );
@@ -370,7 +370,7 @@ fn milestone_list_and_project_progress() {
             "Milestones for list test",
             "--id",
             "m02",
-            "--type",
+            "--kind",
             "milestone",
         ],
     );
@@ -384,7 +384,7 @@ fn milestone_list_and_project_progress() {
             "how",
             "--project",
             "runes",
-            "--type",
+            "--kind",
             "milestones",
         ],
     );

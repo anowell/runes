@@ -157,9 +157,9 @@ struct NewArgs {
     /// Store to create the doc in
     #[arg(long)]
     store: Option<String>,
-    /// Doc type (e.g. issue, milestone)
-    #[arg(long = "type")]
-    command_type: Option<String>,
+    /// Doc kind (e.g. issue, milestone)
+    #[arg(short = 'k', long = "kind")]
+    command_kind: Option<String>,
     /// Initial status
     #[arg(long)]
     status: Option<String>,
@@ -209,8 +209,8 @@ struct ListArgs {
     /// Named query from runes.kdl
     #[arg(long)]
     query: Option<String>,
-    /// Filter by type (e.g. issues, milestones)
-    #[arg(long = "type")]
+    /// Filter by kind (e.g. issues, milestones)
+    #[arg(short = 'k', long = "kind")]
     kind: Option<String>,
     /// Filter by status
     #[arg(long)]
@@ -1096,7 +1096,7 @@ fn run_new(args: NewArgs) -> Result<()> {
         title,
         project: project_arg,
         store: store_hint,
-        command_type,
+        command_kind,
         status: status_flag,
         assignee,
         parent,
@@ -1112,7 +1112,7 @@ fn run_new(args: NewArgs) -> Result<()> {
     let relation_inputs = relations;
     let (cfg, user_cfg, cwd) = load_context()?;
     let creation_defaults = user_cfg.creation_defaults();
-    let kind_value = command_type
+    let kind_value = command_kind
         .clone()
         .or_else(|| creation_defaults.kind.clone())
         .unwrap_or_else(|| "issue".to_string());
@@ -1361,7 +1361,7 @@ fn run_list(args: ListArgs) -> Result<()> {
     let (store, project_proj) =
         resolve_store_and_project(&cfg, &user_cfg, &cwd, store.as_deref(), effective_project.as_ref())?;
     let status_flag_present = status.is_some();
-    let type_flag_present = kind.is_some();
+    let kind_flag_present = kind.is_some();
     let assignee_filter = assignee
         .as_deref()
         .and_then(|value| user_cfg.resolve_user_alias(value));
@@ -1395,7 +1395,7 @@ fn run_list(args: ListArgs) -> Result<()> {
             if !status_flag_present {
                 filters.statuses = query_cfg.statuses.clone();
             }
-            if !type_flag_present {
+            if !kind_flag_present {
                 if let Some(kind_value) = &query_cfg.kind {
                     list_kind = ListKind::parse(kind_value);
                 }
@@ -3511,9 +3511,9 @@ fn run_quickstart() -> Result<()> {
     println!("==============");
     println!();
     println!("  runes new \"Fix login bug\"");
-    println!("  runes new \"Add auth\" --type bug --status todo");
+    println!("  runes new \"Add auth\" --kind bug --status todo");
     println!("  runes new \"Write tests\" --assignee alice -e    # open in editor");
-    println!("  runes new \"v2.0 release\" --type milestone");
+    println!("  runes new \"v2.0 release\" --kind milestone");
     println!();
 
     // -- Viewing runes --
@@ -3523,7 +3523,7 @@ fn run_quickstart() -> Result<()> {
     println!("  runes                         # list runes (default view)");
     println!("  runes list                    # same as above");
     println!("  runes list --status todo      # filter by status");
-    println!("  runes list --type bug         # filter by kind");
+    println!("  runes list --kind bug         # filter by kind");
     println!("  runes show <id>               # show full rune doc");
     if !user_cfg.queries.is_empty() {
         println!();

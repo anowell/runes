@@ -89,7 +89,7 @@ runes new "Design the API" -e
 runes new "Refactor auth" --status in-progress --label backend --assignee self
 
 # Create a milestone
-runes new "v1 Release" --type milestone
+runes new "v1 Release" --kind milestone
 
 # Edit metadata
 runes edit myproject-a3x --status done
@@ -109,9 +109,9 @@ cat updated.md | runes edit myproject-a3x -f -
 # List all runes (uses default query if configured)
 runes list
 
-# Filter by status, assignee, type
+# Filter by status, assignee, kind
 runes list --status todo --assignee self
-runes list --type milestones
+runes list --kind milestones
 
 # Use a saved query
 runes list mine
