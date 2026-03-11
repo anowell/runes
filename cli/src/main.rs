@@ -62,6 +62,8 @@ enum CliCommand {
     Init(InitArgs),
     /// Add a comment to a rune doc
     Comment(CommentArgs),
+    /// Show a quickstart guide for using runes
+    Quickstart,
 }
 
 #[derive(Debug, Subcommand)]
@@ -451,6 +453,7 @@ fn handle_command(command: CliCommand) -> Result<()> {
         CliCommand::Config(config_cmd) => run_config(config_cmd),
         CliCommand::Init(args) => run_init(args),
         CliCommand::Comment(args) => run_comment(args),
+        CliCommand::Quickstart => run_quickstart(),
     }
 }
 fn home_dir() -> Result<PathBuf> {
@@ -3400,6 +3403,212 @@ fn run_init(args: InitArgs) -> Result<()> {
     } else {
         println!("Not in a repo; skipping local config.");
     }
+
+    Ok(())
+}
+
+fn run_quickstart() -> Result<()> {
+    let cwd = std::env::current_dir().map_err(|e| Error::new(e.to_string()))?;
+    let global_path = user_config::global_config_path()?;
+    let global_exists = global_path.exists();
+    let has_local = find_repo_root(&cwd)
+        .map(|root| root.join("runes.kdl").exists())
+        .unwrap_or(false);
+
+    let (all_stores, user_cfg) = load_context()
+        .map(|(stores, cfg, _)| (stores, cfg))
+        .unwrap_or_default();
+
+    let default_store = user_cfg.default_store.as_deref();
+    let default_project = user_cfg.default_project.as_deref();
+
+    // Resolve the active store
+    let active_store = default_store.and_then(|name| all_stores.iter().find(|s| s.name == name));
+
+    // Load schema if we have a store
+    let schema = active_store.and_then(|store| {
+        load_schema(&store.path, default_project).ok()
+    });
+
+    // -- Header --
+    println!("runes - A local-first issue tracker stored as markdown rune docs");
+    println!();
+
+    // -- Initialization --
+    if !global_exists {
+        println!("GETTING STARTED");
+        println!("===============");
+        println!();
+        println!("  Run `runes init` to set up runes. This will:");
+        println!("  - Create a global config at ~/.runes/config.kdl");
+        println!("  - Initialize a store backed by jj or pijul");
+        println!("  - Optionally create a local runes.kdl config for the current repo");
+        println!();
+        println!("  Example:");
+        println!("    runes init                     # interactive setup");
+        println!("    runes init --project myapp     # non-interactive with project prefix");
+        println!();
+    } else if !has_local {
+        println!("runes is initialized globally. Run `runes init` in a repo to create a");
+        println!("local runes.kdl config for project-specific settings.");
+        println!();
+    } else {
+        println!("runes is already initialized.");
+        println!();
+    }
+
+    // -- Paths --
+    if let Some(store) = active_store {
+        println!("PATHS");
+        println!("=====");
+        println!();
+        println!("  Store \"{}\" (backend: {})", store.name, match store.backend {
+            BackendKind::Pijul => "pijul",
+            BackendKind::Jj => "jj",
+        });
+        println!("    {}", store.path.display());
+        if let Some(proj) = default_project {
+            println!();
+            println!("  Default project: {}", proj);
+            println!("    {}", store.path.join(proj).display());
+        }
+        println!();
+        println!("  Rune docs are plain markdown files with KDL frontmatter. You can edit");
+        println!("  them directly in your editor or file manager. Direct edits are tracked");
+        println!("  as uncommitted changes until you run:");
+        println!();
+        println!("    runes commit [-m <message>]");
+        println!();
+    }
+
+    // -- Creating runes --
+    println!("CREATING RUNES");
+    println!("==============");
+    println!();
+    println!("  runes new \"Fix login bug\"");
+    println!("  runes new \"Add auth\" --type bug --status todo");
+    println!("  runes new \"Write tests\" --assignee alice -e    # open in editor");
+    println!("  runes new \"v2.0 release\" --type milestone");
+    println!();
+
+    // -- Viewing runes --
+    println!("VIEWING RUNES");
+    println!("=============");
+    println!();
+    println!("  runes                         # list runes (default view)");
+    println!("  runes list                    # same as above");
+    println!("  runes list --status todo      # filter by status");
+    println!("  runes list --type bug         # filter by kind");
+    println!("  runes show <id>               # show full rune doc");
+    if !user_cfg.queries.is_empty() {
+        println!();
+        println!("  Configured views (from runes.kdl):");
+        let mut query_names: Vec<&String> = user_cfg.queries.keys().collect();
+        query_names.sort();
+        for name in query_names {
+            let q = &user_cfg.queries[name];
+            let mut parts = Vec::new();
+            if let Some(ref k) = q.kind {
+                parts.push(format!("type={k}"));
+            }
+            if !q.statuses.is_empty() {
+                parts.push(format!("status={}", q.statuses.join(",")));
+            }
+            if let Some(ref a) = q.assignee {
+                parts.push(format!("assignee={a}"));
+            }
+            let desc = if parts.is_empty() {
+                String::new()
+            } else {
+                format!("  ({})", parts.join(", "))
+            };
+            println!("    runes list {:<20}{}", name, desc);
+        }
+    }
+    println!();
+
+    // -- Updating runes --
+    println!("UPDATING RUNES");
+    println!("==============");
+    println!();
+    println!("  runes edit <id> --status done             # change status");
+    println!("  runes edit <id> --title \"New title\"        # rename (updates the h1 line)");
+    println!("  runes edit <id> --assignee alice           # reassign");
+    println!("  runes edit <id> --label urgent             # add a label");
+    println!("  runes edit <id> --remove-label urgent      # remove a label");
+    println!("  runes edit <id> --milestone <mid>          # link to milestone");
+    println!("  runes edit <id> -e                         # open in editor");
+    println!("  runes comment <id> -m \"Looks good\"         # add a comment");
+    println!();
+
+    // -- Schema info --
+    if let Some(ref schema) = schema {
+        println!("SCHEMA");
+        println!("======");
+        println!();
+        let kinds = schema.available_kinds();
+        if !kinds.is_empty() {
+            println!("  Kinds: {}", kinds.join(", "));
+        }
+        let global_statuses = &schema.statuses;
+        if !global_statuses.is_empty() {
+            println!("  Statuses: {}", global_statuses.join(", "));
+        }
+        // Show kind-specific status overrides
+        for kind in &kinds {
+            if let Some(kind_def) = schema.kinds.get(kind.as_str()) {
+                if let Some(status_field) = kind_def.fields.get("status") {
+                    if !status_field.values.is_empty() {
+                        println!("  Statuses for {}: {}", kind, status_field.values.join(", "));
+                    }
+                }
+            }
+        }
+        // Show custom fields
+        if !schema.fields.is_empty() {
+            println!();
+            println!("  Custom fields:");
+            let mut field_names: Vec<&String> = schema.fields.keys().collect();
+            field_names.sort();
+            for name in field_names {
+                let field = &schema.fields[name];
+                let mut desc = String::new();
+                if !field.values.is_empty() {
+                    desc.push_str(&format!(" ({})", field.values.join(", ")));
+                }
+                if field.optional {
+                    desc.push_str(" [optional]");
+                }
+                println!("    {}{}", name, desc);
+            }
+        }
+        println!();
+    }
+
+    // -- Other commands --
+    println!("OTHER COMMANDS");
+    println!("==============");
+    println!();
+    println!("  runes log                     # change history for the project");
+    println!("  runes log <id>                # change history for a specific rune");
+    println!("  runes diff <id>               # show uncommitted changes to a rune");
+    println!("  runes archive <id>            # archive a rune");
+    println!("  runes delete <id>             # delete a rune");
+    println!("  runes move <id> --project p   # move rune to another project");
+    println!("  runes restore <id> --revision r  # restore to a previous revision");
+    println!("  runes sync                    # sync store with backend");
+    println!();
+
+    // -- Agent integration --
+    println!("AGENT INTEGRATION");
+    println!("=================");
+    println!();
+    println!("  The following commands support --json for programmatic parsing:");
+    println!();
+    println!("    runes list --json           # JSON array of rune summaries");
+    println!("    runes show <id> --json      # JSON object with full rune details");
+    println!("    runes log --json            # JSON array of log entries");
+    println!();
 
     Ok(())
 }
