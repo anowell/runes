@@ -56,9 +56,7 @@ pub fn discover_stores() -> Result<Vec<Store>> {
         return Ok(Vec::new());
     }
     let mut stores = Vec::new();
-    let mut entries: Vec<_> = fs::read_dir(&stores_dir)?
-        .filter_map(|e| e.ok())
-        .collect();
+    let mut entries: Vec<_> = fs::read_dir(&stores_dir)?.filter_map(|e| e.ok()).collect();
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
         let path = entry.path();
@@ -67,7 +65,11 @@ pub fn discover_stores() -> Result<Vec<Store>> {
         }
         let name = entry.file_name().to_string_lossy().to_string();
         if let Some(backend) = detect_backend(&path) {
-            stores.push(Store { name, backend, path });
+            stores.push(Store {
+                name,
+                backend,
+                path,
+            });
         }
     }
     Ok(stores)

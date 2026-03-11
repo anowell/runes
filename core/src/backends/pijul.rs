@@ -13,7 +13,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tokio::runtime::Runtime;
 
-
 /// Build a map from public key → display name for all local pijul identities.
 /// Display name prefers: display_name > "name <email>" > email > identity name.
 fn load_identity_map() -> std::collections::HashMap<String, String> {
@@ -92,7 +91,8 @@ fn pijul_changes_dir(repo: &PijulRepository) -> PathBuf {
 
 pub(super) fn pijul_sdk_status(store: &Store) -> Result<String> {
     let repo = open_pijul_repo(store)?;
-    let txn = (&repo.pristine)
+    let txn = repo
+        .pristine
         .txn_begin()
         .map_err(|e| Error::new(format!("libpijul txn begin failed: {e}")))?;
     let channel_name = txn
@@ -135,7 +135,8 @@ pub(super) fn pijul_sdk_status(store: &Store) -> Result<String> {
 
 pub(super) fn pijul_sdk_log(store: &Store, limit: usize) -> Result<String> {
     let repo = open_pijul_repo(store)?;
-    let txn = (&repo.pristine)
+    let txn = repo
+        .pristine
         .txn_begin()
         .map_err(|e| Error::new(format!("libpijul txn begin failed: {e}")))?;
     let channel_name = txn
@@ -162,7 +163,8 @@ pub(super) fn pijul_sdk_log(store: &Store, limit: usize) -> Result<String> {
 fn pijul_sdk_path_hashes(store: &Store, rel_path: &Path, limit: usize) -> Result<Vec<String>> {
     let repo = open_pijul_repo(store)?;
     let path_raw = rel_path.to_string_lossy().replace('\\', "/");
-    let txn = (&repo.pristine)
+    let txn = repo
+        .pristine
         .txn_begin()
         .map_err(|e| Error::new(format!("libpijul txn begin failed: {e}")))?;
     let channel_name = txn
@@ -237,8 +239,8 @@ pub(super) fn pijul_sdk_file_rich_log(
     let mut entries = Vec::new();
     let mut prev_content: Option<String> = None;
     for entry in candidates.iter().rev() {
-        let content = pijul_sdk_file_at_revision(store, rel_path, &entry.revision)
-            .unwrap_or_default();
+        let content =
+            pijul_sdk_file_at_revision(store, rel_path, &entry.revision).unwrap_or_default();
         let changed = match &prev_content {
             None => !content.is_empty(),
             Some(prev) => prev != &content,
@@ -292,7 +294,6 @@ fn enrich_hashes(store: &Store, hashes: &[String]) -> Result<Vec<super::LogEntry
 
 /// Extract a rune ID like "project-shortid" from a store-relative path
 /// like "project/shortid--slug.md"
-
 pub(super) fn pijul_sdk_show_change(store: &Store, change_id: &str) -> Result<String> {
     let repo = open_pijul_repo(store)?;
     let changes = PijulChangeStore::from_root(&repo.path, 32);
@@ -307,7 +308,8 @@ pub(super) fn pijul_sdk_show_change(store: &Store, change_id: &str) -> Result<St
 
 pub(super) fn pijul_sdk_rich_log(store: &Store, limit: usize) -> Result<Vec<super::LogEntry>> {
     let repo = open_pijul_repo(store)?;
-    let txn = (&repo.pristine)
+    let txn = repo
+        .pristine
         .txn_begin()
         .map_err(|e| Error::new(format!("libpijul txn begin failed: {e}")))?;
     let channel_name = txn
@@ -366,7 +368,8 @@ fn pijul_file_at_revision_impl(
     inclusive: bool,
 ) -> Result<String> {
     let repo = open_pijul_repo(store)?;
-    let txn = (&repo.pristine)
+    let txn = repo
+        .pristine
         .arc_txn_begin()
         .map_err(|e| Error::new(format!("libpijul txn begin failed: {e}")))?;
 
@@ -384,10 +387,11 @@ fn pijul_file_at_revision_impl(
     };
 
     // Resolve the target revision hash (supports prefix matching)
-    let (target_hash, _) = txn
-        .read()
-        .hash_from_prefix(revision)
-        .map_err(|e| Error::new(format!("could not resolve pijul revision '{revision}': {e}")))?;
+    let (target_hash, _) = txn.read().hash_from_prefix(revision).map_err(|e| {
+        Error::new(format!(
+            "could not resolve pijul revision '{revision}': {e}"
+        ))
+    })?;
 
     // Find the log position of the target change by walking the reverse log
     let target_n = {
@@ -529,7 +533,8 @@ fn rel_to_internal_path(path: &Path) -> Result<String> {
 
 pub(super) fn pijul_sdk_has_uncommitted_changes(store: &Store) -> Result<bool> {
     let repo = open_pijul_repo(store)?;
-    let txn = (&repo.pristine)
+    let txn = repo
+        .pristine
         .arc_txn_begin()
         .map_err(|e| Error::new(format!("libpijul txn begin failed: {e}")))?;
 
@@ -577,7 +582,8 @@ pub(super) fn pijul_sdk_has_uncommitted_changes(store: &Store) -> Result<bool> {
 
 pub(super) fn pijul_sdk_uncommitted_rune_paths(store: &Store) -> Result<Vec<PathBuf>> {
     let repo = open_pijul_repo(store)?;
-    let txn = (&repo.pristine)
+    let txn = repo
+        .pristine
         .arc_txn_begin()
         .map_err(|e| Error::new(format!("libpijul txn begin failed: {e}")))?;
 
@@ -614,7 +620,9 @@ pub(super) fn pijul_sdk_uncommitted_rune_paths(store: &Store) -> Result<Vec<Path
         let committed = match txn.read().follow_oldest_path(&changes, &channel, &internal) {
             Ok((pos, _)) => {
                 let mut writer = libpijul::vertex_buffer::Writer::new(Vec::<u8>::new());
-                if libpijul::output::output_file(&changes, &txn, &channel, pos, &mut writer).is_err() {
+                if libpijul::output::output_file(&changes, &txn, &channel, pos, &mut writer)
+                    .is_err()
+                {
                     continue;
                 }
                 String::from_utf8_lossy(&writer.into_inner()).to_string()
@@ -638,7 +646,8 @@ pub(super) fn pijul_sdk_commit_paths(
     author_email: &str,
 ) -> Result<()> {
     let repo = open_pijul_repo(store)?;
-    let txn = (&repo.pristine)
+    let txn = repo
+        .pristine
         .arc_txn_begin()
         .map_err(|e| Error::new(format!("libpijul txn begin failed: {e}")))?;
 
@@ -828,7 +837,8 @@ impl RemoteSpec {
 }
 
 fn current_pijul_channel(repo: &PijulRepository) -> Result<String> {
-    let txn = (&repo.pristine)
+    let txn = repo
+        .pristine
         .txn_begin()
         .map_err(|e| Error::new(format!("libpijul txn begin failed: {e}")))?;
     let channel_name = txn
@@ -852,9 +862,10 @@ fn collect_pijul_remote_specs(repo: &PijulRepository) -> Result<Vec<RemoteSpec>>
             specs.push(RemoteSpec::Named(default.clone()));
         }
     }
-    let repo_root = canonical_repo_path(&&repo.path);
+    let repo_root = canonical_repo_path(&repo.path);
     let mut seen_paths = BTreeSet::new();
-    let txn = (&repo.pristine)
+    let txn = repo
+        .pristine
         .txn_begin()
         .map_err(|e| Error::new(format!("libpijul txn begin failed: {e}")))?;
     for item in txn
@@ -865,7 +876,7 @@ fn collect_pijul_remote_specs(repo: &PijulRepository) -> Result<Vec<RemoteSpec>>
         let remote_guard = remote.lock();
         let raw = remote_guard.path.clone();
         drop(remote_guard);
-        if let Some(path) = normalize_pijul_remote_path(&&repo.path, raw.as_str()) {
+        if let Some(path) = normalize_pijul_remote_path(&repo.path, raw.as_str()) {
             let canonical = match fs::canonicalize(&path) {
                 Ok(canonical) => canonical,
                 Err(_) => continue,
@@ -957,7 +968,8 @@ fn run_pijul_pull(
     channel: &str,
     remote: &mut RemoteRepo,
 ) -> Result<()> {
-    let txn = (&repo.pristine)
+    let txn = repo
+        .pristine
         .arc_txn_begin()
         .map_err(|e| Error::new(format!("libpijul txn begin failed: {e}")))?;
     {
@@ -971,7 +983,7 @@ fn run_pijul_pull(
                 .block_on(remote.update_changelist_pushpull(
                     &mut *write,
                     &[],
-                    &mut channel_ref,
+                    &channel_ref,
                     None,
                     repo_read,
                     &[] as &[String],
@@ -1017,12 +1029,13 @@ fn run_pijul_push(
     channel: &str,
     remote: &mut RemoteRepo,
 ) -> Result<()> {
-    let txn = (&repo.pristine)
+    let txn = repo
+        .pristine
         .arc_txn_begin()
         .map_err(|e| Error::new(format!("libpijul txn begin failed: {e}")))?;
     {
         let mut write = txn.write();
-        let mut channel_ref = write
+        let channel_ref = write
             .open_or_create_channel(channel)
             .map_err(|e| Error::new(format!("libpijul channel open failed: {e}")))?;
         let delta = {
@@ -1031,7 +1044,7 @@ fn run_pijul_push(
                 .block_on(remote.update_changelist_pushpull(
                     &mut *write,
                     &[],
-                    &mut channel_ref,
+                    &channel_ref,
                     None,
                     repo_read,
                     &[] as &[String],

@@ -70,14 +70,30 @@ fn wrap(code: &str, s: &str) -> String {
     }
 }
 
-pub fn purple(s: &str) -> String { wrap(MAGENTA, s) }
-pub fn dim(s: &str) -> String { wrap(DIM, s) }
-pub fn green(s: &str) -> String { wrap(GREEN, s) }
-pub fn yellow(s: &str) -> String { wrap(YELLOW, s) }
-pub fn teal(s: &str) -> String { wrap(CYAN, s) }
-pub fn red(s: &str) -> String { wrap(RED, s) }
-pub fn gray(s: &str) -> String { wrap(BRIGHT_BLACK, s) }
-pub fn bright_black(s: &str) -> String { wrap(BRIGHT_BLACK, s) }
+pub fn purple(s: &str) -> String {
+    wrap(MAGENTA, s)
+}
+pub fn dim(s: &str) -> String {
+    wrap(DIM, s)
+}
+pub fn green(s: &str) -> String {
+    wrap(GREEN, s)
+}
+pub fn yellow(s: &str) -> String {
+    wrap(YELLOW, s)
+}
+pub fn teal(s: &str) -> String {
+    wrap(CYAN, s)
+}
+pub fn red(s: &str) -> String {
+    wrap(RED, s)
+}
+pub fn gray(s: &str) -> String {
+    wrap(BRIGHT_BLACK, s)
+}
+pub fn bright_black(s: &str) -> String {
+    wrap(BRIGHT_BLACK, s)
+}
 
 pub fn status_color(status: &str) -> String {
     match status {
@@ -95,10 +111,18 @@ pub fn colored_id(id: &str) -> String {
     }
 }
 
-pub fn diff_added(s: &str) -> String { wrap(GREEN, s) }
-pub fn diff_removed(s: &str) -> String { wrap(RED, s) }
-pub fn diff_hunk_header(s: &str) -> String { wrap(CYAN, s) }
-pub fn diff_file_header(s: &str) -> String { wrap(BOLD, s) }
+pub fn diff_added(s: &str) -> String {
+    wrap(GREEN, s)
+}
+pub fn diff_removed(s: &str) -> String {
+    wrap(RED, s)
+}
+pub fn diff_hunk_header(s: &str) -> String {
+    wrap(CYAN, s)
+}
+pub fn diff_file_header(s: &str) -> String {
+    wrap(BOLD, s)
+}
 
 /// Highlight KDL frontmatter with scope-aware overrides:
 /// - Root node names (entity.name.tag) stay prominent
@@ -110,13 +134,24 @@ pub fn highlight_kdl(content: &str) {
         return;
     }
     let ss = syntax_set();
-    let syntax = ss.find_syntax_by_extension("kdl")
+    let syntax = ss
+        .find_syntax_by_extension("kdl")
         .unwrap_or_else(|| ss.find_syntax_plain_text());
     let theme = bundled_theme();
-    let fg = theme.settings.foreground
-        .unwrap_or(syntect::highlighting::Color { r: 211, g: 208, b: 200, a: 255 });
+    let fg = theme
+        .settings
+        .foreground
+        .unwrap_or(syntect::highlighting::Color {
+            r: 211,
+            g: 208,
+            b: 200,
+            a: 255,
+        });
     let dim_fg = syntect::highlighting::Color {
-        r: fg.r / 2, g: fg.g / 2, b: fg.b / 2, a: fg.a,
+        r: fg.r / 2,
+        g: fg.g / 2,
+        b: fg.b / 2,
+        a: fg.a,
     };
     let highlighter = syntect::highlighting::Highlighter::new(theme);
     let mut parse_state = syntect::parsing::ParseState::new(syntax);
@@ -155,7 +190,9 @@ pub fn highlight_kdl(content: &str) {
                 op_idx += 1;
             }
             // Dim child node names (status, assignee, etc.)
-            let is_child_node = scope_stack.as_slice().iter()
+            let is_child_node = scope_stack
+                .as_slice()
+                .iter()
                 .any(|s| s.build_string().starts_with("variable.other.member"));
             if is_child_node {
                 style.foreground = dim_fg;
@@ -218,7 +255,8 @@ pub fn highlight_markdown(content: &str) {
         return;
     }
     let ss = syntax_set();
-    let syntax = ss.find_syntax_by_extension("md")
+    let syntax = ss
+        .find_syntax_by_extension("md")
         .unwrap_or_else(|| ss.find_syntax_plain_text());
     let theme = bundled_theme();
     let mut h = HighlightLines::new(syntax, theme);

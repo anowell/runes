@@ -10,16 +10,15 @@ mod pijul;
 
 use jujutsu::{
     jj_sdk_commit_paths, jj_sdk_file_at_revision, jj_sdk_file_before_revision,
-    jj_sdk_file_change_ids, jj_sdk_file_log, jj_sdk_file_rich_log,
-    jj_sdk_has_uncommitted_changes, jj_sdk_log, jj_sdk_rich_log, jj_sdk_show_change,
-    jj_sdk_status, jj_sdk_sync, jj_sdk_uncommitted_rune_paths, probe_jj_workspace,
+    jj_sdk_file_change_ids, jj_sdk_file_log, jj_sdk_file_rich_log, jj_sdk_has_uncommitted_changes,
+    jj_sdk_log, jj_sdk_rich_log, jj_sdk_show_change, jj_sdk_status, jj_sdk_sync,
+    jj_sdk_uncommitted_rune_paths, probe_jj_workspace,
 };
 use pijul::{
     pijul_sdk_commit_paths, pijul_sdk_file_at_revision, pijul_sdk_file_before_revision,
     pijul_sdk_file_change_ids, pijul_sdk_file_log, pijul_sdk_file_rich_log,
-    pijul_sdk_has_uncommitted_changes, pijul_sdk_log, pijul_sdk_remove_path,
-    pijul_sdk_rich_log, pijul_sdk_show_change, pijul_sdk_status, pijul_sdk_sync,
-    pijul_sdk_uncommitted_rune_paths,
+    pijul_sdk_has_uncommitted_changes, pijul_sdk_log, pijul_sdk_remove_path, pijul_sdk_rich_log,
+    pijul_sdk_show_change, pijul_sdk_status, pijul_sdk_sync, pijul_sdk_uncommitted_rune_paths,
 };
 
 /// A structured log entry from the backend.
@@ -35,7 +34,14 @@ pub struct LogEntry {
 pub trait BackendAdapter {
     fn name(&self) -> &'static str;
     fn init_store(&self, path: &Path) -> Result<()>;
-    fn commit_paths(&self, store: &Store, paths: &[PathBuf], message: &str, author_name: &str, author_email: &str) -> Result<()>;
+    fn commit_paths(
+        &self,
+        store: &Store,
+        paths: &[PathBuf],
+        message: &str,
+        author_name: &str,
+        author_email: &str,
+    ) -> Result<()>;
     fn remove_path(&self, store: &Store, path: &Path) -> Result<()>;
     fn has_uncommitted_changes(&self, store: &Store) -> Result<bool>;
     fn uncommitted_rune_paths(&self, store: &Store) -> Result<Vec<PathBuf>>;
@@ -47,7 +53,12 @@ pub trait BackendAdapter {
     fn file_rich_log(&self, store: &Store, rel_path: &Path, limit: usize) -> Result<Vec<LogEntry>>;
     fn show_change(&self, store: &Store, change_id: &str, rel_path: &Path) -> Result<String>;
     fn file_at_revision(&self, store: &Store, rel_path: &Path, revision: &str) -> Result<String>;
-    fn file_before_revision(&self, store: &Store, rel_path: &Path, revision: &str) -> Result<String>;
+    fn file_before_revision(
+        &self,
+        store: &Store,
+        rel_path: &Path,
+        revision: &str,
+    ) -> Result<String>;
     fn sync(&self, store: &Store) -> Result<()>;
 }
 
@@ -104,7 +115,14 @@ impl BackendAdapter for CliBackend {
         Ok(())
     }
 
-    fn commit_paths(&self, store: &Store, paths: &[PathBuf], message: &str, author_name: &str, author_email: &str) -> Result<()> {
+    fn commit_paths(
+        &self,
+        store: &Store,
+        paths: &[PathBuf],
+        message: &str,
+        author_name: &str,
+        author_email: &str,
+    ) -> Result<()> {
         let _ = probe_sdk(store);
         match self.kind {
             BackendKind::Jj => {
@@ -195,7 +213,12 @@ impl BackendAdapter for CliBackend {
         }
     }
 
-    fn file_before_revision(&self, store: &Store, rel_path: &Path, revision: &str) -> Result<String> {
+    fn file_before_revision(
+        &self,
+        store: &Store,
+        rel_path: &Path,
+        revision: &str,
+    ) -> Result<String> {
         match self.kind {
             BackendKind::Jj => jj_sdk_file_before_revision(store, rel_path, revision),
             BackendKind::Pijul => pijul_sdk_file_before_revision(store, rel_path, revision),
@@ -223,7 +246,6 @@ pub fn init_store(path: &Path, backend: BackendKind) -> Result<()> {
 pub fn adapter_name(store: &Store) -> String {
     adapter_for(store).name().to_string()
 }
-
 
 pub fn probe_sdk(store: &Store) -> Result<String> {
     match store.backend {
@@ -255,7 +277,13 @@ pub fn probe_sdk(store: &Store) -> Result<String> {
     }
 }
 
-pub fn commit_paths(store: &Store, paths: &[PathBuf], message: &str, author_name: &str, author_email: &str) -> Result<()> {
+pub fn commit_paths(
+    store: &Store,
+    paths: &[PathBuf],
+    message: &str,
+    author_name: &str,
+    author_email: &str,
+) -> Result<()> {
     adapter_for(store).commit_paths(store, paths, message, author_name, author_email)
 }
 

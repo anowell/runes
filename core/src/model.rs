@@ -106,10 +106,7 @@ fn parse_root_line(line: &str, doc: &mut RuneDoc) -> Result<()> {
 
 fn collect_block_lines(fm_lines: &[String], root_idx: usize) -> Vec<String> {
     let mut block_lines = Vec::new();
-    let root_line = fm_lines
-        .get(root_idx)
-        .map(|line| line.trim())
-        .unwrap_or("");
+    let root_line = fm_lines.get(root_idx).map(|line| line.trim()).unwrap_or("");
     let mut depth = root_line.matches('{').count() as i32;
     depth -= root_line.matches('}').count() as i32;
     let mut collecting = depth > 0;
@@ -245,16 +242,14 @@ pub fn parse_doc(path: &Path) -> Result<RuneDoc> {
         )));
     }
 
-    let mut doc = RuneDoc::default();
-    doc.path = path.to_path_buf();
-    doc.status = "todo".to_string();
+    let mut doc = RuneDoc {
+        path: path.to_path_buf(),
+        status: "todo".to_string(),
+        ..Default::default()
+    };
 
-    let root_idx = find_root_line_index(&fm_lines).ok_or_else(|| {
-        Error::new(format!(
-            "{} frontmatter missing root node",
-            path.display()
-        ))
-    })?;
+    let root_idx = find_root_line_index(&fm_lines)
+        .ok_or_else(|| Error::new(format!("{} frontmatter missing root node", path.display())))?;
     parse_root_line(&fm_lines[root_idx], &mut doc)?;
     let block_lines = collect_block_lines(&fm_lines, root_idx);
     parse_block_lines(&block_lines, &mut doc);
@@ -329,7 +324,13 @@ pub fn render_doc(doc: &RuneDoc) -> String {
 }
 
 /// Create a new rune doc with a specific kind and body template.
-pub fn new_rune_doc(id: &str, kind: &str, title: &str, body_template: &str, milestone: Option<&str>) -> RuneDoc {
+pub fn new_rune_doc(
+    id: &str,
+    kind: &str,
+    title: &str,
+    body_template: &str,
+    milestone: Option<&str>,
+) -> RuneDoc {
     let body = format!("# {title}\n\n{body_template}");
     RuneDoc {
         kind: kind.to_string(),
@@ -426,7 +427,11 @@ fn walk_markdown(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
         let path = entry.path();
         let file_name = entry.file_name().to_string_lossy().to_string();
         if path.is_dir() {
-            if file_name == ".git" || file_name == ".jj" || file_name == ".pijul" || file_name == ".kinds" {
+            if file_name == ".git"
+                || file_name == ".jj"
+                || file_name == ".pijul"
+                || file_name == ".kinds"
+            {
                 continue;
             }
             walk_markdown(&path, out)?;
@@ -648,7 +653,8 @@ Body
 
     #[test]
     fn title_roundtrip_through_parse_and_render() {
-        let contents = "---\ntask \"proj-abc\" {\n  status \"todo\"\n}\n---\n\n# My Task\n\n## Summary\n";
+        let contents =
+            "---\ntask \"proj-abc\" {\n  status \"todo\"\n}\n---\n\n# My Task\n\n## Summary\n";
         let path = write_temp_doc(contents);
         let doc = parse_doc(&path).expect("parse");
         assert_eq!(doc.title, "My Task");

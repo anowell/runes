@@ -94,7 +94,7 @@ pub(super) fn jj_sdk_uncommitted_rune_paths(store: &Store) -> Result<Vec<PathBuf
         return Ok(Vec::new());
     }
 
-    let mut paths: Vec<PathBuf> = TreeDiffIterator::new(&commit_tree, &wc_tree, &EverythingMatcher)
+    let mut paths: Vec<PathBuf> = TreeDiffIterator::new(&commit_tree, wc_tree, &EverythingMatcher)
         .filter_map(|entry| {
             let path_str = entry.path.as_internal_file_string();
             if path_str.ends_with(".md") {
@@ -149,13 +149,15 @@ pub(super) fn jj_sdk_status(store: &Store) -> Result<String> {
     lines.push(format!("changes={changes}"));
 
     if let Some(latest) = &latest_non_empty {
-        lines.push(format!("latest_change=\"{}\"", latest.change_id().reverse_hex()));
+        lines.push(format!(
+            "latest_change=\"{}\"",
+            latest.change_id().reverse_hex()
+        ));
         lines.push(format!("latest_commit=\"{}\"", latest.id().hex()));
     }
 
     // List remotes
-    let remotes = get_all_remote_names(repo.store())
-        .unwrap_or_default();
+    let remotes = get_all_remote_names(repo.store()).unwrap_or_default();
     for remote in &remotes {
         let name: &str = remote.as_ref();
         lines.push(format!("remote \"{name}\""));
@@ -257,16 +259,23 @@ pub(super) fn jj_sdk_rich_log(store: &Store, limit: usize) -> Result<Vec<super::
             .changed_paths_in_commit(&commit_id)
             .map_err(|e| Error::new(format!("jj-lib changed-path query failed: {e}")))?
         {
-            Some(paths) => paths.map(|p| p.as_internal_file_string().to_string()).collect(),
+            Some(paths) => paths
+                .map(|p| p.as_internal_file_string().to_string())
+                .collect(),
             None => {
                 // Fallback: diff commit tree against parent tree
-                let parent_tree = commit.parent_tree(repo.as_ref())
+                let parent_tree = commit
+                    .parent_tree(repo.as_ref())
                     .map_err(|e| Error::new(format!("jj-lib parent tree failed: {e}")))?;
                 let commit_tree = commit.tree();
                 TreeDiffIterator::new(&parent_tree, &commit_tree, &EverythingMatcher)
                     .filter_map(|entry| {
                         let path_str = entry.path.as_internal_file_string().to_string();
-                        if path_str.ends_with(".md") { Some(path_str) } else { None }
+                        if path_str.ends_with(".md") {
+                            Some(path_str)
+                        } else {
+                            None
+                        }
                     })
                     .collect()
             }
@@ -482,7 +491,10 @@ pub(super) fn jj_sdk_file_rich_log(
                 let mut files = Vec::new();
                 for p in paths {
                     let s = p.as_internal_file_string().to_string();
-                    if p == target || p.starts_with(target.as_ref()) || target.starts_with(p.as_ref()) {
+                    if p == target
+                        || p.starts_with(target.as_ref())
+                        || target.starts_with(p.as_ref())
+                    {
                         found = true;
                     }
                     if s.ends_with(".md") {
@@ -493,7 +505,8 @@ pub(super) fn jj_sdk_file_rich_log(
             }
             None => {
                 // Fallback: diff commit tree against parent tree
-                let parent_tree = commit.parent_tree(repo.as_ref())
+                let parent_tree = commit
+                    .parent_tree(repo.as_ref())
                     .map_err(|e| Error::new(format!("jj-lib parent tree failed: {e}")))?;
                 let commit_tree = commit.tree();
                 let mut found = false;
@@ -536,7 +549,12 @@ pub(super) fn jj_sdk_file_rich_log(
     Ok(entries)
 }
 
-pub(super) fn jj_sdk_commit_paths(store: &Store, message: &str, author_name: &str, author_email: &str) -> Result<()> {
+pub(super) fn jj_sdk_commit_paths(
+    store: &Store,
+    message: &str,
+    author_name: &str,
+    author_email: &str,
+) -> Result<()> {
     let config = StackedConfig::with_defaults();
     let settings = UserSettings::from_config(config).map_err(|e| Error::new(e.to_string()))?;
     let store_factories = StoreFactories::default();

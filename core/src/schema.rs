@@ -97,11 +97,7 @@ impl StoreSchema {
 
     /// Validate custom fields (from frontmatter_extra) against the schema.
     /// Returns errors for invalid enum values on required or present fields.
-    pub fn validate_custom_fields(
-        &self,
-        kind: &str,
-        extra_lines: &[String],
-    ) -> Result<()> {
+    pub fn validate_custom_fields(&self, kind: &str, extra_lines: &[String]) -> Result<()> {
         let mut errors = Vec::new();
 
         // Build effective field defs: global merged with kind-specific
@@ -207,9 +203,16 @@ pub fn builtin_template() -> &'static str {
 /// Find the path to a custom kind template file, if one exists.
 /// Searches project `.kinds/` first, then store `.kinds/`.
 /// Returns `None` if only built-in defaults would be used.
-pub fn find_kind_template_path(store_path: &Path, project: Option<&str>, kind: &str) -> Option<PathBuf> {
+pub fn find_kind_template_path(
+    store_path: &Path,
+    project: Option<&str>,
+    kind: &str,
+) -> Option<PathBuf> {
     if let Some(proj) = project {
-        let project_template = store_path.join(proj).join(".kinds").join(format!("{kind}.md"));
+        let project_template = store_path
+            .join(proj)
+            .join(".kinds")
+            .join(format!("{kind}.md"));
         if project_template.exists() {
             return Some(project_template);
         }
@@ -227,7 +230,10 @@ pub fn find_kind_template_path(store_path: &Path, project: Option<&str>, kind: &
 pub fn load_kind_template(store_path: &Path, project: Option<&str>, kind: &str) -> String {
     // Search project-level first
     if let Some(proj) = project {
-        let project_template = store_path.join(proj).join(".kinds").join(format!("{kind}.md"));
+        let project_template = store_path
+            .join(proj)
+            .join(".kinds")
+            .join(format!("{kind}.md"));
         if let Ok(content) = fs::read_to_string(&project_template) {
             return content;
         }
@@ -267,7 +273,10 @@ pub fn load_schema(store_path: &Path, project: Option<&str>) -> Result<StoreSche
 
 fn parse_schema_file(path: &Path) -> Result<StoreSchema> {
     let text = fs::read_to_string(path)?;
-    let kinds_dir = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+    let kinds_dir = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
     parse_schema_text(&text, kinds_dir)
 }
 
@@ -591,13 +600,11 @@ priority "low" "medium" "high" optional
 "#;
         let schema = parse_schema_text(text, PathBuf::new()).unwrap();
         // Valid value
-        let result =
-            schema.validate_custom_fields("task", &["priority \"medium\"".to_string()]);
+        let result = schema.validate_custom_fields("task", &["priority \"medium\"".to_string()]);
         assert!(result.is_ok());
 
         // Invalid value
-        let result =
-            schema.validate_custom_fields("task", &["priority \"critical\"".to_string()]);
+        let result = schema.validate_custom_fields("task", &["priority \"critical\"".to_string()]);
         assert!(result.is_err());
 
         // Missing optional field is OK

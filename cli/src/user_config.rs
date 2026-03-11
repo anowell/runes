@@ -112,7 +112,11 @@ impl UserConfig {
                     if let Some(name) = first_value(node) {
                         let backend = value_string(node, "backend").unwrap_or_default();
                         let path = value_string(node, "path").unwrap_or_default();
-                        config.stores.push(StoreDefinition { name, backend, path });
+                        config.stores.push(StoreDefinition {
+                            name,
+                            backend,
+                            path,
+                        });
                     }
                 }
                 // Old format nodes (backward compat)
@@ -554,7 +558,11 @@ fn find_or_create_node<'a>(
 fn set_child_value(node: &mut KdlNode, prop: &str, value: &str) {
     let children = node.children_mut().get_or_insert_with(KdlDocument::new);
     // Find existing child node with this name
-    if let Some(child) = children.nodes_mut().iter_mut().find(|n| n.name().value() == prop) {
+    if let Some(child) = children
+        .nodes_mut()
+        .iter_mut()
+        .find(|n| n.name().value() == prop)
+    {
         // Replace all entries with new value
         child.entries_mut().clear();
         child.push(KdlEntry::new(KdlValue::String(value.to_string())));

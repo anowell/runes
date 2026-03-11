@@ -37,7 +37,9 @@ fn runes_ok(home: &Path, args: &[&str]) -> String {
 
 fn runes_with_env(home: &Path, envs: &[(&str, &str)], args: &[&str]) -> String {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_runes"));
-    cmd.args(args).env("HOME", home).env("RUNES_USER", "Test User <test@runes.dev>");
+    cmd.args(args)
+        .env("HOME", home)
+        .env("RUNES_USER", "Test User <test@runes.dev>");
     for (key, value) in envs {
         cmd.env(key, value);
     }
@@ -552,7 +554,16 @@ fn setup_jj_store(test_name: &str) -> (PathBuf, String) {
     let store_path_s = store_path.to_string_lossy().to_string();
     runes_ok(
         &home,
-        &["store", "init", "tst", "--backend", "jj", "--path", &store_path_s, "--default"],
+        &[
+            "store",
+            "init",
+            "tst",
+            "--backend",
+            "jj",
+            "--path",
+            &store_path_s,
+            "--default",
+        ],
     );
     (home, store_path_s)
 }
@@ -563,19 +574,34 @@ fn setup_pijul_store(test_name: &str) -> Option<(PathBuf, String)> {
         return None;
     }
     let real_home = PathBuf::from(std::env::var("HOME").expect("HOME missing"));
-    let real_pijul = real_home.join("Library").join("Application Support").join("pijul");
+    let real_pijul = real_home
+        .join("Library")
+        .join("Application Support")
+        .join("pijul");
     if !real_pijul.exists() {
         eprintln!("skipping: no pijul identity");
         return None;
     }
     let home = unique_tmp_home(test_name);
-    let test_pijul = home.join("Library").join("Application Support").join("pijul");
+    let test_pijul = home
+        .join("Library")
+        .join("Application Support")
+        .join("pijul");
     copy_dir_recursive(&real_pijul, &test_pijul);
     let store_path = home.join("stores").join("tst");
     let store_path_s = store_path.to_string_lossy().to_string();
     runes_ok(
         &home,
-        &["store", "init", "tst", "--backend", "pijul", "--path", &store_path_s, "--default"],
+        &[
+            "store",
+            "init",
+            "tst",
+            "--backend",
+            "pijul",
+            "--path",
+            &store_path_s,
+            "--default",
+        ],
     );
     Some((home, store_path_s))
 }
@@ -593,14 +619,24 @@ fn jj_show_new_rune_has_created_metadata() {
         return;
     }
     let (home, _) = setup_jj_store("jj-show-new");
-    let id = last_line(&runes_ok(&home, &["new", "--project", "tst:proj", "Test rune"])).to_string();
+    let id = last_line(&runes_ok(
+        &home,
+        &["new", "--project", "tst:proj", "Test rune"],
+    ))
+    .to_string();
     let shown = runes_ok(&home, &["show", &format!("tst:{id}")]);
     assert!(shown.contains("created_by"), "missing created_by: {shown}");
     assert!(shown.contains("created_at"), "missing created_at: {shown}");
     // No updated_at because it matches created
-    assert!(!shown.contains("updated_at"), "unexpected updated_at: {shown}");
+    assert!(
+        !shown.contains("updated_at"),
+        "unexpected updated_at: {shown}"
+    );
     // No "Edited by" because sections haven't changed since creation
-    assert!(!shown.contains("Edited by"), "unexpected section annotation: {shown}");
+    assert!(
+        !shown.contains("Edited by"),
+        "unexpected section annotation: {shown}"
+    );
 }
 
 /// Test: new + comment → log shows 2 entries, comment has attribution
@@ -611,13 +647,29 @@ fn jj_show_comment_attribution() {
         return;
     }
     let (home, _) = setup_jj_store("jj-comment-attr");
-    let id = last_line(&runes_ok(&home, &["new", "--project", "tst:proj", "Comment test"])).to_string();
-    runes_ok(&home, &["comment", &format!("tst:{id}"), "-m", "This is a comment"]);
+    let id = last_line(&runes_ok(
+        &home,
+        &["new", "--project", "tst:proj", "Comment test"],
+    ))
+    .to_string();
+    runes_ok(
+        &home,
+        &["comment", &format!("tst:{id}"), "-m", "This is a comment"],
+    );
     let shown = runes_ok(&home, &["show", &format!("tst:{id}")]);
-    assert!(shown.contains("updated_at"), "missing updated_at after comment: {shown}");
+    assert!(
+        shown.contains("updated_at"),
+        "missing updated_at after comment: {shown}"
+    );
     // Comment should have attribution line "On ... by ..."
-    assert!(shown.contains("by Test User"), "missing comment author attribution: {shown}");
-    assert!(shown.contains("This is a comment"), "missing comment text: {shown}");
+    assert!(
+        shown.contains("by Test User"),
+        "missing comment author attribution: {shown}"
+    );
+    assert!(
+        shown.contains("This is a comment"),
+        "missing comment text: {shown}"
+    );
 }
 
 /// Test: new + edit design → section annotation appears
@@ -628,16 +680,26 @@ fn jj_show_section_edit_annotation() {
         return;
     }
     let (home, store_path) = setup_jj_store("jj-section-edit");
-    let id = last_line(&runes_ok(&home, &["new", "--project", "tst:proj", "Section test"])).to_string();
+    let id = last_line(&runes_ok(
+        &home,
+        &["new", "--project", "tst:proj", "Section test"],
+    ))
+    .to_string();
     // Edit the file directly to add content to Design section
     let store = Path::new(&store_path);
     let doc_path = find_rune_file(store, &id);
     let content = fs::read_to_string(&doc_path).expect("read doc");
     let updated = content.replace("## Design\n", "## Design\n\nNew design content here.\n");
     fs::write(&doc_path, &updated).expect("write doc");
-    runes_ok(&home, &["commit", &format!("tst:{id}"), "-m", "Update design"]);
+    runes_ok(
+        &home,
+        &["commit", &format!("tst:{id}"), "-m", "Update design"],
+    );
     let shown = runes_ok(&home, &["show", &format!("tst:{id}")]);
-    assert!(shown.contains("Edited by"), "missing section annotation: {shown}");
+    assert!(
+        shown.contains("Edited by"),
+        "missing section annotation: {shown}"
+    );
 }
 
 /// Test: show uncommitted rune has red "<not committed>"
@@ -648,9 +710,16 @@ fn jj_show_uncommitted_rune() {
         return;
     }
     let (home, _) = setup_jj_store("jj-uncommitted");
-    let id = last_line(&runes_ok(&home, &["new", "--project", "tst:proj", "Uncommitted", "--no-commit"])).to_string();
+    let id = last_line(&runes_ok(
+        &home,
+        &["new", "--project", "tst:proj", "Uncommitted", "--no-commit"],
+    ))
+    .to_string();
     let shown = runes_ok(&home, &["show", &format!("tst:{id}")]);
-    assert!(shown.contains("<not committed>"), "missing uncommitted indicator: {shown}");
+    assert!(
+        shown.contains("<not committed>"),
+        "missing uncommitted indicator: {shown}"
+    );
 }
 
 /// Test: show pending changes on a section
@@ -661,7 +730,11 @@ fn jj_show_pending_section_changes() {
         return;
     }
     let (home, store_path) = setup_jj_store("jj-pending");
-    let id = last_line(&runes_ok(&home, &["new", "--project", "tst:proj", "Pending test"])).to_string();
+    let id = last_line(&runes_ok(
+        &home,
+        &["new", "--project", "tst:proj", "Pending test"],
+    ))
+    .to_string();
     let store = Path::new(&store_path);
     let doc_path = find_rune_file(store, &id);
     // Edit Design section without committing
@@ -669,7 +742,10 @@ fn jj_show_pending_section_changes() {
     let updated = content.replace("## Design\n", "## Design\n\nUncommitted design change.\n");
     fs::write(&doc_path, &updated).expect("write doc");
     let shown = runes_ok(&home, &["show", &format!("tst:{id}")]);
-    assert!(shown.contains("pending uncommitted changes"), "missing pending annotation: {shown}");
+    assert!(
+        shown.contains("pending uncommitted changes"),
+        "missing pending annotation: {shown}"
+    );
 }
 
 /// Test: log associates runes via changed_files, not description
@@ -681,23 +757,46 @@ fn jj_log_uses_changed_files_not_description() {
     }
     let (home, _) = setup_jj_store("jj-log-files");
     // Create two runes with --no-commit, then commit together
-    let id1 = last_line(&runes_ok(&home, &["new", "--project", "tst:proj", "Rune one", "--no-commit"])).to_string();
-    let id2 = last_line(&runes_ok(&home, &["new", "--project", "tst:proj", "Rune two", "--no-commit"])).to_string();
-    runes_ok(&home, &["commit", "--project", "proj", "-m", "Bulk commit with no rune IDs in message"]);
+    let id1 = last_line(&runes_ok(
+        &home,
+        &["new", "--project", "tst:proj", "Rune one", "--no-commit"],
+    ))
+    .to_string();
+    let id2 = last_line(&runes_ok(
+        &home,
+        &["new", "--project", "tst:proj", "Rune two", "--no-commit"],
+    ))
+    .to_string();
+    runes_ok(
+        &home,
+        &[
+            "commit",
+            "--project",
+            "proj",
+            "-m",
+            "Bulk commit with no rune IDs in message",
+        ],
+    );
     // Log should find both runes from changed_files
     let log_json = runes_ok(&home, &["log", "--all", "--json"]);
     assert!(log_json.contains(&id1), "log missing {id1}: {log_json}");
     assert!(log_json.contains(&id2), "log missing {id2}: {log_json}");
     // Verify the bulk commit associates both runes
     let parsed: Vec<serde_json::Value> = serde_json::from_str(&log_json).expect("parse json");
-    let bulk = parsed.iter().find(|e| {
-        e["comment"].as_str().unwrap_or("").contains("Bulk commit")
-    });
+    let bulk = parsed
+        .iter()
+        .find(|e| e["comment"].as_str().unwrap_or("").contains("Bulk commit"));
     assert!(bulk.is_some(), "bulk commit not found in log");
     let runes = bulk.unwrap()["runes"].as_array().unwrap();
     let rune_ids: Vec<&str> = runes.iter().filter_map(|v| v.as_str()).collect();
-    assert!(rune_ids.contains(&id1.as_str()), "bulk commit missing {id1}");
-    assert!(rune_ids.contains(&id2.as_str()), "bulk commit missing {id2}");
+    assert!(
+        rune_ids.contains(&id1.as_str()),
+        "bulk commit missing {id1}"
+    );
+    assert!(
+        rune_ids.contains(&id2.as_str()),
+        "bulk commit missing {id2}"
+    );
 }
 
 /// Test: pijul - new rune show has created metadata
@@ -711,11 +810,18 @@ fn pijul_show_new_rune_has_created_metadata() {
         Some(v) => v,
         None => return,
     };
-    let id = last_line(&runes_ok(&home, &["new", "--project", "tst:proj", "Pijul test"])).to_string();
+    let id = last_line(&runes_ok(
+        &home,
+        &["new", "--project", "tst:proj", "Pijul test"],
+    ))
+    .to_string();
     let shown = runes_ok(&home, &["show", &format!("tst:{id}")]);
     assert!(shown.contains("created_by"), "missing created_by: {shown}");
     assert!(shown.contains("created_at"), "missing created_at: {shown}");
-    assert!(!shown.contains("updated_at"), "unexpected updated_at: {shown}");
+    assert!(
+        !shown.contains("updated_at"),
+        "unexpected updated_at: {shown}"
+    );
 }
 
 /// Test: pijul - log uses changed_files
@@ -729,7 +835,11 @@ fn pijul_log_uses_changed_files() {
         Some(v) => v,
         None => return,
     };
-    let id = last_line(&runes_ok(&home, &["new", "--project", "tst:proj", "Pijul log test"])).to_string();
+    let id = last_line(&runes_ok(
+        &home,
+        &["new", "--project", "tst:proj", "Pijul log test"],
+    ))
+    .to_string();
     let log_json = runes_ok(&home, &["log", "--all", "--json"]);
     assert!(log_json.contains(&id), "pijul log missing {id}: {log_json}");
 }
@@ -742,12 +852,22 @@ fn jj_rename_preserves_history() {
         return;
     }
     let (home, _) = setup_jj_store("jj-rename");
-    let id = last_line(&runes_ok(&home, &["new", "--project", "tst:proj", "Original title"])).to_string();
+    let id = last_line(&runes_ok(
+        &home,
+        &["new", "--project", "tst:proj", "Original title"],
+    ))
+    .to_string();
     // Edit the title which changes the filename slug
-    runes_ok(&home, &["edit", &format!("tst:{id}"), "--title", "Renamed title"]);
+    runes_ok(
+        &home,
+        &["edit", &format!("tst:{id}"), "--title", "Renamed title"],
+    );
     // Show still works with same ID after rename
     let shown = runes_ok(&home, &["show", &format!("tst:{id}")]);
-    assert!(shown.contains("Renamed title"), "title not updated: {shown}");
+    assert!(
+        shown.contains("Renamed title"),
+        "title not updated: {shown}"
+    );
     assert!(shown.contains("created_by"), "missing created_by: {shown}");
     assert!(shown.contains("created_at"), "missing created_at: {shown}");
 }
@@ -763,5 +883,8 @@ fn find_rune_file(store_path: &Path, rune_id: &str) -> PathBuf {
             return entry.path();
         }
     }
-    panic!("rune file not found for {rune_id} in {}", project_dir.display());
+    panic!(
+        "rune file not found for {rune_id} in {}",
+        project_dir.display()
+    );
 }

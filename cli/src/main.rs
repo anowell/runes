@@ -5,11 +5,10 @@ use clap::{Parser, Subcommand};
 use pijul_interaction::{set_context, InteractiveContext};
 use runes_core::backend::{self, LogEntry};
 use runes_core::cache;
-use runes_core::config::{ensure_dir, discover_stores, get_store, BackendKind, Store};
+use runes_core::config::{discover_stores, ensure_dir, get_store, BackendKind, Store};
 use runes_core::model::{
-    discover_project_docs, ensure_title, new_milestone_doc, new_rune_doc,
-    next_short_id, parse_doc, parse_full_id, render_doc, replace_title, resolve_issue_path,
-    slugify, RuneDoc,
+    discover_project_docs, ensure_title, new_milestone_doc, new_rune_doc, next_short_id, parse_doc,
+    parse_full_id, render_doc, replace_title, resolve_issue_path, slugify, RuneDoc,
 };
 use runes_core::schema::{find_kind_template_path, load_kind_template, load_schema};
 use runes_core::{Error, Result};
@@ -20,7 +19,12 @@ use std::process::Command;
 use user_config::UserConfig;
 
 #[derive(Debug, Parser)]
-#[command(name = "runes", version, about = "A local-first issue tracker stored as markdown rune docs", propagate_version = true)]
+#[command(
+    name = "runes",
+    version,
+    about = "A local-first issue tracker stored as markdown rune docs",
+    propagate_version = true
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<CliCommand>,
@@ -517,7 +521,9 @@ fn resolve_store_with_context(
     if stores.len() == 1 {
         return Ok(stores[0].clone());
     }
-    Err(Error::new("No default store configured. Set defaults.store in runes.kdl or ~/.runes/config.kdl"))
+    Err(Error::new(
+        "No default store configured. Set defaults.store in runes.kdl or ~/.runes/config.kdl",
+    ))
 }
 
 fn resolve_store_and_project(
@@ -610,7 +616,6 @@ fn resolve_rune_id(
     };
     Ok((store, path))
 }
-
 
 fn find_short_id(store_path: &Path, short: &str) -> Result<PathBuf> {
     let mut matches = Vec::new();
@@ -774,7 +779,10 @@ fn parse_author_string(s: &str) -> (String, String) {
 }
 
 /// Resolve commit author from: override flag > RUNES_USER env > config
-fn resolve_commit_author(user_cfg: &UserConfig, author_override: Option<&str>) -> Result<(String, String)> {
+fn resolve_commit_author(
+    user_cfg: &UserConfig,
+    author_override: Option<&str>,
+) -> Result<(String, String)> {
     if let Some(author_str) = author_override {
         return Ok(parse_author_string(author_str));
     }
@@ -790,7 +798,13 @@ fn resolve_commit_author(user_cfg: &UserConfig, author_override: Option<&str>) -
     ))
 }
 
-fn commit_store_changes(store: &Store, paths: &[PathBuf], message: &str, author_name: &str, author_email: &str) -> Result<()> {
+fn commit_store_changes(
+    store: &Store,
+    paths: &[PathBuf],
+    message: &str,
+    author_name: &str,
+    author_email: &str,
+) -> Result<()> {
     backend::commit_paths(store, paths, message, author_name, author_email)?;
     cache::rebuild_cache(store)?;
     Ok(())
@@ -812,8 +826,16 @@ fn edit_change_snippets(old: &RuneDoc, new: &RuneDoc) -> Vec<String> {
         }
     }
     // Label changes
-    let added_labels: Vec<_> = new.labels.iter().filter(|l| !old.labels.contains(l)).collect();
-    let removed_labels: Vec<_> = old.labels.iter().filter(|l| !new.labels.contains(l)).collect();
+    let added_labels: Vec<_> = new
+        .labels
+        .iter()
+        .filter(|l| !old.labels.contains(l))
+        .collect();
+    let removed_labels: Vec<_> = old
+        .labels
+        .iter()
+        .filter(|l| !new.labels.contains(l))
+        .collect();
     if !added_labels.is_empty() || !removed_labels.is_empty() {
         snippets.push("labels".to_string());
     }
@@ -838,14 +860,24 @@ fn edit_change_snippets(old: &RuneDoc, new: &RuneDoc) -> Vec<String> {
     }
     // Check for new sections
     for section in &new_sections {
-        if !old_sections.contains(section) && !snippets.iter().any(|s| s == &section.to_lowercase()) {
+        if !old_sections.contains(section) && !snippets.iter().any(|s| s == &section.to_lowercase())
+        {
             snippets.push(section.to_lowercase());
         }
     }
     // If body changed but no section-level diff caught it, say "description"
-    if old.body != new.body && snippets.iter().all(|s| {
-        !["description", "design", "comments", "notes", "acceptance criteria"].contains(&s.as_str())
-    }) {
+    if old.body != new.body
+        && snippets.iter().all(|s| {
+            ![
+                "description",
+                "design",
+                "comments",
+                "notes",
+                "acceptance criteria",
+            ]
+            .contains(&s.as_str())
+        })
+    {
         // Check if the non-section body content changed
         let old_main = extract_section_content(&old.body, "");
         let new_main = extract_section_content(&new.body, "");
@@ -863,14 +895,12 @@ fn edit_change_snippets(old: &RuneDoc, new: &RuneDoc) -> Vec<String> {
 /// Extract `## Section` names from a body.
 fn body_section_names(body: &str) -> Vec<String> {
     body.lines()
-        .filter_map(|line| {
-            line.strip_prefix("## ").map(|rest| rest.trim().to_string())
-        })
+        .filter_map(|line| line.strip_prefix("## ").map(|rest| rest.trim().to_string()))
         .collect()
 }
 
 /// Extract content of a named section (or main body if name is empty).
-fn extract_section_content<'a>(body: &'a str, section_name: &str) -> String {
+fn extract_section_content(body: &str, section_name: &str) -> String {
     let mut collecting = section_name.is_empty();
     let mut content = String::new();
     for line in body.lines() {
@@ -938,10 +968,7 @@ fn reconcile_filename(path: &Path, full_id: &str) -> Result<PathBuf> {
     let doc = parse_doc(path)?;
     let parsed = parse_full_id(full_id)?;
     let expected_name = format!("{}--{}.md", parsed.short, slugify(&doc.title));
-    let current_name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
+    let current_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
     if current_name == "_milestone.md" || current_name == expected_name {
         return Ok(path.to_path_buf());
     }
@@ -962,7 +989,9 @@ fn maybe_commit(
     rune_path: Option<&Path>,
 ) -> Result<()> {
     if no_commit && user_message.is_none() {
-        eprintln!("hint: uncommitted changes pending. Will be included in next commit or `runes commit`.");
+        eprintln!(
+            "hint: uncommitted changes pending. Will be included in next commit or `runes commit`."
+        );
         return Ok(());
     }
     let msg = user_message.unwrap_or(default_message);
@@ -1013,6 +1042,7 @@ fn read_from_stdin() -> Result<String> {
     Ok(buffer)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_rune(
     store: &Store,
     project: &str,
@@ -1205,15 +1235,23 @@ fn run_new(args: NewArgs) -> Result<()> {
         if let Err(e) = schema.validate_status(&edited_doc.kind, &edited_doc.status) {
             eprintln!("error: {e}");
             eprintln!("Your edits are saved in: {}", tmp_path.display());
-            eprintln!("Fix and apply with: runes edit {identifier} -f {}", tmp_path.display());
+            eprintln!(
+                "Fix and apply with: runes edit {identifier} -f {}",
+                tmp_path.display()
+            );
             // Clean up the newly created doc since it was never valid
             let _ = fs::remove_file(&doc_path);
             return Err(Error::new("Validation failed after editor edit"));
         }
-        if let Err(e) = schema.validate_custom_fields(&edited_doc.kind, &edited_doc.frontmatter_extra) {
+        if let Err(e) =
+            schema.validate_custom_fields(&edited_doc.kind, &edited_doc.frontmatter_extra)
+        {
             eprintln!("error: {e}");
             eprintln!("Your edits are saved in: {}", tmp_path.display());
-            eprintln!("Fix and apply with: runes edit {identifier} -f {}", tmp_path.display());
+            eprintln!(
+                "Fix and apply with: runes edit {identifier} -f {}",
+                tmp_path.display()
+            );
             let _ = fs::remove_file(&doc_path);
             return Err(Error::new("Validation failed after editor edit"));
         }
@@ -1225,8 +1263,15 @@ fn run_new(args: NewArgs) -> Result<()> {
         let _ = fs::remove_file(&tmp_path);
     }
     let final_path = reconcile_filename(&doc_path, &identifier)?;
-    let default_msg = build_commit_message("Add", &identifier, &[status.clone()]);
-    maybe_commit(&store, no_commit, message.as_deref(), &default_msg, &user_cfg, Some(&final_path))?;
+    let default_msg = build_commit_message("Add", &identifier, std::slice::from_ref(&status));
+    maybe_commit(
+        &store,
+        no_commit,
+        message.as_deref(),
+        &default_msg,
+        &user_cfg,
+        Some(&final_path),
+    )?;
     println!("{identifier}");
     Ok(())
 }
@@ -1358,8 +1403,13 @@ fn run_list(args: ListArgs) -> Result<()> {
     let (cfg, user_cfg, cwd) = load_context()?;
     let project_flag_present = project.is_some();
     let effective_project = project.filter(|p| !p.is_empty());
-    let (store, project_proj) =
-        resolve_store_and_project(&cfg, &user_cfg, &cwd, store.as_deref(), effective_project.as_ref())?;
+    let (store, project_proj) = resolve_store_and_project(
+        &cfg,
+        &user_cfg,
+        &cwd,
+        store.as_deref(),
+        effective_project.as_ref(),
+    )?;
     let status_flag_present = status.is_some();
     let kind_flag_present = kind.is_some();
     let assignee_filter = assignee
@@ -1644,11 +1694,7 @@ fn run_show(args: ShowArgs) -> Result<()> {
             .display()
             .to_string();
         let project = doc.id.split('-').next().unwrap_or("").to_string();
-        let meta = content
-            .split("---")
-            .nth(1)
-            .map(|s| s.trim())
-            .unwrap_or("");
+        let meta = content.split("---").nth(1).map(|s| s.trim()).unwrap_or("");
         let json = serde_json::json!({
             "kind": doc.kind,
             "id": doc.id,
@@ -1742,12 +1788,7 @@ fn format_timestamp_local(epoch_secs: i64) -> String {
     zdt.strftime("%b %-d at %-I:%M%P").to_string()
 }
 
-fn print_annotated_rune_doc(
-    content: &str,
-    history: &[LogEntry],
-    store: &Store,
-    rel_path: &Path,
-) {
+fn print_annotated_rune_doc(content: &str, history: &[LogEntry], store: &Store, rel_path: &Path) {
     let (frontmatter, body) = split_rune_doc(content);
     let is_uncommitted = history.is_empty();
 
@@ -1767,14 +1808,20 @@ fn print_annotated_rune_doc(
         injected.push_str(&format!("  created_by \"{}\"\n", created.author));
     }
     if created.timestamp > 0 {
-        injected.push_str(&format!("  created_at \"{}\"\n", format_timestamp_local(created.timestamp)));
+        injected.push_str(&format!(
+            "  created_at \"{}\"\n",
+            format_timestamp_local(created.timestamp)
+        ));
     }
     if updated.revision != created.revision {
         if !updated.author.is_empty() && updated.author != created.author {
             injected.push_str(&format!("  updated_by \"{}\"\n", updated.author));
         }
         if updated.timestamp > 0 {
-            injected.push_str(&format!("  updated_at \"{}\"\n", format_timestamp_local(updated.timestamp)));
+            injected.push_str(&format!(
+                "  updated_at \"{}\"\n",
+                format_timestamp_local(updated.timestamp)
+            ));
         }
     }
 
@@ -1791,7 +1838,12 @@ fn print_annotated_rune_doc(
         build_annotations(history, store, rel_path, &body, created, has_pending);
 
     // Print body with section and comment annotations
-    print_annotated_body(&body, &section_annotations, &comment_attributions, &created.revision);
+    print_annotated_body(
+        &body,
+        &section_annotations,
+        &comment_attributions,
+        &created.revision,
+    );
 }
 
 /// Check if the current disk content of a rune file differs from the latest committed version.
@@ -2104,7 +2156,10 @@ fn print_annotated_body(
                     if ann.last_editor.is_empty() {
                         println!("{}", color::gray(&format!("Edited on {ts}")));
                     } else {
-                        println!("{}", color::gray(&format!("Edited by {} on {}", ann.last_editor, ts)));
+                        println!(
+                            "{}",
+                            color::gray(&format!("Edited by {} on {}", ann.last_editor, ts))
+                        );
                     }
                 }
                 i += 1;
@@ -2115,7 +2170,12 @@ fn print_annotated_body(
         if in_comments {
             if line.trim() == "---" {
                 // Flush buffered comment with attribution
-                flush_comment_buf(&mut comment_buf, comment_attrs, &mut comment_idx, &mut comment_header_printed);
+                flush_comment_buf(
+                    &mut comment_buf,
+                    comment_attrs,
+                    &mut comment_idx,
+                    &mut comment_header_printed,
+                );
                 // Print separator
                 println!("{}", color::gray("---"));
             } else {
@@ -2128,7 +2188,12 @@ fn print_annotated_body(
     }
 
     // Flush remaining comment buffer
-    flush_comment_buf(&mut comment_buf, comment_attrs, &mut comment_idx, &mut comment_header_printed);
+    flush_comment_buf(
+        &mut comment_buf,
+        comment_attrs,
+        &mut comment_idx,
+        &mut comment_header_printed,
+    );
 }
 
 fn flush_comment_buf(
@@ -2222,9 +2287,7 @@ fn run_edit(args: EditArgs) -> Result<()> {
         return Err(Error::new("Cannot use both --file and --edit"));
     }
     if (file.is_some() || edit) && has_field_edits {
-        return Err(Error::new(
-            "Cannot mix field edits with --file or --edit",
-        ));
+        return Err(Error::new("Cannot mix field edits with --file or --edit"));
     }
     // Load schema for validation
     let parsed_id = parse_full_id(&doc.id)?;
@@ -2304,14 +2367,24 @@ fn run_edit(args: EditArgs) -> Result<()> {
         if let Err(e) = schema.validate_status(&edited_doc.kind, &edited_doc.status) {
             eprintln!("error: {e}");
             eprintln!("Your edits are saved in: {}", tmp_path.display());
-            eprintln!("Fix and apply with: runes edit {} -f {}", id, tmp_path.display());
+            eprintln!(
+                "Fix and apply with: runes edit {} -f {}",
+                id,
+                tmp_path.display()
+            );
             return Err(Error::new("Validation failed after editor edit"));
         }
         // Validate custom fields
-        if let Err(e) = schema.validate_custom_fields(&edited_doc.kind, &edited_doc.frontmatter_extra) {
+        if let Err(e) =
+            schema.validate_custom_fields(&edited_doc.kind, &edited_doc.frontmatter_extra)
+        {
             eprintln!("error: {e}");
             eprintln!("Your edits are saved in: {}", tmp_path.display());
-            eprintln!("Fix and apply with: runes edit {} -f {}", id, tmp_path.display());
+            eprintln!(
+                "Fix and apply with: runes edit {} -f {}",
+                id,
+                tmp_path.display()
+            );
             return Err(Error::new("Validation failed after editor edit"));
         }
         doc = edited_doc;
@@ -2327,7 +2400,14 @@ fn run_edit(args: EditArgs) -> Result<()> {
     let final_path = reconcile_filename(&path, &doc.id)?;
     let snippets = edit_change_snippets(&original_doc, &doc);
     let default_msg = build_commit_message("Update", &doc.id, &snippets);
-    maybe_commit(&store, no_commit, message.as_deref(), &default_msg, &user_cfg, Some(&final_path))?;
+    maybe_commit(
+        &store,
+        no_commit,
+        message.as_deref(),
+        &default_msg,
+        &user_cfg,
+        Some(&final_path),
+    )?;
     Ok(())
 }
 
@@ -2400,8 +2480,8 @@ fn run_comment(args: CommentArgs) -> Result<()> {
         // Find the end of the comments section content (next heading of same or higher level, or EOF)
         let level = comments_heading_level.unwrap();
         let mut section_end = lines.len();
-        for i in (pos + 1)..lines.len() {
-            if let Some(rest) = lines[i].strip_prefix('#') {
+        for (i, line) in lines.iter().enumerate().skip(pos + 1) {
+            if let Some(rest) = line.strip_prefix('#') {
                 let mut h = 1;
                 let mut r = rest;
                 while let Some(next) = r.strip_prefix('#') {
@@ -2454,12 +2534,25 @@ fn run_comment(args: CommentArgs) -> Result<()> {
     doc.body = new_body;
     fs::write(&path, render_doc(&doc))?;
     let default_msg = build_commit_message("Comment on", &doc.id, &[]);
-    maybe_commit(&store, no_commit, None, &default_msg, &user_cfg, Some(&path))?;
+    maybe_commit(
+        &store,
+        no_commit,
+        None,
+        &default_msg,
+        &user_cfg,
+        Some(&path),
+    )?;
     Ok(())
 }
 
 fn run_commit(args: CommitArgs) -> Result<()> {
-    let CommitArgs { target, store: store_flag, project: project_flag, message, author } = args;
+    let CommitArgs {
+        target,
+        store: store_flag,
+        project: project_flag,
+        message,
+        author,
+    } = args;
     let (cfg, user_cfg, cwd) = load_context()?;
 
     // Determine scope: specific rune, project directory, or entire store
@@ -2467,7 +2560,8 @@ fn run_commit(args: CommitArgs) -> Result<()> {
         // `runes commit <rune_id>` → commit a specific rune file
         let (s, doc_path) = resolve_rune_id(&cfg, &user_cfg, &cwd, rune_id)?;
         let doc = parse_doc(&doc_path)?;
-        let rel = doc_path.strip_prefix(&s.path)
+        let rel = doc_path
+            .strip_prefix(&s.path)
             .map_err(|e| Error::new(e.to_string()))?;
         (s, vec![rel.to_path_buf()], doc.id)
     } else if let Some(store_name) = &store_flag {
@@ -2580,14 +2674,14 @@ fn move_rune(
     fs::write(&target_path, render_doc(&target_doc))?;
     if source_path != target_path {
         if from_store.name == to_store.name {
-            fs::remove_file(&source_path)?;
+            fs::remove_file(source_path)?;
         } else {
             let from_rel = source_path
                 .strip_prefix(&from_store.path)
                 .map_err(|e| Error::new(e.to_string()))?
                 .to_path_buf();
             backend::remove_path(from_store, &from_rel)?;
-            fs::remove_file(&source_path)?;
+            fs::remove_file(source_path)?;
         }
     }
     println!("Moved {}", target_doc.id);
@@ -2606,13 +2700,33 @@ fn run_move(args: MoveArgs) -> Result<()> {
     let source_doc = parse_doc(&source_path)?;
     let (to_store, project) =
         resolve_store_and_project_required(&cfg, &user_cfg, &cwd, None, &target_project)?;
-    move_rune(&from_store, &to_store, &source_path, &project, parent.as_deref())?;
+    move_rune(
+        &from_store,
+        &to_store,
+        &source_path,
+        &project,
+        parent.as_deref(),
+    )?;
     let move_msg = format!("Move {} to {project}", source_doc.id);
     if from_store.name == to_store.name {
-        maybe_commit(&from_store, no_commit, message.as_deref(), &move_msg, &user_cfg, None)?;
+        maybe_commit(
+            &from_store,
+            no_commit,
+            message.as_deref(),
+            &move_msg,
+            &user_cfg,
+            None,
+        )?;
     } else {
         let move_in_msg = format!("Move in {} from {}", source_doc.id, from_store.name);
-        maybe_commit(&to_store, no_commit, message.as_deref(), &move_in_msg, &user_cfg, None)?;
+        maybe_commit(
+            &to_store,
+            no_commit,
+            message.as_deref(),
+            &move_in_msg,
+            &user_cfg,
+            None,
+        )?;
         // Commit the removal from the source store
         if !no_commit || message.is_some() {
             let default_from_msg = format!("Move out {} to {}", source_doc.id, to_store.name);
@@ -2624,12 +2738,23 @@ fn run_move(args: MoveArgs) -> Result<()> {
     Ok(())
 }
 fn run_archive(args: ArchiveArgs) -> Result<()> {
-    let ArchiveArgs { id, no_commit, message } = args;
+    let ArchiveArgs {
+        id,
+        no_commit,
+        message,
+    } = args;
     let (cfg, user_cfg, cwd) = load_context()?;
     let (store, path) = resolve_rune_id(&cfg, &user_cfg, &cwd, &id)?;
     let doc = archive_rune(&store, &path)?;
     let default_msg = format!("Archive {}", doc.id);
-    maybe_commit(&store, no_commit, message.as_deref(), &default_msg, &user_cfg, None)?;
+    maybe_commit(
+        &store,
+        no_commit,
+        message.as_deref(),
+        &default_msg,
+        &user_cfg,
+        None,
+    )?;
     Ok(())
 }
 
@@ -2665,7 +2790,12 @@ fn archive_rune(store: &Store, source_path: &Path) -> Result<RuneDoc> {
     Ok(doc)
 }
 fn run_delete(args: DeleteArgs) -> Result<()> {
-    let DeleteArgs { id, force, no_commit, message } = args;
+    let DeleteArgs {
+        id,
+        force,
+        no_commit,
+        message,
+    } = args;
     if !force {
         return Err(Error::new("Use --force to delete runes"));
     }
@@ -2673,7 +2803,14 @@ fn run_delete(args: DeleteArgs) -> Result<()> {
     let (store, path) = resolve_rune_id(&cfg, &user_cfg, &cwd, &id)?;
     let doc = delete_rune(&store, &path)?;
     let default_msg = format!("Delete {}", doc.id);
-    maybe_commit(&store, no_commit, message.as_deref(), &default_msg, &user_cfg, None)?;
+    maybe_commit(
+        &store,
+        no_commit,
+        message.as_deref(),
+        &default_msg,
+        &user_cfg,
+        None,
+    )?;
     Ok(())
 }
 
@@ -2685,7 +2822,7 @@ fn delete_rune(store: &Store, source_path: &Path) -> Result<RuneDoc> {
             .ok_or_else(|| Error::new("Invalid container path"))?;
         fs::remove_dir_all(container)?;
     } else {
-        fs::remove_file(&source_path)?;
+        fs::remove_file(source_path)?;
     }
     let rel_path = source_path
         .strip_prefix(&store.path)
@@ -2712,7 +2849,11 @@ fn format_log_timestamp(epoch_secs: i64) -> String {
     let mut y = 1970i64;
     let mut remaining = days as i64;
     loop {
-        let year_days = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
+        let year_days = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+            366
+        } else {
+            365
+        };
         if remaining < year_days {
             break;
         }
@@ -2720,7 +2861,20 @@ fn format_log_timestamp(epoch_secs: i64) -> String {
         y += 1;
     }
     let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
-    let month_days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let month_days = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut m = 0usize;
     for &md in &month_days {
         if remaining < md as i64 {
@@ -2729,7 +2883,11 @@ fn format_log_timestamp(epoch_secs: i64) -> String {
         remaining -= md as i64;
         m += 1;
     }
-    format!("{y:04}-{:02}-{:02} {hours:02}:{minutes:02}", m + 1, remaining + 1)
+    format!(
+        "{y:04}-{:02}-{:02} {hours:02}:{minutes:02}",
+        m + 1,
+        remaining + 1
+    )
 }
 
 fn rune_id_from_path(file_path: &str) -> Option<String> {
@@ -2758,7 +2916,6 @@ fn description_line_for_id<'a>(description: &'a str, id: &str) -> &'a str {
     }
     description.lines().next().unwrap_or("").trim()
 }
-
 
 fn print_log_entries_json(
     entries: &[LogEntry],
@@ -2861,7 +3018,10 @@ fn format_log_entries(
             }
             let desc = description_line_for_id(&entry.description, rune_id);
             let id_colored = color::colored_id(rune_id);
-            let _ = writeln!(out, "{rev_colored}  {ts_colored}  {author_colored}  {id_colored}  {desc}");
+            let _ = writeln!(
+                out,
+                "{rev_colored}  {ts_colored}  {author_colored}  {id_colored}  {desc}"
+            );
         }
     }
     out
@@ -2902,17 +3062,23 @@ fn run_log(args: LogArgs) -> Result<()> {
         }
         None => {
             // Use default project if configured
-            let proj = user_cfg.default_project.as_ref().map(|spec| {
-                let (_, proj_name) = split_store_prefix(spec);
-                proj_name.to_string()
-            }).filter(|p| !p.is_empty());
+            let proj = user_cfg
+                .default_project
+                .as_ref()
+                .map(|spec| {
+                    let (_, proj_name) = split_store_prefix(spec);
+                    proj_name.to_string()
+                })
+                .filter(|p| !p.is_empty());
             (None, proj)
         }
     };
 
     // Section filter requires a rune ID
     if section.is_some() && rune_filter.is_none() {
-        return Err(Error::new("--section requires a rune ID (e.g. proj:shortid)"));
+        return Err(Error::new(
+            "--section requires a rune ID (e.g. proj:shortid)",
+        ));
     }
 
     // If section is specified, use the section-diff logic
@@ -2926,10 +3092,10 @@ fn run_log(args: LogArgs) -> Result<()> {
         } else {
             format!("## {section_raw}")
         };
-        let change_ids = backend::file_change_ids(&store, &rel_path, limit)?;
+        let change_ids = backend::file_change_ids(&store, rel_path, limit)?;
         let mut printed = 0usize;
         for change_id in change_ids {
-            let details = backend::show_change(&store, &change_id, &rel_path)?;
+            let details = backend::show_change(&store, &change_id, rel_path)?;
             let section_hit = details.lines().any(|line| {
                 line.contains(&marker)
                     && (line.starts_with('+') || line.starts_with('-') || line.contains("Hunks"))
@@ -2953,9 +3119,19 @@ fn run_log(args: LogArgs) -> Result<()> {
     let store = resolve_store_with_context(&cfg, &user_cfg, &cwd, None)?;
     let entries = backend::rich_log(&store, limit)?;
     if json {
-        print_log_entries_json(&entries, rune_filter.as_deref(), project_filter.as_deref(), changed_by.as_deref());
+        print_log_entries_json(
+            &entries,
+            rune_filter.as_deref(),
+            project_filter.as_deref(),
+            changed_by.as_deref(),
+        );
     } else {
-        let output = format_log_entries(&entries, rune_filter.as_deref(), project_filter.as_deref(), changed_by.as_deref());
+        let output = format_log_entries(
+            &entries,
+            rune_filter.as_deref(),
+            project_filter.as_deref(),
+            changed_by.as_deref(),
+        );
         color::print_with_pager(&output, no_pager);
     }
     Ok(())
@@ -3090,7 +3266,14 @@ fn run_restore(args: RestoreArgs) -> Result<()> {
     let short_rev = &revision[..revision.len().min(12)];
     println!("Restored {} to revision {short_rev}", doc.id);
     let default_msg = format!("Restore {} to revision {short_rev}", doc.id);
-    maybe_commit(&store, no_commit, message.as_deref(), &default_msg, &user_cfg, Some(&final_path))?;
+    maybe_commit(
+        &store,
+        no_commit,
+        message.as_deref(),
+        &default_msg,
+        &user_cfg,
+        Some(&final_path),
+    )?;
     Ok(())
 }
 
@@ -3288,8 +3471,9 @@ fn run_config(cmd: ConfigCommand) -> Result<()> {
             let path = if global {
                 user_config::global_config_path()?
             } else {
-                user_config::local_config_path(&cwd)
-                    .ok_or_else(|| Error::new("Not in a repo. Use --global or run from a repo root."))?
+                user_config::local_config_path(&cwd).ok_or_else(|| {
+                    Error::new("Not in a repo. Use --global or run from a repo root.")
+                })?
             };
             user_config::config_set(&path, &key, &value)?;
             Ok(())
@@ -3298,8 +3482,9 @@ fn run_config(cmd: ConfigCommand) -> Result<()> {
             let path = if global {
                 user_config::global_config_path()?
             } else {
-                user_config::local_config_path(&cwd)
-                    .ok_or_else(|| Error::new("Not in a repo. Use --global or run from a repo root."))?
+                user_config::local_config_path(&cwd).ok_or_else(|| {
+                    Error::new("Not in a repo. Use --global or run from a repo root.")
+                })?
             };
             user_config::config_unset(&path, &key)?;
             Ok(())
@@ -3323,22 +3508,36 @@ fn run_init(args: InitArgs) -> Result<()> {
         // Prompt for default store name
         eprint!("Default store name [proj]: ");
         let mut store_name = String::new();
-        io::stdin().read_line(&mut store_name).map_err(|e| Error::new(e.to_string()))?;
+        io::stdin()
+            .read_line(&mut store_name)
+            .map_err(|e| Error::new(e.to_string()))?;
         let store_name = store_name.trim();
-        let store_name = if store_name.is_empty() { "proj" } else { store_name };
+        let store_name = if store_name.is_empty() {
+            "proj"
+        } else {
+            store_name
+        };
 
         // Prompt for backend
         eprint!("Backend (jj or pijul) [jj]: ");
         let mut backend_input = String::new();
-        io::stdin().read_line(&mut backend_input).map_err(|e| Error::new(e.to_string()))?;
+        io::stdin()
+            .read_line(&mut backend_input)
+            .map_err(|e| Error::new(e.to_string()))?;
         let backend_input = backend_input.trim();
-        let backend = if backend_input.is_empty() { "jj" } else { backend_input };
+        let backend = if backend_input.is_empty() {
+            "jj"
+        } else {
+            backend_input
+        };
         BackendKind::parse(backend)?;
 
         // Prompt for user email
         eprint!("User email: ");
         let mut email = String::new();
-        io::stdin().read_line(&mut email).map_err(|e| Error::new(e.to_string()))?;
+        io::stdin()
+            .read_line(&mut email)
+            .map_err(|e| Error::new(e.to_string()))?;
         let email = email.trim().to_string();
 
         // Create global config
@@ -3346,7 +3545,11 @@ fn run_init(args: InitArgs) -> Result<()> {
         user_config::config_set(&global_path, "defaults.store", store_name)?;
 
         let store_path = default_store_path(store_name)?;
-        user_config::config_set(&global_path, &format!("store.{store_name}.backend"), backend)?;
+        user_config::config_set(
+            &global_path,
+            &format!("store.{store_name}.backend"),
+            backend,
+        )?;
         user_config::config_set(
             &global_path,
             &format!("store.{store_name}.path"),
@@ -3384,7 +3587,9 @@ fn run_init(args: InitArgs) -> Result<()> {
                     .unwrap_or("myproject");
                 eprint!("Project prefix [{}]: ", default_name);
                 let mut input = String::new();
-                io::stdin().read_line(&mut input).map_err(|e| Error::new(e.to_string()))?;
+                io::stdin()
+                    .read_line(&mut input)
+                    .map_err(|e| Error::new(e.to_string()))?;
                 let input = input.trim();
                 if input.is_empty() {
                     default_name.to_string()
@@ -3408,7 +3613,7 @@ fn run_init(args: InitArgs) -> Result<()> {
 
             if args.stealth {
                 let exclude_path = root.join(".git").join("info").join("exclude");
-                if exclude_path.parent().map_or(false, |p| p.exists()) {
+                if exclude_path.parent().is_some_and(|p| p.exists()) {
                     let existing = fs::read_to_string(&exclude_path).unwrap_or_default();
                     if !existing.lines().any(|l| l.trim() == "runes.kdl") {
                         let mut content = existing;
@@ -3451,9 +3656,7 @@ fn run_quickstart() -> Result<()> {
     let active_store = default_store.and_then(|name| all_stores.iter().find(|s| s.name == name));
 
     // Load schema if we have a store
-    let schema = active_store.and_then(|store| {
-        load_schema(&store.path, default_project).ok()
-    });
+    let schema = active_store.and_then(|store| load_schema(&store.path, default_project).ok());
 
     // -- Header --
     println!("runes - A local-first issue tracker stored as markdown rune docs");
@@ -3487,10 +3690,14 @@ fn run_quickstart() -> Result<()> {
         println!("PATHS");
         println!("=====");
         println!();
-        println!("  Store \"{}\" (backend: {})", store.name, match store.backend {
-            BackendKind::Pijul => "pijul",
-            BackendKind::Jj => "jj",
-        });
+        println!(
+            "  Store \"{}\" (backend: {})",
+            store.name,
+            match store.backend {
+                BackendKind::Pijul => "pijul",
+                BackendKind::Jj => "jj",
+            }
+        );
         println!("    {}", store.path.display());
         if let Some(proj) = default_project {
             println!();
@@ -3586,7 +3793,11 @@ fn run_quickstart() -> Result<()> {
                 if let Some(kind_def) = schema.kinds.get(kind.as_str()) {
                     if let Some(status_field) = kind_def.fields.get("status") {
                         if !status_field.values.is_empty() {
-                            println!("  Statuses for {}: {}", kind, status_field.values.join(", "));
+                            println!(
+                                "  Statuses for {}: {}",
+                                kind,
+                                status_field.values.join(", ")
+                            );
                         }
                     }
                 }
@@ -3620,7 +3831,9 @@ fn run_quickstart() -> Result<()> {
                 if has_custom_templates {
                     println!("  Kind templates:");
                     for kind in &kinds {
-                        if let Some(path) = find_kind_template_path(&store.path, default_project, kind) {
+                        if let Some(path) =
+                            find_kind_template_path(&store.path, default_project, kind)
+                        {
                             println!("    {}: {}", kind, path.display());
                         } else {
                             println!("    {}: (builtin default)", kind);
