@@ -572,12 +572,45 @@ fn resolve_store_and_id(
     Ok((store, id_part.to_string()))
 }
 
-fn locate_doc(store: &Store, id: &str) -> Result<PathBuf> {
-    if parse_full_id(id).is_ok() {
-        return resolve_issue_path(&store.path, id);
+/// Resolve a rune ID spec to its store and file path.
+///
+/// Accepts all three forms:
+/// - `store:project-short` (fully qualified)
+/// - `project-short` (uses default store)
+/// - `short` (uses default store, tries default project first, then scans all projects)
+fn resolve_rune_id(
+    stores: &[Store],
+    user_config: &UserConfig,
+    cwd: &Path,
+    id_spec: &str,
+) -> Result<(Store, PathBuf)> {
+    let (store_hint, id_part) = split_store_prefix(id_spec);
+    if id_part.is_empty() {
+        return Err(Error::new("ID may not be empty"));
     }
-    find_short_id(&store.path, id)
+    let store = resolve_store_with_context(stores, user_config, cwd, store_hint.as_deref())?;
+    let path = if parse_full_id(id_part).is_ok() {
+        resolve_issue_path(&store.path, id_part)?
+    } else {
+        // Bare short ID: try default project first to avoid ambiguity
+        let mut found = None;
+        if let Some(default_spec) = user_config.default_project.as_deref() {
+            let project = split_store_prefix(default_spec).1;
+            if !project.is_empty() {
+                let full_id = format!("{project}-{id_part}");
+                if let Ok(path) = resolve_issue_path(&store.path, &full_id) {
+                    found = Some(path);
+                }
+            }
+        }
+        match found {
+            Some(path) => path,
+            None => find_short_id(&store.path, id_part)?,
+        }
+    };
+    Ok((store, path))
 }
+
 
 fn find_short_id(store_path: &Path, short: &str) -> Result<PathBuf> {
     let mut matches = Vec::new();
@@ -1589,8 +1622,7 @@ fn print_issue_table(rows: &[cache::CacheRow]) {
 
 fn run_show(args: ShowArgs) -> Result<()> {
     let (cfg, user_cfg, cwd) = load_context()?;
-    let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &args.id)?;
-    let path = locate_doc(&store, &id)?;
+    let (store, path) = resolve_rune_id(&cfg, &user_cfg, &cwd, &args.id)?;
     let content = if let Some(revision) = &args.revision {
         let rel_path = path
             .strip_prefix(&store.path)
@@ -2174,8 +2206,7 @@ fn run_edit(args: EditArgs) -> Result<()> {
         message,
     } = args;
     let (cfg, user_cfg, cwd) = load_context()?;
-    let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id)?;
-    let path = locate_doc(&store, &id)?;
+    let (store, path) = resolve_rune_id(&cfg, &user_cfg, &cwd, &id)?;
     let mut doc = parse_doc(&path)?;
     let original_doc = doc.clone();
     let original_title = doc.title.clone();
@@ -2196,7 +2227,7 @@ fn run_edit(args: EditArgs) -> Result<()> {
         ));
     }
     // Load schema for validation
-    let parsed_id = parse_full_id(&id)?;
+    let parsed_id = parse_full_id(&doc.id)?;
     let schema = load_schema(&store.path, Some(&parsed_id.project))?;
 
     if has_field_edits {
@@ -2308,8 +2339,7 @@ fn run_comment(args: CommentArgs) -> Result<()> {
         no_commit,
     } = args;
     let (cfg, user_cfg, cwd) = load_context()?;
-    let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id)?;
-    let path = locate_doc(&store, &id)?;
+    let (store, path) = resolve_rune_id(&cfg, &user_cfg, &cwd, &id)?;
     let mut doc = parse_doc(&path)?;
 
     // Get comment text from -m, -f, or editor
@@ -2435,12 +2465,11 @@ fn run_commit(args: CommitArgs) -> Result<()> {
     // Determine scope: specific rune, project directory, or entire store
     let (store, paths, scope_label) = if let Some(rune_id) = &target {
         // `runes commit <rune_id>` → commit a specific rune file
-        let (store_hint, id_part) = split_store_prefix(rune_id);
-        let s = resolve_store_with_context(&cfg, &user_cfg, &cwd, store_hint.as_deref())?;
-        let doc_path = locate_doc(&s, &id_part)?;
+        let (s, doc_path) = resolve_rune_id(&cfg, &user_cfg, &cwd, rune_id)?;
+        let doc = parse_doc(&doc_path)?;
         let rel = doc_path.strip_prefix(&s.path)
             .map_err(|e| Error::new(e.to_string()))?;
-        (s, vec![rel.to_path_buf()], id_part.to_string())
+        (s, vec![rel.to_path_buf()], doc.id)
     } else if let Some(store_name) = &store_flag {
         // `runes commit --store <name>` → commit all files in the entire store
         let s = resolve_store_with_context(&cfg, &user_cfg, &cwd, Some(store_name))?;
@@ -2524,12 +2553,11 @@ fn find_container_dir(project_root: &Path, full_id: &str) -> Result<PathBuf> {
 fn move_rune(
     from_store: &Store,
     to_store: &Store,
-    full_id: &str,
+    source_path: &Path,
     to_project: &str,
     to_parent: Option<&str>,
 ) -> Result<()> {
-    let source_path = locate_doc(from_store, full_id)?;
-    let source_doc = parse_doc(&source_path)?;
+    let source_doc = parse_doc(source_path)?;
     let parsed = parse_full_id(&source_doc.id)?;
     let file_name = source_path
         .file_name()
@@ -2574,19 +2602,20 @@ fn run_move(args: MoveArgs) -> Result<()> {
         message,
     } = args;
     let (cfg, user_cfg, cwd) = load_context()?;
-    let (from_store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id)?;
+    let (from_store, source_path) = resolve_rune_id(&cfg, &user_cfg, &cwd, &id)?;
+    let source_doc = parse_doc(&source_path)?;
     let (to_store, project) =
         resolve_store_and_project_required(&cfg, &user_cfg, &cwd, None, &target_project)?;
-    move_rune(&from_store, &to_store, &id, &project, parent.as_deref())?;
-    let move_msg = format!("Move {id} to {project}");
+    move_rune(&from_store, &to_store, &source_path, &project, parent.as_deref())?;
+    let move_msg = format!("Move {} to {project}", source_doc.id);
     if from_store.name == to_store.name {
         maybe_commit(&from_store, no_commit, message.as_deref(), &move_msg, &user_cfg, None)?;
     } else {
-        let move_in_msg = format!("Move in {id} from {}", from_store.name);
+        let move_in_msg = format!("Move in {} from {}", source_doc.id, from_store.name);
         maybe_commit(&to_store, no_commit, message.as_deref(), &move_in_msg, &user_cfg, None)?;
         // Commit the removal from the source store
         if !no_commit || message.is_some() {
-            let default_from_msg = format!("Move out {id} to {}", to_store.name);
+            let default_from_msg = format!("Move out {} to {}", source_doc.id, to_store.name);
             let from_msg = message.as_deref().unwrap_or(&default_from_msg);
             let (author_name, author_email) = resolve_commit_author(&user_cfg, None)?;
             commit_store_changes(&from_store, &[], from_msg, &author_name, &author_email)?;
@@ -2597,16 +2626,15 @@ fn run_move(args: MoveArgs) -> Result<()> {
 fn run_archive(args: ArchiveArgs) -> Result<()> {
     let ArchiveArgs { id, no_commit, message } = args;
     let (cfg, user_cfg, cwd) = load_context()?;
-    let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id)?;
-    archive_rune(&store, &id)?;
-    let default_msg = format!("Archive {id}");
+    let (store, path) = resolve_rune_id(&cfg, &user_cfg, &cwd, &id)?;
+    let doc = archive_rune(&store, &path)?;
+    let default_msg = format!("Archive {}", doc.id);
     maybe_commit(&store, no_commit, message.as_deref(), &default_msg, &user_cfg, None)?;
     Ok(())
 }
 
-fn archive_rune(store: &Store, id: &str) -> Result<()> {
-    let source_path = locate_doc(store, id)?;
-    let doc = parse_doc(&source_path)?;
+fn archive_rune(store: &Store, source_path: &Path) -> Result<RuneDoc> {
+    let doc = parse_doc(source_path)?;
     let parsed = parse_full_id(&doc.id)?;
     let project_root = store.path.join(&parsed.project);
     let archive_dir = project_root.join("_archive");
@@ -2632,9 +2660,9 @@ fn archive_rune(store: &Store, id: &str) -> Result<()> {
             .ok_or_else(|| Error::new("Invalid container path"))?;
         fs::rename(source_container, &target_path)?;
     } else {
-        fs::rename(&source_path, &target_path)?;
+        fs::rename(source_path, &target_path)?;
     }
-    Ok(())
+    Ok(doc)
 }
 fn run_delete(args: DeleteArgs) -> Result<()> {
     let DeleteArgs { id, force, no_commit, message } = args;
@@ -2642,16 +2670,15 @@ fn run_delete(args: DeleteArgs) -> Result<()> {
         return Err(Error::new("Use --force to delete runes"));
     }
     let (cfg, user_cfg, cwd) = load_context()?;
-    let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id)?;
-    delete_rune(&store, &id)?;
-    let default_msg = format!("Delete {id}");
+    let (store, path) = resolve_rune_id(&cfg, &user_cfg, &cwd, &id)?;
+    let doc = delete_rune(&store, &path)?;
+    let default_msg = format!("Delete {}", doc.id);
     maybe_commit(&store, no_commit, message.as_deref(), &default_msg, &user_cfg, None)?;
     Ok(())
 }
 
-fn delete_rune(store: &Store, id: &str) -> Result<()> {
-    let source_path = locate_doc(store, id)?;
-    let doc = parse_doc(&source_path)?;
+fn delete_rune(store: &Store, source_path: &Path) -> Result<RuneDoc> {
+    let doc = parse_doc(source_path)?;
     if doc.kind == "milestone" {
         let container = source_path
             .parent()
@@ -2666,7 +2693,7 @@ fn delete_rune(store: &Store, id: &str) -> Result<()> {
         .to_path_buf();
     backend::remove_path(store, &rel_path)?;
     println!("Deleted {}", doc.id);
-    Ok(())
+    Ok(doc)
 }
 fn format_log_timestamp(epoch_secs: i64) -> String {
     use std::time::{Duration, UNIX_EPOCH};
@@ -2890,8 +2917,7 @@ fn run_log(args: LogArgs) -> Result<()> {
 
     // If section is specified, use the section-diff logic
     if let (Some(rune_id), Some(section_raw)) = (&rune_filter, section) {
-        let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, rune_id)?;
-        let path = locate_doc(&store, &id)?;
+        let (store, path) = resolve_rune_id(&cfg, &user_cfg, &cwd, rune_id)?;
         let rel_path = path
             .strip_prefix(&store.path)
             .map_err(|e| Error::new(e.to_string()))?;
@@ -2942,8 +2968,7 @@ fn run_diff(args: DiffArgs) -> Result<()> {
         to,
     } = args;
     let (cfg, user_cfg, cwd) = load_context()?;
-    let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id)?;
-    let path = locate_doc(&store, &id)?;
+    let (store, path) = resolve_rune_id(&cfg, &user_cfg, &cwd, &id)?;
     let rel_path = path
         .strip_prefix(&store.path)
         .map_err(|e| Error::new(e.to_string()))?;
@@ -3054,8 +3079,7 @@ fn run_restore(args: RestoreArgs) -> Result<()> {
         message,
     } = args;
     let (cfg, user_cfg, cwd) = load_context()?;
-    let (store, id) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, &id)?;
-    let path = locate_doc(&store, &id)?;
+    let (store, path) = resolve_rune_id(&cfg, &user_cfg, &cwd, &id)?;
     let rel_path = path
         .strip_prefix(&store.path)
         .map_err(|e| Error::new(e.to_string()))?;
