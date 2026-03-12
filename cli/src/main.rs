@@ -1433,6 +1433,7 @@ fn run_list(args: ListArgs) -> Result<()> {
         .as_deref()
         .map(ListKind::parse)
         .unwrap_or(ListKind::Issues);
+    let mut kind_explicitly_set = kind_flag_present;
     let label_flag_present = !labels.is_empty();
     let mut filters = IssueFilters {
         project: project_proj,
@@ -1464,6 +1465,7 @@ fn run_list(args: ListArgs) -> Result<()> {
             if !kind_flag_present {
                 if let Some(kind_value) = &query_cfg.kind {
                     list_kind = ListKind::parse(kind_value);
+                    kind_explicitly_set = true;
                 }
             }
             if !archived && !with_archived {
@@ -1495,7 +1497,9 @@ fn run_list(args: ListArgs) -> Result<()> {
         }
     }
     filters.archived = archived_mode;
-    filters.kind = Some(list_kind.kind_name().to_string());
+    if kind_explicitly_set {
+        filters.kind = Some(list_kind.kind_name().to_string());
+    }
     let result = match list_kind {
         ListKind::Issues => {
             let rows = query_issues(&store, filters)?;
