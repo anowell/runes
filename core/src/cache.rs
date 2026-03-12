@@ -100,6 +100,7 @@ pub struct CacheRow {
     pub assignee: String,
     pub title: String,
     pub path: String,
+    pub labels: Vec<String>,
 }
 
 pub fn query_cache(store: &Store, where_clause: &str) -> Result<Vec<CacheRow>> {
@@ -108,7 +109,7 @@ pub fn query_cache(store: &Store, where_clause: &str) -> Result<Vec<CacheRow>> {
         rebuild_cache(store)?;
     }
     let sql = format!(
-        "SELECT id, project, kind, status, assignee, title, path FROM runes WHERE {} ORDER BY id;",
+        "SELECT id, project, kind, status, assignee, title, path, labels FROM runes WHERE {} ORDER BY id;",
         where_clause
     );
     let output = Command::new("sqlite3")
@@ -127,8 +128,14 @@ pub fn query_cache(store: &Store, where_clause: &str) -> Result<Vec<CacheRow>> {
     let stdout = String::from_utf8(output.stdout)?;
     let mut rows = Vec::new();
     for line in stdout.lines() {
-        let cols: Vec<&str> = line.splitn(7, '\t').collect();
-        if cols.len() >= 7 {
+        let cols: Vec<&str> = line.splitn(8, '\t').collect();
+        if cols.len() >= 8 {
+            let labels_str = cols[7];
+            let labels = if labels_str.is_empty() {
+                Vec::new()
+            } else {
+                labels_str.split(',').map(|s| s.to_string()).collect()
+            };
             rows.push(CacheRow {
                 id: cols[0].to_string(),
                 project: cols[1].to_string(),
@@ -137,6 +144,7 @@ pub fn query_cache(store: &Store, where_clause: &str) -> Result<Vec<CacheRow>> {
                 assignee: cols[4].to_string(),
                 title: cols[5].to_string(),
                 path: cols[6].to_string(),
+                labels,
             });
         }
     }

@@ -180,7 +180,7 @@ struct NewArgs {
     #[arg(long = "id")]
     id_override: Option<String>,
     /// Add a label (repeatable)
-    #[arg(long = "label")]
+    #[arg(short = 'l', long = "label")]
     labels: Vec<String>,
     /// Add a relation e.g. "blocks:runes-x1" (repeatable)
     #[arg(long = "relation")]
@@ -228,6 +228,9 @@ struct ListArgs {
     /// Include archived docs in results
     #[arg(long = "with-archived", conflicts_with = "archived")]
     with_archived: bool,
+    /// Filter by label (repeatable)
+    #[arg(short = 'l', long = "label")]
+    labels: Vec<String>,
     /// Output as JSON
     #[arg(long)]
     json: bool,
@@ -694,6 +697,7 @@ struct IssueFilters {
     statuses: Vec<String>,
     kind: Option<String>,
     assignee: Option<String>,
+    labels: Vec<String>,
     archived: ArchivedMode,
 }
 fn sql_escape(val: &str) -> String {
@@ -718,6 +722,15 @@ fn query_issues(store: &Store, filters: IssueFilters) -> Result<Vec<cache::Cache
     }
     if let Some(assignee) = filters.assignee {
         where_parts.push(format!("assignee='{}'", sql_escape(&assignee)));
+    }
+    for label in &filters.labels {
+        where_parts.push(format!(
+            "(labels='{}' OR labels LIKE '{},%' OR labels LIKE '%,{},%' OR labels LIKE '%,{}')",
+            sql_escape(label),
+            sql_escape(label),
+            sql_escape(label),
+            sql_escape(label),
+        ));
     }
     match filters.archived {
         ArchivedMode::Exclude => {
@@ -1391,6 +1404,7 @@ fn run_list(args: ListArgs) -> Result<()> {
         assignee,
         archived,
         with_archived,
+        labels,
         json,
     } = args;
     let mut archived_mode = if archived {
@@ -1419,6 +1433,7 @@ fn run_list(args: ListArgs) -> Result<()> {
         .as_deref()
         .map(ListKind::parse)
         .unwrap_or(ListKind::Issues);
+    let label_flag_present = !labels.is_empty();
     let mut filters = IssueFilters {
         project: project_proj,
         statuses: status
@@ -1427,6 +1442,7 @@ fn run_list(args: ListArgs) -> Result<()> {
             .unwrap_or_else(Vec::new),
         kind: None,
         assignee: assignee_filter,
+        labels,
         archived: archived_mode,
     };
     let query_name = view
@@ -1462,6 +1478,9 @@ fn run_list(args: ListArgs) -> Result<()> {
                     filters.assignee = user_cfg.resolve_user_alias(query_assignee);
                 }
             }
+            if !label_flag_present && !query_cfg.labels.is_empty() {
+                filters.labels = query_cfg.labels.clone();
+            }
         }
     }
     // Empty project means "any project" (overrides default_project)
@@ -1491,6 +1510,7 @@ fn run_list(args: ListArgs) -> Result<()> {
                         "path": row.path,
                         "status": row.status,
                         "assignee": if row.assignee.is_empty() { None } else { Some(&row.assignee) },
+                        "labels": row.labels,
                     })
                 }).collect();
                 println!("{}", serde_json::to_string_pretty(&json_rows).unwrap());
@@ -1631,42 +1651,78 @@ fn count_milestone_children(container: &Path) -> Result<(usize, usize, usize, us
     }
     Ok((total, done, in_progress, todo))
 }
+fn format_labels(labels: &[String], max: usize) -> String {
+    if labels.is_empty() {
+        return String::new();
+    }
+    let shown: Vec<&str> = labels.iter().take(max).map(|s| s.as_str()).collect();
+    let mut result = shown.join(",");
+    if labels.len() > max {
+        result.push_str(",...");
+    }
+    result
+}
+
 fn print_issue_table(rows: &[cache::CacheRow]) {
     if rows.is_empty() {
         return;
     }
+    let has_labels = rows.iter().any(|r| !r.labels.is_empty());
     // Calculate column widths
     let mut w_id = "id".len();
     let mut w_kind = "kind".len();
     let mut w_status = "status".len();
     let mut w_assignee = "assignee".len();
+    let mut w_labels = if has_labels { "labels".len() } else { 0 };
     let mut w_title = "title".len();
-    for row in rows {
+    let label_strs: Vec<String> = rows.iter().map(|r| format_labels(&r.labels, 3)).collect();
+    for (i, row) in rows.iter().enumerate() {
         w_id = w_id.max(row.id.len());
         w_kind = w_kind.max(row.kind.len());
         w_status = w_status.max(row.status.len());
         w_assignee = w_assignee.max(row.assignee.len());
+        if has_labels {
+            w_labels = w_labels.max(label_strs[i].len());
+        }
         w_title = w_title.max(row.title.len());
     }
     // Header
-    println!(
-        "{:<w_id$}  {:<w_kind$}  {:<w_status$}  {:<w_assignee$}  {:<w_title$}",
-        "id", "kind", "status", "assignee", "title"
-    );
-    println!(
-        "{:-<w_id$}  {:-<w_kind$}  {:-<w_status$}  {:-<w_assignee$}  {:-<w_title$}",
-        "", "", "", "", ""
-    );
-    for row in rows {
+    if has_labels {
+        println!(
+            "{:<w_id$}  {:<w_kind$}  {:<w_status$}  {:<w_assignee$}  {:<w_labels$}  {:<w_title$}",
+            "id", "kind", "status", "assignee", "labels", "title"
+        );
+        println!(
+            "{:-<w_id$}  {:-<w_kind$}  {:-<w_status$}  {:-<w_assignee$}  {:-<w_labels$}  {:-<w_title$}",
+            "", "", "", "", "", ""
+        );
+    } else {
+        println!(
+            "{:<w_id$}  {:<w_kind$}  {:<w_status$}  {:<w_assignee$}  {:<w_title$}",
+            "id", "kind", "status", "assignee", "title"
+        );
+        println!(
+            "{:-<w_id$}  {:-<w_kind$}  {:-<w_status$}  {:-<w_assignee$}  {:-<w_title$}",
+            "", "", "", "", ""
+        );
+    }
+    for (i, row) in rows.iter().enumerate() {
         let id = color::colored_id(&row.id);
         let status = color::status_color(&row.status);
         // Pad based on raw (uncolored) lengths
         let id_pad = w_id.saturating_sub(row.id.len());
         let status_pad = w_status.saturating_sub(row.status.len());
-        println!(
-            "{}{:id_pad$}  {:<w_kind$}  {}{:status_pad$}  {:<w_assignee$}  {:<w_title$}",
-            id, "", row.kind, status, "", row.assignee, row.title
-        );
+        if has_labels {
+            println!(
+                "{}{:id_pad$}  {:<w_kind$}  {}{:status_pad$}  {:<w_assignee$}  {:<w_labels$}  {:<w_title$}",
+                id, "", row.kind, status, "", row.assignee, label_strs[i], row.title
+            );
+        } else {
+            println!(
+                "{}{:id_pad$}  {:<w_kind$}  {}{:status_pad$}  {:<w_assignee$}  {:<w_title$}",
+                id, "", row.kind, status, "", row.assignee, row.title
+            );
+        }
     }
 }
 

@@ -41,6 +41,7 @@ pub struct QueryDefinition {
     pub kind: Option<String>,
     pub archived: Option<String>,
     pub assignee: Option<String>,
+    pub labels: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -616,6 +617,7 @@ fn parse_query_node(node: &KdlNode) -> QueryDefinition {
         kind: value_string(node, "kind"),
         archived: value_string(node, "archived"),
         assignee: value_string(node, "assignee"),
+        labels: collect_property_values(node, "label"),
     }
 }
 

@@ -174,8 +174,8 @@ fn parse_property_line(doc: &mut RuneDoc, trimmed: &str) -> bool {
             return true;
         }
     }
-    if trimmed.starts_with("labels ") {
-        doc.labels = extract_quoted_values(trimmed);
+    if trimmed.starts_with("label ") || trimmed.starts_with("labels ") {
+        doc.labels.extend(extract_quoted_values(trimmed));
         return true;
     }
     if trimmed.starts_with("milestone ") {
@@ -286,7 +286,7 @@ pub fn render_doc(doc: &RuneDoc) -> String {
         out.push_str(&format!("  assignee \"{assignee}\"\n"));
     }
     if !doc.labels.is_empty() {
-        out.push_str("  labels");
+        out.push_str("  label");
         for label in &doc.labels {
             out.push_str(&format!(" \"{label}\""));
         }
