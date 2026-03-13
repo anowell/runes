@@ -286,7 +286,7 @@ pub fn render_doc(doc: &RuneDoc) -> String {
         out.push_str(&format!("  assignee \"{assignee}\"\n"));
     }
     if !doc.labels.is_empty() {
-        out.push_str("  label");
+        out.push_str("  labels");
         for label in &doc.labels {
             out.push_str(&format!(" \"{label}\""));
         }

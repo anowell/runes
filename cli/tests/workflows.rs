@@ -108,7 +108,7 @@ fn jj_issue_lifecycle_and_cache_query() {
     }
 
     let home = unique_tmp_home("jj-lifecycle");
-    let store_path = home.join("stores").join("how");
+    let store_path = home.join(".runes").join("stores").join("test");
     let store_path_s = store_path.to_string_lossy().to_string();
 
     runes_ok(
@@ -116,7 +116,7 @@ fn jj_issue_lifecycle_and_cache_query() {
         &[
             "store",
             "init",
-            "how",
+            "test",
             "--backend",
             "jj",
             "--path",
@@ -129,7 +129,7 @@ fn jj_issue_lifecycle_and_cache_query() {
         &[
             "new",
             "--project",
-            "how:runes",
+            "test:runes",
             "Lock v1 schema and workflow",
         ],
     );
@@ -140,7 +140,7 @@ fn jj_issue_lifecycle_and_cache_query() {
         &home,
         &[
             "edit",
-            &format!("how:{issue_id}"),
+            &format!("test:{issue_id}"),
             "--title",
             "Lock Runes v1 schema and workflow",
             "--status",
@@ -150,7 +150,7 @@ fn jj_issue_lifecycle_and_cache_query() {
         ],
     );
 
-    let shown = runes_ok(&home, &["show", &format!("how:{issue_id}")]);
+    let shown = runes_ok(&home, &["show", &format!("test:{issue_id}")]);
     assert!(
         shown.contains("status \"in-progress\""),
         "status not updated"
@@ -166,7 +166,7 @@ fn jj_issue_lifecycle_and_cache_query() {
         &[
             "list",
             "--store",
-            "how",
+            "test",
             "--project",
             "runes",
             "--status",
@@ -176,13 +176,13 @@ fn jj_issue_lifecycle_and_cache_query() {
     assert!(listed.contains(&issue_id), "issue missing from cache query");
     assert!(listed.contains("Lock Runes v1 schema and workflow"));
 
-    let _issue_log = runes_ok(&home, &["log", &format!("how:{issue_id}"), "--limit", "5"]);
+    let _issue_log = runes_ok(&home, &["log", &format!("test:{issue_id}"), "--limit", "5"]);
 
     let section_log = runes_ok(
         &home,
         &[
             "log",
-            &format!("how:{issue_id}"),
+            &format!("test:{issue_id}"),
             "--limit",
             "10",
             "--section",
@@ -203,7 +203,7 @@ fn new_default_project_from_env_var() {
     }
 
     let home = unique_tmp_home("jj-env-project");
-    let store_path = home.join("stores").join("how");
+    let store_path = home.join(".runes").join("stores").join("test");
     let store_path_s = store_path.to_string_lossy().to_string();
 
     runes_ok(
@@ -211,7 +211,7 @@ fn new_default_project_from_env_var() {
         &[
             "store",
             "init",
-            "how",
+            "test",
             "--backend",
             "jj",
             "--path",
@@ -223,12 +223,12 @@ fn new_default_project_from_env_var() {
     let issue_output = runes_with_env(
         &home,
         &[("RUNES_PROJECT", "runes")],
-        &["new", "--store", "how", "Env var project"],
+        &["new", "--store", "test", "Env var project"],
     );
     let issue_id = last_line(&issue_output).to_string();
     assert!(issue_id.starts_with("runes-"));
 
-    let shown = runes_ok(&home, &["show", &format!("how:{issue_id}")]);
+    let shown = runes_ok(&home, &["show", &format!("test:{issue_id}")]);
     assert!(shown.contains("task \""));
 }
 
@@ -240,7 +240,7 @@ fn store_doctor_rebuilds_cache() {
     }
 
     let home = unique_tmp_home("jj-store-doctor");
-    let store_path = home.join("stores").join("how");
+    let store_path = home.join(".runes").join("stores").join("test");
     let store_path_s = store_path.to_string_lossy().to_string();
 
     runes_ok(
@@ -248,7 +248,7 @@ fn store_doctor_rebuilds_cache() {
         &[
             "store",
             "init",
-            "how",
+            "test",
             "--backend",
             "jj",
             "--path",
@@ -257,9 +257,9 @@ fn store_doctor_rebuilds_cache() {
         ],
     );
 
-    let doctor_output = runes_ok(&home, &["store", "doctor", "how"]);
+    let doctor_output = runes_ok(&home, &["store", "doctor", "test"]);
     assert!(
-        doctor_output.contains("Cache rebuilt for how"),
+        doctor_output.contains("Cache rebuilt for test"),
         "doctor output missing cache rebuild confirmation"
     );
 }
@@ -272,7 +272,7 @@ fn jj_milestone_hierarchy_and_progress() {
     }
 
     let home = unique_tmp_home("jj-milestones");
-    let store_path = home.join("stores").join("how");
+    let store_path = home.join(".runes").join("stores").join("test");
     let store_path_s = store_path.to_string_lossy().to_string();
 
     runes_ok(
@@ -280,7 +280,7 @@ fn jj_milestone_hierarchy_and_progress() {
         &[
             "store",
             "init",
-            "how",
+            "test",
             "--backend",
             "jj",
             "--path",
@@ -293,7 +293,7 @@ fn jj_milestone_hierarchy_and_progress() {
         &[
             "new",
             "--project",
-            "how:runes",
+            "test:runes",
             "Principles, schema, and bootstrap",
             "--id",
             "m01",
@@ -309,7 +309,7 @@ fn jj_milestone_hierarchy_and_progress() {
         &[
             "new",
             "--project",
-            "how:runes",
+            "test:runes",
             "Define core principles",
             "--parent",
             &milestone,
@@ -321,7 +321,7 @@ fn jj_milestone_hierarchy_and_progress() {
         &[
             "new",
             "--project",
-            "how:runes",
+            "test:runes",
             "Finalize schema examples",
             "--parent",
             &milestone,
@@ -330,10 +330,10 @@ fn jj_milestone_hierarchy_and_progress() {
 
     runes_ok(
         &home,
-        &["edit", &format!("how:{child1}"), "--status", "done"],
+        &["edit", &format!("test:{child1}"), "--status", "done"],
     );
 
-    let progress = runes_ok(&home, &["show", &format!("how:{milestone}")]);
+    let progress = runes_ok(&home, &["show", &format!("test:{milestone}")]);
     assert!(progress.contains("child_total=2"));
     assert!(progress.contains("child_done=1"));
     assert!(progress.contains("child_todo=1"));
@@ -347,7 +347,7 @@ fn milestone_list_and_project_progress() {
     }
 
     let home = unique_tmp_home("jj-milestone-list");
-    let store_path = home.join("stores").join("how");
+    let store_path = home.join(".runes").join("stores").join("test");
     let store_path_s = store_path.to_string_lossy().to_string();
 
     runes_ok(
@@ -355,7 +355,7 @@ fn milestone_list_and_project_progress() {
         &[
             "store",
             "init",
-            "how",
+            "test",
             "--backend",
             "jj",
             "--path",
@@ -368,7 +368,7 @@ fn milestone_list_and_project_progress() {
         &[
             "new",
             "--project",
-            "how:runes",
+            "test:runes",
             "Milestones for list test",
             "--id",
             "m02",
@@ -383,7 +383,7 @@ fn milestone_list_and_project_progress() {
         &[
             "list",
             "--store",
-            "how",
+            "test",
             "--project",
             "runes",
             "--kind",
@@ -392,7 +392,7 @@ fn milestone_list_and_project_progress() {
     );
     assert!(list_output.contains(&milestone));
 
-    let project_progress = runes_ok(&home, &["show", &format!("how:{milestone}")]);
+    let project_progress = runes_ok(&home, &["show", &format!("test:{milestone}")]);
     assert!(project_progress.contains("milestone \""));
     assert!(project_progress.contains(&milestone));
 }
@@ -424,14 +424,14 @@ fn pijul_issue_lifecycle_with_sdk_observability() {
         .join("pijul");
     copy_dir_recursive(&real_pijul, &test_pijul);
 
-    let store_path = home.join("stores").join("proj");
+    let store_path = home.join(".runes").join("stores").join("test-pijul");
     let store_path_s = store_path.to_string_lossy().to_string();
     runes_ok(
         &home,
         &[
             "store",
             "init",
-            "proj",
+            "test-pijul",
             "--backend",
             "pijul",
             "--path",
@@ -444,7 +444,7 @@ fn pijul_issue_lifecycle_with_sdk_observability() {
         &[
             "new",
             "--project",
-            "proj:runes",
+            "test-pijul:runes",
             "Validate libpijul-backed workflows",
         ],
     );
@@ -460,7 +460,7 @@ fn pijul_issue_lifecycle_with_sdk_observability() {
         );
     }
 
-    let issue_log = runes_output(&home, &["log", &format!("proj:{issue_id}"), "--limit", "5"]);
+    let issue_log = runes_output(&home, &["log", &format!("test-pijul:{issue_id}"), "--limit", "5"]);
     if !issue_log.status.success() {
         eprintln!(
             "runes log failed (expected for a watchless doc): {}",
@@ -496,14 +496,14 @@ fn pijul_cross_store_move_updates_both_stores() {
         .join("pijul");
     copy_dir_recursive(&real_pijul, &test_pijul);
 
-    let src_path = home.join("stores").join("src");
-    let dst_path = home.join("stores").join("dst");
+    let src_path = home.join(".runes").join("stores").join("test-src");
+    let dst_path = home.join(".runes").join("stores").join("test-dst");
     runes_ok(
         &home,
         &[
             "store",
             "init",
-            "src",
+            "test-src",
             "--backend",
             "pijul",
             "--path",
@@ -516,7 +516,7 @@ fn pijul_cross_store_move_updates_both_stores() {
         &[
             "store",
             "init",
-            "dst",
+            "test-dst",
             "--backend",
             "pijul",
             "--path",
@@ -525,24 +525,24 @@ fn pijul_cross_store_move_updates_both_stores() {
     );
     let issue_output = runes_ok(
         &home,
-        &["new", "--project", "src:runes", "Move me between stores"],
+        &["new", "--project", "test-src:runes", "Move me between stores"],
     );
     let issue_id = last_line(&issue_output).to_string();
     runes_ok(
         &home,
-        &["move", &format!("src:{issue_id}"), "--project", "dst:runes"],
+        &["move", &format!("test-src:{issue_id}"), "--project", "test-dst:runes"],
     );
 
-    let moved_doc = runes_ok(&home, &["show", &format!("dst:{issue_id}")]);
+    let moved_doc = runes_ok(&home, &["show", &format!("test-dst:{issue_id}")]);
     assert!(moved_doc.contains("Move me between stores"));
 
-    let source_show = runes_output(&home, &["show", &format!("src:{issue_id}")]);
+    let source_show = runes_output(&home, &["show", &format!("test-src:{issue_id}")]);
     assert!(
         !source_show.status.success(),
         "issue unexpectedly still present in source store"
     );
 
-    let dst_list = runes_ok(&home, &["list", "--store", "dst", "--project", "runes"]);
+    let dst_list = runes_ok(&home, &["list", "--store", "test-dst", "--project", "runes"]);
     assert!(dst_list.contains(&issue_id));
 }
 
@@ -550,14 +550,14 @@ fn pijul_cross_store_move_updates_both_stores() {
 
 fn setup_jj_store(test_name: &str) -> (PathBuf, String) {
     let home = unique_tmp_home(test_name);
-    let store_path = home.join("stores").join("tst");
+    let store_path = home.join(".runes").join("stores").join("test");
     let store_path_s = store_path.to_string_lossy().to_string();
     runes_ok(
         &home,
         &[
             "store",
             "init",
-            "tst",
+            "test",
             "--backend",
             "jj",
             "--path",
@@ -588,14 +588,14 @@ fn setup_pijul_store(test_name: &str) -> Option<(PathBuf, String)> {
         .join("Application Support")
         .join("pijul");
     copy_dir_recursive(&real_pijul, &test_pijul);
-    let store_path = home.join("stores").join("tst");
+    let store_path = home.join(".runes").join("stores").join("test");
     let store_path_s = store_path.to_string_lossy().to_string();
     runes_ok(
         &home,
         &[
             "store",
             "init",
-            "tst",
+            "test",
             "--backend",
             "pijul",
             "--path",
@@ -604,11 +604,6 @@ fn setup_pijul_store(test_name: &str) -> Option<(PathBuf, String)> {
         ],
     );
     Some((home, store_path_s))
-}
-
-fn runes_stderr(home: &Path, args: &[&str]) -> String {
-    let output = runes_output(home, args);
-    String::from_utf8(output.stderr).expect("stderr utf8")
 }
 
 /// Test: new rune → show has created_at/created_by, no extra annotations
@@ -621,10 +616,10 @@ fn jj_show_new_rune_has_created_metadata() {
     let (home, _) = setup_jj_store("jj-show-new");
     let id = last_line(&runes_ok(
         &home,
-        &["new", "--project", "tst:proj", "Test rune"],
+        &["new", "--project", "test:proj", "Test rune"],
     ))
     .to_string();
-    let shown = runes_ok(&home, &["show", &format!("tst:{id}")]);
+    let shown = runes_ok(&home, &["show", &format!("test:{id}")]);
     assert!(shown.contains("created_by"), "missing created_by: {shown}");
     assert!(shown.contains("created_at"), "missing created_at: {shown}");
     // No updated_at because it matches created
@@ -649,14 +644,14 @@ fn jj_show_comment_attribution() {
     let (home, _) = setup_jj_store("jj-comment-attr");
     let id = last_line(&runes_ok(
         &home,
-        &["new", "--project", "tst:proj", "Comment test"],
+        &["new", "--project", "test:proj", "Comment test"],
     ))
     .to_string();
     runes_ok(
         &home,
-        &["comment", &format!("tst:{id}"), "-m", "This is a comment"],
+        &["comment", &format!("test:{id}"), "-m", "This is a comment"],
     );
-    let shown = runes_ok(&home, &["show", &format!("tst:{id}")]);
+    let shown = runes_ok(&home, &["show", &format!("test:{id}")]);
     assert!(
         shown.contains("updated_at"),
         "missing updated_at after comment: {shown}"
@@ -672,7 +667,7 @@ fn jj_show_comment_attribution() {
     );
 }
 
-/// Test: new + edit design → section annotation appears
+/// Test: new + edit description → section annotation appears
 #[test]
 fn jj_show_section_edit_annotation() {
     if !command_exists("jj") {
@@ -682,20 +677,21 @@ fn jj_show_section_edit_annotation() {
     let (home, store_path) = setup_jj_store("jj-section-edit");
     let id = last_line(&runes_ok(
         &home,
-        &["new", "--project", "tst:proj", "Section test"],
+        &["new", "--project", "test:proj", "Section test"],
     ))
     .to_string();
-    // Edit the file directly to add content to Design section
+    // Edit the file directly to add content to Description section
     let store = Path::new(&store_path);
     let doc_path = find_rune_file(store, &id);
     let content = fs::read_to_string(&doc_path).expect("read doc");
-    let updated = content.replace("## Design\n", "## Design\n\nNew design content here.\n");
+    let updated =
+        content.replace("## Description\n", "## Description\n\nNew description content here.\n");
     fs::write(&doc_path, &updated).expect("write doc");
     runes_ok(
         &home,
-        &["commit", &format!("tst:{id}"), "-m", "Update design"],
+        &["commit", &format!("test:{id}"), "-m", "Update description"],
     );
-    let shown = runes_ok(&home, &["show", &format!("tst:{id}")]);
+    let shown = runes_ok(&home, &["show", &format!("test:{id}")]);
     assert!(
         shown.contains("Edited by"),
         "missing section annotation: {shown}"
@@ -712,10 +708,10 @@ fn jj_show_uncommitted_rune() {
     let (home, _) = setup_jj_store("jj-uncommitted");
     let id = last_line(&runes_ok(
         &home,
-        &["new", "--project", "tst:proj", "Uncommitted", "--no-commit"],
+        &["new", "--project", "test:proj", "Uncommitted", "--no-commit"],
     ))
     .to_string();
-    let shown = runes_ok(&home, &["show", &format!("tst:{id}")]);
+    let shown = runes_ok(&home, &["show", &format!("test:{id}")]);
     assert!(
         shown.contains("<not committed>"),
         "missing uncommitted indicator: {shown}"
@@ -732,16 +728,17 @@ fn jj_show_pending_section_changes() {
     let (home, store_path) = setup_jj_store("jj-pending");
     let id = last_line(&runes_ok(
         &home,
-        &["new", "--project", "tst:proj", "Pending test"],
+        &["new", "--project", "test:proj", "Pending test"],
     ))
     .to_string();
     let store = Path::new(&store_path);
     let doc_path = find_rune_file(store, &id);
-    // Edit Design section without committing
+    // Edit Description section without committing
     let content = fs::read_to_string(&doc_path).expect("read doc");
-    let updated = content.replace("## Design\n", "## Design\n\nUncommitted design change.\n");
+    let updated =
+        content.replace("## Description\n", "## Description\n\nUncommitted change.\n");
     fs::write(&doc_path, &updated).expect("write doc");
-    let shown = runes_ok(&home, &["show", &format!("tst:{id}")]);
+    let shown = runes_ok(&home, &["show", &format!("test:{id}")]);
     assert!(
         shown.contains("pending uncommitted changes"),
         "missing pending annotation: {shown}"
@@ -759,12 +756,12 @@ fn jj_log_uses_changed_files_not_description() {
     // Create two runes with --no-commit, then commit together
     let id1 = last_line(&runes_ok(
         &home,
-        &["new", "--project", "tst:proj", "Rune one", "--no-commit"],
+        &["new", "--project", "test:proj", "Rune one", "--no-commit"],
     ))
     .to_string();
     let id2 = last_line(&runes_ok(
         &home,
-        &["new", "--project", "tst:proj", "Rune two", "--no-commit"],
+        &["new", "--project", "test:proj", "Rune two", "--no-commit"],
     ))
     .to_string();
     runes_ok(
@@ -808,10 +805,10 @@ fn pijul_show_new_rune_has_created_metadata() {
     };
     let id = last_line(&runes_ok(
         &home,
-        &["new", "--project", "tst:proj", "Pijul test"],
+        &["new", "--project", "test:proj", "Pijul test"],
     ))
     .to_string();
-    let shown = runes_ok(&home, &["show", &format!("tst:{id}")]);
+    let shown = runes_ok(&home, &["show", &format!("test:{id}")]);
     assert!(shown.contains("created_by"), "missing created_by: {shown}");
     assert!(shown.contains("created_at"), "missing created_at: {shown}");
     assert!(
@@ -829,7 +826,7 @@ fn pijul_log_uses_changed_files() {
     };
     let id = last_line(&runes_ok(
         &home,
-        &["new", "--project", "tst:proj", "Pijul log test"],
+        &["new", "--project", "test:proj", "Pijul log test"],
     ))
     .to_string();
     let log_json = runes_ok(&home, &["log", "--all", "--json"]);
@@ -846,16 +843,16 @@ fn jj_rename_preserves_history() {
     let (home, _) = setup_jj_store("jj-rename");
     let id = last_line(&runes_ok(
         &home,
-        &["new", "--project", "tst:proj", "Original title"],
+        &["new", "--project", "test:proj", "Original title"],
     ))
     .to_string();
     // Edit the title which changes the filename slug
     runes_ok(
         &home,
-        &["edit", &format!("tst:{id}"), "--title", "Renamed title"],
+        &["edit", &format!("test:{id}"), "--title", "Renamed title"],
     );
     // Show still works with same ID after rename
-    let shown = runes_ok(&home, &["show", &format!("tst:{id}")]);
+    let shown = runes_ok(&home, &["show", &format!("test:{id}")]);
     assert!(
         shown.contains("Renamed title"),
         "title not updated: {shown}"
