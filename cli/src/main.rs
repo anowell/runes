@@ -1435,7 +1435,38 @@ fn run_list(args: ListArgs) -> Result<()> {
     }
     let result = match list_kind {
         ListKind::Issues => {
-            let rows = cache::query_cache(&store, &filters)?;
+            let mut rows = cache::query_cache(&store, &filters)?;
+            // Determine which runes have uncommitted changes
+            let uncommitted_paths: std::collections::HashSet<String> =
+                backend::uncommitted_rune_paths(&store)
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|p| {
+                        p.strip_prefix(&store.path)
+                            .ok()
+                            .map(|rel| rel.display().to_string())
+                    })
+                    .collect();
+            let uncommitted_ids: std::collections::HashSet<String> = rows
+                .iter()
+                .filter(|r| uncommitted_paths.contains(&r.path))
+                .map(|r| r.id.clone())
+                .collect();
+            // Sort: uncommitted first, then by updated DESC (nulls last)
+            rows.sort_by(|a, b| {
+                let a_uncommitted = uncommitted_ids.contains(&a.id);
+                let b_uncommitted = uncommitted_ids.contains(&b.id);
+                match (a_uncommitted, b_uncommitted) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => match (b.updated, a.updated) {
+                        (Some(b_ts), Some(a_ts)) => b_ts.cmp(&a_ts),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => a.id.cmp(&b.id),
+                    },
+                }
+            });
             if json {
                 let json_rows: Vec<serde_json::Value> = rows.iter().map(|row| {
                     serde_json::json!({
@@ -1448,11 +1479,13 @@ fn run_list(args: ListArgs) -> Result<()> {
                         "status": row.status,
                         "assignee": if row.assignee.is_empty() { None } else { Some(&row.assignee) },
                         "labels": row.labels,
+                        "updated": row.updated,
+                        "uncommitted": uncommitted_ids.contains(&row.id),
                     })
                 }).collect();
                 println!("{}", serde_json::to_string_pretty(&json_rows).unwrap());
             } else {
-                print_issue_table(&rows);
+                print_issue_table(&rows, &uncommitted_ids);
             }
             Ok(())
         }
@@ -1600,12 +1633,45 @@ fn format_labels(labels: &[String], max: usize) -> String {
     result
 }
 
-fn print_issue_table(rows: &[cache::CacheRow]) {
+fn format_updated(updated: Option<i64>, is_uncommitted: bool) -> String {
+    if is_uncommitted && updated.is_none() {
+        return "(draft)".to_string();
+    }
+    match updated {
+        Some(epoch_secs) => {
+            use jiff::Timestamp;
+            let Ok(ts) = Timestamp::from_second(epoch_secs) else {
+                return String::new();
+            };
+            let zdt = ts.to_zoned(jiff::tz::TimeZone::system());
+            zdt.strftime("%b %d %H:%M").to_string()
+        }
+        None => String::new(),
+    }
+}
+
+fn print_issue_table(rows: &[cache::CacheRow], uncommitted_ids: &std::collections::HashSet<String>) {
     if rows.is_empty() {
         return;
     }
     let has_labels = rows.iter().any(|r| !r.labels.is_empty());
+    // Build display strings
+    let updated_strs: Vec<String> = rows
+        .iter()
+        .map(|r| format_updated(r.updated, uncommitted_ids.contains(&r.id)))
+        .collect();
+    let id_strs: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            if uncommitted_ids.contains(&r.id) {
+                format!("{} *", r.id)
+            } else {
+                r.id.clone()
+            }
+        })
+        .collect();
     // Calculate column widths
+    let mut w_updated = "updated".len();
     let mut w_id = "id".len();
     let mut w_kind = "kind".len();
     let mut w_status = "status".len();
@@ -1614,7 +1680,8 @@ fn print_issue_table(rows: &[cache::CacheRow]) {
     let mut w_title = "title".len();
     let label_strs: Vec<String> = rows.iter().map(|r| format_labels(&r.labels, 3)).collect();
     for (i, row) in rows.iter().enumerate() {
-        w_id = w_id.max(row.id.len());
+        w_updated = w_updated.max(updated_strs[i].len());
+        w_id = w_id.max(id_strs[i].len());
         w_kind = w_kind.max(row.kind.len());
         w_status = w_status.max(row.status.len());
         w_assignee = w_assignee.max(row.assignee.len());
@@ -1626,38 +1693,44 @@ fn print_issue_table(rows: &[cache::CacheRow]) {
     // Header
     if has_labels {
         println!(
-            "{:<w_id$}  {:<w_kind$}  {:<w_status$}  {:<w_assignee$}  {:<w_labels$}  {:<w_title$}",
-            "id", "kind", "status", "assignee", "labels", "title"
+            "{:<w_updated$}  {:<w_id$}  {:<w_kind$}  {:<w_status$}  {:<w_assignee$}  {:<w_labels$}  {:<w_title$}",
+            "updated", "id", "kind", "status", "assignee", "labels", "title"
         );
         println!(
-            "{:-<w_id$}  {:-<w_kind$}  {:-<w_status$}  {:-<w_assignee$}  {:-<w_labels$}  {:-<w_title$}",
-            "", "", "", "", "", ""
+            "{:-<w_updated$}  {:-<w_id$}  {:-<w_kind$}  {:-<w_status$}  {:-<w_assignee$}  {:-<w_labels$}  {:-<w_title$}",
+            "", "", "", "", "", "", ""
         );
     } else {
         println!(
-            "{:<w_id$}  {:<w_kind$}  {:<w_status$}  {:<w_assignee$}  {:<w_title$}",
-            "id", "kind", "status", "assignee", "title"
+            "{:<w_updated$}  {:<w_id$}  {:<w_kind$}  {:<w_status$}  {:<w_assignee$}  {:<w_title$}",
+            "updated", "id", "kind", "status", "assignee", "title"
         );
         println!(
-            "{:-<w_id$}  {:-<w_kind$}  {:-<w_status$}  {:-<w_assignee$}  {:-<w_title$}",
-            "", "", "", "", ""
+            "{:-<w_updated$}  {:-<w_id$}  {:-<w_kind$}  {:-<w_status$}  {:-<w_assignee$}  {:-<w_title$}",
+            "", "", "", "", "", ""
         );
     }
     for (i, row) in rows.iter().enumerate() {
-        let id = color::colored_id(&row.id);
+        let updated_display = color::gray(&format!("{:<w_updated$}", updated_strs[i]));
+        let id_display = if uncommitted_ids.contains(&row.id) {
+            let colored = color::colored_id(&row.id);
+            format!("{} {}", colored, color::yellow("*"))
+        } else {
+            color::colored_id(&row.id)
+        };
         let status = color::status_color(&row.status);
         // Pad based on raw (uncolored) lengths
-        let id_pad = w_id.saturating_sub(row.id.len());
+        let id_pad = w_id.saturating_sub(id_strs[i].len());
         let status_pad = w_status.saturating_sub(row.status.len());
         if has_labels {
             println!(
-                "{}{:id_pad$}  {:<w_kind$}  {}{:status_pad$}  {:<w_assignee$}  {:<w_labels$}  {:<w_title$}",
-                id, "", row.kind, status, "", row.assignee, label_strs[i], row.title
+                "{}  {}{:id_pad$}  {:<w_kind$}  {}{:status_pad$}  {:<w_assignee$}  {:<w_labels$}  {:<w_title$}",
+                updated_display, id_display, "", row.kind, status, "", row.assignee, label_strs[i], row.title
             );
         } else {
             println!(
-                "{}{:id_pad$}  {:<w_kind$}  {}{:status_pad$}  {:<w_assignee$}  {:<w_title$}",
-                id, "", row.kind, status, "", row.assignee, row.title
+                "{}  {}{:id_pad$}  {:<w_kind$}  {}{:status_pad$}  {:<w_assignee$}  {:<w_title$}",
+                updated_display, id_display, "", row.kind, status, "", row.assignee, row.title
             );
         }
     }

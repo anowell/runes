@@ -1,7 +1,9 @@
+use crate::backend;
 use crate::config::Store;
 use crate::model::{discover_project_docs, parse_doc};
 use crate::{Error, Result};
 use rusqlite::{params, Connection};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,7 +62,8 @@ pub fn rebuild_cache(store: &Store) -> Result<()> {
            assignee TEXT,
            title TEXT NOT NULL,
            path TEXT NOT NULL,
-           labels TEXT NOT NULL
+           labels TEXT NOT NULL,
+           updated INTEGER
          );
          CREATE INDEX idx_runes_project ON runes(project);
          CREATE INDEX idx_runes_status ON runes(status);
@@ -111,6 +114,21 @@ pub fn rebuild_cache(store: &Store) -> Result<()> {
         }
     }
     tx.commit()?;
+
+    // Populate updated timestamps from VCS log
+    if let Ok(entries) = backend::rich_log(store, 10000) {
+        let mut ts_map: HashMap<String, i64> = HashMap::new();
+        for entry in &entries {
+            for file in &entry.changed_files {
+                ts_map.entry(file.clone()).or_insert(entry.timestamp);
+            }
+        }
+        let mut stmt = conn.prepare("UPDATE runes SET updated = ?1 WHERE path = ?2")?;
+        for (path, ts) in &ts_map {
+            stmt.execute(params![ts, path])?;
+        }
+    }
+
     Ok(())
 }
 
@@ -124,6 +142,7 @@ pub struct CacheRow {
     pub title: String,
     pub path: String,
     pub labels: Vec<String>,
+    pub updated: Option<i64>,
 }
 
 pub fn query_cache(store: &Store, filter: &CacheFilter) -> Result<Vec<CacheRow>> {
@@ -189,7 +208,7 @@ pub fn query_cache(store: &Store, filter: &CacheFilter) -> Result<Vec<CacheRow>>
     };
 
     let sql = format!(
-        "SELECT id, project, kind, status, assignee, title, path, labels FROM runes WHERE {} ORDER BY id",
+        "SELECT id, project, kind, status, assignee, title, path, labels, updated FROM runes WHERE {} ORDER BY updated DESC NULLS LAST, id",
         where_clause
     );
 
@@ -211,6 +230,7 @@ pub fn query_cache(store: &Store, filter: &CacheFilter) -> Result<Vec<CacheRow>>
             title: row.get(5)?,
             path: row.get(6)?,
             labels,
+            updated: row.get(8)?,
         })
     })?;
 
