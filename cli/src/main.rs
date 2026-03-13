@@ -675,75 +675,8 @@ impl ListKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ArchivedMode {
-    Exclude,
-    Only,
-    Include,
-}
+use runes_core::cache::{ArchivedMode, CacheFilter};
 
-impl ArchivedMode {
-    fn from_keyword(value: &str) -> Option<Self> {
-        match value.to_lowercase().as_str() {
-            "only" | "archived-only" => Some(ArchivedMode::Only),
-            "archived" | "include" | "with-archived" => Some(ArchivedMode::Include),
-            "exclude" | "open" | "active" => Some(ArchivedMode::Exclude),
-            _ => None,
-        }
-    }
-}
-struct IssueFilters {
-    project: Option<String>,
-    statuses: Vec<String>,
-    kind: Option<String>,
-    assignee: Option<String>,
-    labels: Vec<String>,
-    archived: ArchivedMode,
-}
-fn sql_escape(val: &str) -> String {
-    val.replace('\'', "''")
-}
-
-fn query_issues(store: &Store, filters: IssueFilters) -> Result<Vec<cache::CacheRow>> {
-    let mut where_parts = vec!["1=1".to_string()];
-    if let Some(project) = filters.project {
-        where_parts.push(format!("project='{}'", sql_escape(&project)));
-    }
-    if !filters.statuses.is_empty() {
-        let quoted: Vec<String> = filters
-            .statuses
-            .iter()
-            .map(|status| format!("'{}'", sql_escape(status)))
-            .collect();
-        where_parts.push(format!("status IN ({})", quoted.join(",")));
-    }
-    if let Some(kind) = filters.kind {
-        where_parts.push(format!("kind='{}'", sql_escape(&kind)));
-    }
-    if let Some(assignee) = filters.assignee {
-        where_parts.push(format!("assignee='{}'", sql_escape(&assignee)));
-    }
-    for label in &filters.labels {
-        where_parts.push(format!(
-            "(labels='{}' OR labels LIKE '{},%' OR labels LIKE '%,{},%' OR labels LIKE '%,{}')",
-            sql_escape(label),
-            sql_escape(label),
-            sql_escape(label),
-            sql_escape(label),
-        ));
-    }
-    match filters.archived {
-        ArchivedMode::Exclude => {
-            where_parts.push("path NOT LIKE '%/_archive/%'".to_string());
-        }
-        ArchivedMode::Only => {
-            where_parts.push("path LIKE '%/_archive/%'".to_string());
-        }
-        ArchivedMode::Include => {}
-    }
-    let where_clause = where_parts.join(" AND ");
-    cache::query_cache(store, &where_clause)
-}
 fn parse_relations(relations: &[String]) -> Result<Vec<(String, String)>> {
     let mut parsed = Vec::new();
     for rel in relations {
@@ -1435,7 +1368,7 @@ fn run_list(args: ListArgs) -> Result<()> {
         .unwrap_or(ListKind::Issues);
     let mut kind_explicitly_set = kind_flag_present;
     let label_flag_present = !labels.is_empty();
-    let mut filters = IssueFilters {
+    let mut filters = CacheFilter {
         project: project_proj,
         statuses: status
             .as_ref()
@@ -1444,7 +1377,7 @@ fn run_list(args: ListArgs) -> Result<()> {
         kind: None,
         assignee: assignee_filter,
         labels,
-        archived: archived_mode,
+        archived: Some(archived_mode),
     };
     let query_name = view
         .or(query)
@@ -1496,13 +1429,13 @@ fn run_list(args: ListArgs) -> Result<()> {
             }
         }
     }
-    filters.archived = archived_mode;
+    filters.archived = Some(archived_mode);
     if kind_explicitly_set {
         filters.kind = Some(list_kind.kind_name().to_string());
     }
     let result = match list_kind {
         ListKind::Issues => {
-            let rows = query_issues(&store, filters)?;
+            let rows = cache::query_cache(&store, &filters)?;
             if json {
                 let json_rows: Vec<serde_json::Value> = rows.iter().map(|row| {
                     serde_json::json!({

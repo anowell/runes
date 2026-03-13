@@ -42,3 +42,9 @@ impl From<std::string::FromUtf8Error> for Error {
         Self::new(value.to_string())
     }
 }
+
+impl From<rusqlite::Error> for Error {
+    fn from(value: rusqlite::Error) -> Self {
+        Self::new(value.to_string())
+    }
+}

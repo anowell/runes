@@ -102,8 +102,8 @@ fn copy_dir_recursive(from: &Path, to: &Path) {
 
 #[test]
 fn jj_issue_lifecycle_and_cache_query() {
-    if !command_exists("jj") || !command_exists("sqlite3") {
-        eprintln!("skipping: jj/sqlite3 not installed");
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
         return;
     }
 
@@ -197,8 +197,8 @@ fn jj_issue_lifecycle_and_cache_query() {
 
 #[test]
 fn new_default_project_from_env_var() {
-    if !command_exists("jj") || !command_exists("sqlite3") {
-        eprintln!("skipping: jj/sqlite3 not installed");
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
         return;
     }
 
@@ -234,8 +234,8 @@ fn new_default_project_from_env_var() {
 
 #[test]
 fn store_doctor_rebuilds_cache() {
-    if !command_exists("jj") || !command_exists("sqlite3") {
-        eprintln!("skipping: jj/sqlite3 not installed");
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
         return;
     }
 
@@ -266,8 +266,8 @@ fn store_doctor_rebuilds_cache() {
 
 #[test]
 fn jj_milestone_hierarchy_and_progress() {
-    if !command_exists("jj") || !command_exists("sqlite3") {
-        eprintln!("skipping: jj/sqlite3 not installed");
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
         return;
     }
 
@@ -341,8 +341,8 @@ fn jj_milestone_hierarchy_and_progress() {
 
 #[test]
 fn milestone_list_and_project_progress() {
-    if !command_exists("jj") || !command_exists("sqlite3") {
-        eprintln!("skipping: jj/sqlite3 not installed");
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
         return;
     }
 
@@ -399,8 +399,8 @@ fn milestone_list_and_project_progress() {
 
 #[test]
 fn pijul_issue_lifecycle_with_sdk_observability() {
-    if !command_exists("pijul") || !command_exists("sqlite3") {
-        eprintln!("skipping: pijul/sqlite3 not installed");
+    if !command_exists("pijul") {
+        eprintln!("skipping: pijul not installed");
         return;
     }
 
@@ -471,8 +471,8 @@ fn pijul_issue_lifecycle_with_sdk_observability() {
 
 #[test]
 fn pijul_cross_store_move_updates_both_stores() {
-    if !command_exists("pijul") || !command_exists("sqlite3") {
-        eprintln!("skipping: pijul/sqlite3 not installed");
+    if !command_exists("pijul") {
+        eprintln!("skipping: pijul not installed");
         return;
     }
 
@@ -614,8 +614,8 @@ fn runes_stderr(home: &Path, args: &[&str]) -> String {
 /// Test: new rune → show has created_at/created_by, no extra annotations
 #[test]
 fn jj_show_new_rune_has_created_metadata() {
-    if !command_exists("jj") || !command_exists("sqlite3") {
-        eprintln!("skipping: jj/sqlite3 not installed");
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
         return;
     }
     let (home, _) = setup_jj_store("jj-show-new");
@@ -642,8 +642,8 @@ fn jj_show_new_rune_has_created_metadata() {
 /// Test: new + comment → log shows 2 entries, comment has attribution
 #[test]
 fn jj_show_comment_attribution() {
-    if !command_exists("jj") || !command_exists("sqlite3") {
-        eprintln!("skipping: jj/sqlite3 not installed");
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
         return;
     }
     let (home, _) = setup_jj_store("jj-comment-attr");
@@ -675,8 +675,8 @@ fn jj_show_comment_attribution() {
 /// Test: new + edit design → section annotation appears
 #[test]
 fn jj_show_section_edit_annotation() {
-    if !command_exists("jj") || !command_exists("sqlite3") {
-        eprintln!("skipping: jj/sqlite3 not installed");
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
         return;
     }
     let (home, store_path) = setup_jj_store("jj-section-edit");
@@ -705,8 +705,8 @@ fn jj_show_section_edit_annotation() {
 /// Test: show uncommitted rune has red "<not committed>"
 #[test]
 fn jj_show_uncommitted_rune() {
-    if !command_exists("jj") || !command_exists("sqlite3") {
-        eprintln!("skipping: jj/sqlite3 not installed");
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
         return;
     }
     let (home, _) = setup_jj_store("jj-uncommitted");
@@ -725,8 +725,8 @@ fn jj_show_uncommitted_rune() {
 /// Test: show pending changes on a section
 #[test]
 fn jj_show_pending_section_changes() {
-    if !command_exists("jj") || !command_exists("sqlite3") {
-        eprintln!("skipping: jj/sqlite3 not installed");
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
         return;
     }
     let (home, store_path) = setup_jj_store("jj-pending");
@@ -751,8 +751,8 @@ fn jj_show_pending_section_changes() {
 /// Test: log associates runes via changed_files, not description
 #[test]
 fn jj_log_uses_changed_files_not_description() {
-    if !command_exists("jj") || !command_exists("sqlite3") {
-        eprintln!("skipping: jj/sqlite3 not installed");
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
         return;
     }
     let (home, _) = setup_jj_store("jj-log-files");
@@ -802,10 +802,6 @@ fn jj_log_uses_changed_files_not_description() {
 /// Test: pijul - new rune show has created metadata
 #[test]
 fn pijul_show_new_rune_has_created_metadata() {
-    if !command_exists("sqlite3") {
-        eprintln!("skipping: sqlite3 not installed");
-        return;
-    }
     let (home, _) = match setup_pijul_store("pijul-show-new") {
         Some(v) => v,
         None => return,
@@ -827,10 +823,6 @@ fn pijul_show_new_rune_has_created_metadata() {
 /// Test: pijul - log uses changed_files
 #[test]
 fn pijul_log_uses_changed_files() {
-    if !command_exists("sqlite3") {
-        eprintln!("skipping: sqlite3 not installed");
-        return;
-    }
     let (home, _) = match setup_pijul_store("pijul-log-files") {
         Some(v) => v,
         None => return,
@@ -847,8 +839,8 @@ fn pijul_log_uses_changed_files() {
 /// Test: rename preserves basic show functionality (file is findable by ID after rename)
 #[test]
 fn jj_rename_preserves_history() {
-    if !command_exists("jj") || !command_exists("sqlite3") {
-        eprintln!("skipping: jj/sqlite3 not installed");
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
         return;
     }
     let (home, _) = setup_jj_store("jj-rename");

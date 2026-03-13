@@ -6,6 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+rusqlite = { version = "0.35", features = ["bundled"] }
 jj-lib = "0.38.0"
 libpijul = "1.0.0-beta.11"
 anyhow = "1.0.102"
