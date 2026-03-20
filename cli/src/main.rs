@@ -185,6 +185,9 @@ struct NewArgs {
     /// Add a relation e.g. "blocks:runes-x1" (repeatable)
     #[arg(long = "relation")]
     relations: Vec<String>,
+    /// Add a dependency (repeatable)
+    #[arg(long = "dep")]
+    deps: Vec<String>,
     /// Replace body from file (use - for stdin)
     #[arg(short = 'f', long = "file")]
     file: Option<PathBuf>,
@@ -231,6 +234,18 @@ struct ListArgs {
     /// Filter by label (repeatable)
     #[arg(short = 'l', long = "label")]
     labels: Vec<String>,
+    /// Show only blocked runes (have unresolved deps)
+    #[arg(long, conflicts_with = "ready")]
+    blocked: bool,
+    /// Show only ready runes (no unresolved deps)
+    #[arg(long, conflicts_with = "blocked")]
+    ready: bool,
+    /// Show runes blocked by a specific rune ID
+    #[arg(long = "blocked-by")]
+    blocked_by: Option<String>,
+    /// Show runes that block a specific rune ID
+    #[arg(long)]
+    blocks: Option<String>,
     /// Output as JSON
     #[arg(long)]
     json: bool,
@@ -276,6 +291,12 @@ struct EditArgs {
     /// Remove a relation (repeatable)
     #[arg(long = "remove-relation")]
     remove_relations: Vec<String>,
+    /// Add a dependency (repeatable)
+    #[arg(long = "dep")]
+    add_deps: Vec<String>,
+    /// Remove a dependency (repeatable)
+    #[arg(long = "remove-dep")]
+    remove_deps: Vec<String>,
     /// Replace body from file (use - for stdin)
     #[arg(short = 'f', long = "file")]
     file: Option<PathBuf>,
@@ -793,6 +814,10 @@ fn edit_change_snippets(old: &RuneDoc, new: &RuneDoc) -> Vec<String> {
     if old.relations != new.relations {
         snippets.push("relations".to_string());
     }
+    // Dep changes
+    if old.deps != new.deps {
+        snippets.push("deps".to_string());
+    }
     // Body/section changes — detect which sections changed
     let old_sections = body_section_names(&old.body);
     let new_sections = body_section_names(&new.body);
@@ -1000,6 +1025,7 @@ fn create_rune(
     milestone: Option<&str>,
     labels: &[String],
     relations: &[(String, String)],
+    deps: &[String],
     assignee: Option<&str>,
     short_override: Option<&str>,
 ) -> Result<(String, PathBuf)> {
@@ -1030,6 +1056,7 @@ fn create_rune(
     doc.status = status.to_string();
     doc.labels = labels.to_vec();
     doc.relations = relations.to_vec();
+    doc.deps = deps.to_vec();
     if let Some(assignee_value) = assignee {
         doc.assignee = Some(assignee_value.to_string());
     }
@@ -1080,6 +1107,7 @@ fn run_new(args: NewArgs) -> Result<()> {
         id_override,
         labels,
         relations,
+        deps,
         file,
         edit,
         no_commit,
@@ -1154,6 +1182,7 @@ fn run_new(args: NewArgs) -> Result<()> {
             milestone.as_deref(),
             &combined_labels,
             &relations,
+            &deps,
             resolved_assignee.as_deref(),
             id_override.as_deref(),
         )?
@@ -1338,6 +1367,10 @@ fn run_list(args: ListArgs) -> Result<()> {
         archived,
         with_archived,
         labels,
+        blocked,
+        ready,
+        blocked_by,
+        blocks,
         json,
     } = args;
     let mut archived_mode = if archived {
@@ -1368,6 +1401,13 @@ fn run_list(args: ListArgs) -> Result<()> {
         .unwrap_or(ListKind::Issues);
     let mut kind_explicitly_set = kind_flag_present;
     let label_flag_present = !labels.is_empty();
+    let blocked_filter = if blocked {
+        Some(true)
+    } else if ready {
+        Some(false)
+    } else {
+        None
+    };
     let mut filters = CacheFilter {
         project: project_proj,
         statuses: status
@@ -1378,6 +1418,9 @@ fn run_list(args: ListArgs) -> Result<()> {
         assignee: assignee_filter,
         labels,
         archived: Some(archived_mode),
+        blocked: blocked_filter,
+        blocked_by,
+        blocks,
     };
     let query_name = view
         .or(query)
@@ -1416,6 +1459,16 @@ fn run_list(args: ListArgs) -> Result<()> {
             if !label_flag_present && !query_cfg.labels.is_empty() {
                 filters.labels = query_cfg.labels.clone();
             }
+            // Apply blocked/blocks/blocked-by from query if not set by CLI flags
+            if filters.blocked.is_none() {
+                filters.blocked = query_cfg.blocked;
+            }
+            if filters.blocks.is_none() {
+                filters.blocks = query_cfg.blocks.clone();
+            }
+            if filters.blocked_by.is_none() {
+                filters.blocked_by = query_cfg.blocked_by.clone();
+            }
         }
     }
     // Empty project means "any project" (overrides default_project)
@@ -1432,6 +1485,23 @@ fn run_list(args: ListArgs) -> Result<()> {
     filters.archived = Some(archived_mode);
     if kind_explicitly_set {
         filters.kind = Some(list_kind.kind_name().to_string());
+    }
+    // For --ready, add non-terminal status filter if no explicit statuses set
+    if filters.blocked == Some(false) && filters.statuses.is_empty() {
+        let project_for_schema = filters.project.as_deref();
+        if let Ok(schema) = load_schema(&store.path, project_for_schema) {
+            let kind_name = filters.kind.as_deref().unwrap_or("task");
+            let terminal = schema.terminal_statuses_for_kind(kind_name);
+            let all_statuses = schema.statuses_for_kind(kind_name);
+            let non_terminal: Vec<String> = all_statuses
+                .iter()
+                .filter(|s| !terminal.contains(s))
+                .cloned()
+                .collect();
+            if !non_terminal.is_empty() {
+                filters.statuses = non_terminal;
+            }
+        }
     }
     let result = match list_kind {
         ListKind::Issues => {
@@ -1481,6 +1551,7 @@ fn run_list(args: ListArgs) -> Result<()> {
                         "labels": row.labels,
                         "updated": row.updated,
                         "uncommitted": uncommitted_ids.contains(&row.id),
+                        "blocked": row.blocked,
                     })
                 }).collect();
                 println!("{}", serde_json::to_string_pretty(&json_rows).unwrap());
@@ -1650,11 +1721,15 @@ fn format_updated(updated: Option<i64>, is_uncommitted: bool) -> String {
     }
 }
 
-fn print_issue_table(rows: &[cache::CacheRow], uncommitted_ids: &std::collections::HashSet<String>) {
+fn print_issue_table(
+    rows: &[cache::CacheRow],
+    uncommitted_ids: &std::collections::HashSet<String>,
+) {
     if rows.is_empty() {
         return;
     }
     let has_labels = rows.iter().any(|r| !r.labels.is_empty());
+    let _has_blocked = rows.iter().any(|r| r.blocked);
     // Build display strings
     let updated_strs: Vec<String> = rows
         .iter()
@@ -1667,6 +1742,16 @@ fn print_issue_table(rows: &[cache::CacheRow], uncommitted_ids: &std::collection
                 format!("{} *", r.id)
             } else {
                 r.id.clone()
+            }
+        })
+        .collect();
+    let status_strs: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            if r.blocked {
+                format!("{} [blocked]", r.status)
+            } else {
+                r.status.clone()
             }
         })
         .collect();
@@ -1683,7 +1768,7 @@ fn print_issue_table(rows: &[cache::CacheRow], uncommitted_ids: &std::collection
         w_updated = w_updated.max(updated_strs[i].len());
         w_id = w_id.max(id_strs[i].len());
         w_kind = w_kind.max(row.kind.len());
-        w_status = w_status.max(row.status.len());
+        w_status = w_status.max(status_strs[i].len());
         w_assignee = w_assignee.max(row.assignee.len());
         if has_labels {
             w_labels = w_labels.max(label_strs[i].len());
@@ -1718,19 +1803,31 @@ fn print_issue_table(rows: &[cache::CacheRow], uncommitted_ids: &std::collection
         } else {
             color::colored_id(&row.id)
         };
-        let status = color::status_color(&row.status);
+        let status_display = if row.blocked {
+            let base = color::status_color(&row.status);
+            format!("{} {}", base, color::yellow("[blocked]"))
+        } else {
+            color::status_color(&row.status)
+        };
         // Pad based on raw (uncolored) lengths
         let id_pad = w_id.saturating_sub(id_strs[i].len());
-        let status_pad = w_status.saturating_sub(row.status.len());
+        let status_pad = w_status.saturating_sub(status_strs[i].len());
         if has_labels {
             println!(
                 "{}  {}{:id_pad$}  {:<w_kind$}  {}{:status_pad$}  {:<w_assignee$}  {:<w_labels$}  {:<w_title$}",
-                updated_display, id_display, "", row.kind, status, "", row.assignee, label_strs[i], row.title
+                updated_display, id_display, "", row.kind, status_display, "", row.assignee, label_strs[i], row.title
             );
         } else {
             println!(
                 "{}  {}{:id_pad$}  {:<w_kind$}  {}{:status_pad$}  {:<w_assignee$}  {:<w_title$}",
-                updated_display, id_display, "", row.kind, status, "", row.assignee, row.title
+                updated_display,
+                id_display,
+                "",
+                row.kind,
+                status_display,
+                "",
+                row.assignee,
+                row.title
             );
         }
     }
@@ -1761,6 +1858,18 @@ fn run_show(args: ShowArgs) -> Result<()> {
             .to_string();
         let project = doc.id.split('-').next().unwrap_or("").to_string();
         let meta = content.split("---").nth(1).map(|s| s.trim()).unwrap_or("");
+        // Resolve dep statuses
+        let deps_resolved: Vec<serde_json::Value> = doc
+            .deps
+            .iter()
+            .map(|dep_id| {
+                let dep_status = cache::lookup_status(&store, dep_id).ok().flatten();
+                serde_json::json!({
+                    "id": dep_id,
+                    "status": dep_status,
+                })
+            })
+            .collect();
         let json = serde_json::json!({
             "kind": doc.kind,
             "id": doc.id,
@@ -1770,7 +1879,7 @@ fn run_show(args: ShowArgs) -> Result<()> {
             "path": rel_path,
             "status": doc.status,
             "assignee": doc.assignee,
-            "deps": doc.deps,
+            "deps": deps_resolved,
             "labels": doc.labels,
             "meta": meta,
             "description": doc.body.trim(),
@@ -1785,6 +1894,17 @@ fn run_show(args: ShowArgs) -> Result<()> {
     let history = backend::file_rich_log(&store, rel_path, 50).unwrap_or_default();
     print_annotated_rune_doc(&content, &history, &store, rel_path);
     let doc = parse_doc(&path)?;
+    // Display dep status inline
+    if !doc.deps.is_empty() {
+        println!("deps:");
+        for dep_id in &doc.deps {
+            let dep_status = cache::lookup_status(&store, dep_id).ok().flatten();
+            match dep_status {
+                Some(status) => println!("  {} ({})", dep_id, status),
+                None => println!("  {} (unknown)", dep_id),
+            }
+        }
+    }
     if doc.kind == "milestone" {
         if let Some(container) = path.parent() {
             if container.exists() {
@@ -2331,6 +2451,8 @@ fn run_edit(args: EditArgs) -> Result<()> {
         milestone,
         add_relations,
         remove_relations,
+        add_deps,
+        remove_deps,
         file,
         edit,
         no_commit,
@@ -2348,7 +2470,9 @@ fn run_edit(args: EditArgs) -> Result<()> {
         || !remove_labels.is_empty()
         || milestone.is_some()
         || !add_relations.is_empty()
-        || !remove_relations.is_empty();
+        || !remove_relations.is_empty()
+        || !add_deps.is_empty()
+        || !remove_deps.is_empty();
     if file.is_some() && edit {
         return Err(Error::new("Cannot use both --file and --edit"));
     }
@@ -2401,6 +2525,14 @@ fn run_edit(args: EditArgs) -> Result<()> {
             doc.relations.retain(|(existing_kind, existing_id)| {
                 existing_kind != &kind || existing_id != &target
             });
+        }
+        for dep in add_deps {
+            if !doc.deps.iter().any(|d| d == &dep) {
+                doc.deps.push(dep);
+            }
+        }
+        for dep in remove_deps {
+            doc.deps.retain(|d| d != &dep);
         }
         if let Some(title_value) = &title {
             if title_value.is_empty() {

@@ -460,7 +460,10 @@ fn pijul_issue_lifecycle_with_sdk_observability() {
         );
     }
 
-    let issue_log = runes_output(&home, &["log", &format!("test-pijul:{issue_id}"), "--limit", "5"]);
+    let issue_log = runes_output(
+        &home,
+        &["log", &format!("test-pijul:{issue_id}"), "--limit", "5"],
+    );
     if !issue_log.status.success() {
         eprintln!(
             "runes log failed (expected for a watchless doc): {}",
@@ -525,12 +528,22 @@ fn pijul_cross_store_move_updates_both_stores() {
     );
     let issue_output = runes_ok(
         &home,
-        &["new", "--project", "test-src:runes", "Move me between stores"],
+        &[
+            "new",
+            "--project",
+            "test-src:runes",
+            "Move me between stores",
+        ],
     );
     let issue_id = last_line(&issue_output).to_string();
     runes_ok(
         &home,
-        &["move", &format!("test-src:{issue_id}"), "--project", "test-dst:runes"],
+        &[
+            "move",
+            &format!("test-src:{issue_id}"),
+            "--project",
+            "test-dst:runes",
+        ],
     );
 
     let moved_doc = runes_ok(&home, &["show", &format!("test-dst:{issue_id}")]);
@@ -542,7 +555,10 @@ fn pijul_cross_store_move_updates_both_stores() {
         "issue unexpectedly still present in source store"
     );
 
-    let dst_list = runes_ok(&home, &["list", "--store", "test-dst", "--project", "runes"]);
+    let dst_list = runes_ok(
+        &home,
+        &["list", "--store", "test-dst", "--project", "runes"],
+    );
     assert!(dst_list.contains(&issue_id));
 }
 
@@ -684,8 +700,10 @@ fn jj_show_section_edit_annotation() {
     let store = Path::new(&store_path);
     let doc_path = find_rune_file(store, &id);
     let content = fs::read_to_string(&doc_path).expect("read doc");
-    let updated =
-        content.replace("## Description\n", "## Description\n\nNew description content here.\n");
+    let updated = content.replace(
+        "## Description\n",
+        "## Description\n\nNew description content here.\n",
+    );
     fs::write(&doc_path, &updated).expect("write doc");
     runes_ok(
         &home,
@@ -708,7 +726,13 @@ fn jj_show_uncommitted_rune() {
     let (home, _) = setup_jj_store("jj-uncommitted");
     let id = last_line(&runes_ok(
         &home,
-        &["new", "--project", "test:proj", "Uncommitted", "--no-commit"],
+        &[
+            "new",
+            "--project",
+            "test:proj",
+            "Uncommitted",
+            "--no-commit",
+        ],
     ))
     .to_string();
     let shown = runes_ok(&home, &["show", &format!("test:{id}")]);
@@ -735,8 +759,10 @@ fn jj_show_pending_section_changes() {
     let doc_path = find_rune_file(store, &id);
     // Edit Description section without committing
     let content = fs::read_to_string(&doc_path).expect("read doc");
-    let updated =
-        content.replace("## Description\n", "## Description\n\nUncommitted change.\n");
+    let updated = content.replace(
+        "## Description\n",
+        "## Description\n\nUncommitted change.\n",
+    );
     fs::write(&doc_path, &updated).expect("write doc");
     let shown = runes_ok(&home, &["show", &format!("test:{id}")]);
     assert!(

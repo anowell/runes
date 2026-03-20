@@ -42,6 +42,9 @@ pub struct QueryDefinition {
     pub archived: Option<String>,
     pub assignee: Option<String>,
     pub labels: Vec<String>,
+    pub blocked: Option<bool>,
+    pub blocks: Option<String>,
+    pub blocked_by: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -371,6 +374,15 @@ pub fn config_list(path: &Path) -> Result<Vec<(String, String)>> {
                     if !statuses.is_empty() {
                         pairs.push((format!("{prefix}.status"), statuses.join(",")));
                     }
+                    if let Some(v) = value_string(node, "blocked") {
+                        pairs.push((format!("{prefix}.blocked"), v));
+                    }
+                    if let Some(v) = value_string(node, "blocks") {
+                        pairs.push((format!("{prefix}.blocks"), v));
+                    }
+                    if let Some(v) = value_string(node, "blocked-by") {
+                        pairs.push((format!("{prefix}.blocked-by"), v));
+                    }
                 }
             }
             "store" => {
@@ -611,6 +623,7 @@ fn parse_old_creation_node(node: &KdlNode) -> CreationDefaults {
 }
 
 fn parse_query_node(node: &KdlNode) -> QueryDefinition {
+    let blocked = value_string(node, "blocked").map(|v| v.eq_ignore_ascii_case("true") || v == "1");
     QueryDefinition {
         project: value_string(node, "project"),
         statuses: collect_property_values(node, "status"),
@@ -618,6 +631,9 @@ fn parse_query_node(node: &KdlNode) -> QueryDefinition {
         archived: value_string(node, "archived"),
         assignee: value_string(node, "assignee"),
         labels: collect_property_values(node, "label"),
+        blocked,
+        blocks: value_string(node, "blocks"),
+        blocked_by: value_string(node, "blocked-by"),
     }
 }
 

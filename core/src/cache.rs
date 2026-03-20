@@ -1,6 +1,7 @@
 use crate::backend;
 use crate::config::Store;
 use crate::model::{discover_project_docs, parse_doc};
+use crate::schema::load_schema;
 use crate::{Error, Result};
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
@@ -32,6 +33,12 @@ pub struct CacheFilter {
     pub assignee: Option<String>,
     pub labels: Vec<String>,
     pub archived: Option<ArchivedMode>,
+    /// Filter to runes that have at least one unresolved dep.
+    pub blocked: Option<bool>,
+    /// Filter to runes that depend on this specific ID.
+    pub blocked_by: Option<String>,
+    /// Filter to runes that are a dependency OF this specific ID (reverse lookup).
+    pub blocks: Option<String>,
 }
 
 pub fn cache_path(store: &Store) -> Result<PathBuf> {
@@ -53,6 +60,7 @@ pub fn rebuild_cache(store: &Store) -> Result<()> {
 
     conn.execute_batch(
         "DROP TABLE IF EXISTS runes;
+         DROP TABLE IF EXISTS rune_deps;
          CREATE TABLE runes (
            id TEXT PRIMARY KEY,
            short_id TEXT NOT NULL,
@@ -63,13 +71,31 @@ pub fn rebuild_cache(store: &Store) -> Result<()> {
            title TEXT NOT NULL,
            path TEXT NOT NULL,
            labels TEXT NOT NULL,
-           updated INTEGER
+           updated INTEGER,
+           blocked INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE TABLE rune_deps (
+           rune_id TEXT NOT NULL,
+           dep_id TEXT NOT NULL,
+           PRIMARY KEY (rune_id, dep_id)
          );
          CREATE INDEX idx_runes_project ON runes(project);
          CREATE INDEX idx_runes_status ON runes(status);
          CREATE INDEX idx_runes_kind ON runes(kind);
-         CREATE INDEX idx_runes_assignee ON runes(assignee);",
+         CREATE INDEX idx_runes_assignee ON runes(assignee);
+         CREATE INDEX idx_runes_blocked ON runes(blocked);
+         CREATE INDEX idx_rune_deps_rune ON rune_deps(rune_id);
+         CREATE INDEX idx_rune_deps_dep ON rune_deps(dep_id);",
     )?;
+
+    // Collect all docs with their deps for a two-pass approach:
+    // 1. Insert all runes
+    // 2. Insert deps and compute blocked status
+    struct DocInfo {
+        id: String,
+        deps: Vec<String>,
+    }
+    let mut all_docs: Vec<DocInfo> = Vec::new();
 
     // Use a transaction for bulk inserts - much faster than autocommit per row.
     // unchecked_transaction is fine here: we just created the tables above on this
@@ -80,6 +106,8 @@ pub fn rebuild_cache(store: &Store) -> Result<()> {
             "INSERT OR REPLACE INTO runes (id, short_id, project, kind, status, assignee, title, path, labels)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         )?;
+        let mut dep_stmt =
+            tx.prepare("INSERT OR IGNORE INTO rune_deps (rune_id, dep_id) VALUES (?1, ?2)")?;
 
         for entry in std::fs::read_dir(&store.path)? {
             let entry = entry?;
@@ -110,6 +138,15 @@ pub fn rebuild_cache(store: &Store) -> Result<()> {
                     doc.id, short_id, project, doc.kind, doc.status, assignee, doc.title, rel_path,
                     labels,
                 ])?;
+                for dep in &doc.deps {
+                    dep_stmt.execute(params![doc.id, dep])?;
+                }
+                if !doc.deps.is_empty() {
+                    all_docs.push(DocInfo {
+                        id: doc.id.clone(),
+                        deps: doc.deps.clone(),
+                    });
+                }
             }
         }
     }
@@ -129,6 +166,53 @@ pub fn rebuild_cache(store: &Store) -> Result<()> {
         }
     }
 
+    // Compute blocked status: a rune is blocked if any of its deps has a non-terminal status
+    // Build a map of id -> (kind, status) for all runes
+    let mut status_map: HashMap<String, (String, String)> = HashMap::new();
+    {
+        let mut stmt = conn.prepare("SELECT id, kind, status FROM runes")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, kind, status) = row?;
+            status_map.insert(id, (kind, status));
+        }
+    }
+
+    // Load schemas per project (cache them)
+    let mut schema_cache: HashMap<String, crate::schema::StoreSchema> = HashMap::new();
+
+    let mut update_stmt = conn.prepare("UPDATE runes SET blocked = 1 WHERE id = ?1")?;
+    for doc_info in &all_docs {
+        let mut is_blocked = false;
+        for dep_id in &doc_info.deps {
+            if let Some((dep_kind, dep_status)) = status_map.get(dep_id) {
+                let dep_project = dep_id.split('-').next().unwrap_or("");
+                let schema = schema_cache
+                    .entry(dep_project.to_string())
+                    .or_insert_with(|| {
+                        load_schema(&store.path, Some(dep_project)).unwrap_or_default()
+                    });
+                if !schema.is_terminal(dep_kind, dep_status) {
+                    is_blocked = true;
+                    break;
+                }
+            } else {
+                // Dep references an unknown rune — treat as blocked (unresolved dep)
+                is_blocked = true;
+                break;
+            }
+        }
+        if is_blocked {
+            update_stmt.execute(params![doc_info.id])?;
+        }
+    }
+
     Ok(())
 }
 
@@ -143,6 +227,7 @@ pub struct CacheRow {
     pub path: String,
     pub labels: Vec<String>,
     pub updated: Option<i64>,
+    pub blocked: bool,
 }
 
 pub fn query_cache(store: &Store, filter: &CacheFilter) -> Result<Vec<CacheRow>> {
@@ -154,9 +239,10 @@ pub fn query_cache(store: &Store, filter: &CacheFilter) -> Result<Vec<CacheRow>>
 
     let mut conditions = Vec::new();
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut joins = Vec::new();
 
     if let Some(ref project) = filter.project {
-        conditions.push("project = ?".to_string());
+        conditions.push("runes.project = ?".to_string());
         param_values.push(Box::new(project.clone()));
     }
 
@@ -169,36 +255,56 @@ pub fn query_cache(store: &Store, filter: &CacheFilter) -> Result<Vec<CacheRow>>
                 "?"
             })
             .collect();
-        conditions.push(format!("status IN ({})", placeholders.join(",")));
+        conditions.push(format!("runes.status IN ({})", placeholders.join(",")));
     }
 
     if let Some(ref kind) = filter.kind {
-        conditions.push("kind = ?".to_string());
+        conditions.push("runes.kind = ?".to_string());
         param_values.push(Box::new(kind.clone()));
     }
 
     if let Some(ref assignee) = filter.assignee {
-        conditions.push("assignee = ?".to_string());
+        conditions.push("runes.assignee = ?".to_string());
         param_values.push(Box::new(assignee.clone()));
     }
 
     // Label matching: comma-separated field, check exact or boundary matches
     for label in &filter.labels {
-        // Use ',' || labels || ',' to normalize boundaries, then LIKE '%,label,%'
-        // Escape LIKE wildcards in the label value to prevent unintended matches
-        conditions.push("(',' || labels || ',') LIKE ? ESCAPE '\\'".to_string());
-        let escaped_label = label.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        conditions.push("(',' || runes.labels || ',') LIKE ? ESCAPE '\\'".to_string());
+        let escaped_label = label
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
         param_values.push(Box::new(format!("%,{},%", escaped_label)));
     }
 
     match filter.archived {
         Some(ArchivedMode::Exclude) => {
-            conditions.push("path NOT LIKE '%/_archive/%'".to_string());
+            conditions.push("runes.path NOT LIKE '%/_archive/%'".to_string());
         }
         Some(ArchivedMode::Only) => {
-            conditions.push("path LIKE '%/_archive/%'".to_string());
+            conditions.push("runes.path LIKE '%/_archive/%'".to_string());
         }
         Some(ArchivedMode::Include) | None => {}
+    }
+
+    // Blocked/ready filter
+    if let Some(blocked) = filter.blocked {
+        conditions.push(format!("runes.blocked = {}", if blocked { 1 } else { 0 }));
+    }
+
+    // --blocked-by X: runes that depend on X
+    if let Some(ref blocked_by_id) = filter.blocked_by {
+        joins.push("JOIN rune_deps bd ON bd.rune_id = runes.id".to_string());
+        conditions.push("bd.dep_id = ?".to_string());
+        param_values.push(Box::new(blocked_by_id.clone()));
+    }
+
+    // --blocks X: runes that are a dep OF X (i.e. X depends on this rune)
+    if let Some(ref blocks_id) = filter.blocks {
+        joins.push("JOIN rune_deps bl ON bl.dep_id = runes.id".to_string());
+        conditions.push("bl.rune_id = ?".to_string());
+        param_values.push(Box::new(blocks_id.clone()));
     }
 
     let where_clause = if conditions.is_empty() {
@@ -207,12 +313,15 @@ pub fn query_cache(store: &Store, filter: &CacheFilter) -> Result<Vec<CacheRow>>
         conditions.join(" AND ")
     };
 
+    let join_clause = joins.join(" ");
+
     let sql = format!(
-        "SELECT id, project, kind, status, assignee, title, path, labels, updated FROM runes WHERE {} ORDER BY updated DESC NULLS LAST, id",
-        where_clause
+        "SELECT runes.id, runes.project, runes.kind, runes.status, runes.assignee, runes.title, runes.path, runes.labels, runes.updated, runes.blocked FROM runes {} WHERE {} ORDER BY runes.updated DESC NULLS LAST, runes.id",
+        join_clause, where_clause
     );
 
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|p| p.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(param_refs.as_slice(), |row| {
         let labels_str: String = row.get(7)?;
@@ -231,6 +340,7 @@ pub fn query_cache(store: &Store, filter: &CacheFilter) -> Result<Vec<CacheRow>>
             path: row.get(6)?,
             labels,
             updated: row.get(8)?,
+            blocked: row.get::<_, i32>(9)? != 0,
         })
     })?;
 
