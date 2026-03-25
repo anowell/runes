@@ -494,6 +494,27 @@ fn default_store_path(name: &str) -> Result<PathBuf> {
     Ok(home_dir()?.join(".runes").join("stores").join(name))
 }
 
+/// Build a draft file path under `~/.runes/drafts/<store>/<proj>/` for editor-based edits.
+///
+/// Format: `<rune_id>--<content_hash>--<title_slug>.md`
+/// where `content_hash` is a short hash of the original content for uniqueness.
+fn draft_path(store_name: &str, rune_id: &str, title: &str, content: &str) -> Result<PathBuf> {
+    use std::hash::{Hash, Hasher};
+    let parsed = parse_full_id(rune_id)?;
+    let drafts_dir = home_dir()?
+        .join(".runes")
+        .join("drafts")
+        .join(store_name)
+        .join(&parsed.project);
+    ensure_dir(&drafts_dir)?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    content.hash(&mut hasher);
+    let content_hash = format!("{:07x}", hasher.finish() & 0x0FFFFFFF);
+    let slug: String = slugify(title).chars().take(60).collect();
+    let filename = format!("{rune_id}--{content_hash}--{slug}.md");
+    Ok(drafts_dir.join(filename))
+}
+
 fn load_context() -> Result<(Vec<Store>, UserConfig, PathBuf)> {
     let mut stores = discover_stores()?;
     let cwd = std::env::current_dir().map_err(|e| Error::new(e.to_string()))?;
@@ -1200,9 +1221,9 @@ fn run_new(args: NewArgs) -> Result<()> {
         doc.title = effective_title;
         fs::write(&doc_path, render_doc(&doc))?;
     } else if edit {
-        // Use a tmp file so the original stays clean until validation passes
-        let tmp_dir = std::env::temp_dir();
-        let tmp_path = tmp_dir.join(format!("runes-new-{}.md", &identifier));
+        // Use a draft file so the original stays clean until validation passes
+        let original_content = fs::read_to_string(&doc_path)?;
+        let tmp_path = draft_path(&store.name, &identifier, &title, &original_content)?;
         fs::copy(&doc_path, &tmp_path)?;
         open_editor(&tmp_path)?;
         let edited_doc = parse_doc(&tmp_path)?;
@@ -2555,9 +2576,9 @@ fn run_edit(args: EditArgs) -> Result<()> {
         doc.title = effective_title;
         fs::write(&path, render_doc(&doc))?;
     } else if edit || editor_available() {
-        // Use a tmp file for editor-based edits so we can validate before writing
-        let tmp_dir = std::env::temp_dir();
-        let tmp_path = tmp_dir.join(format!("runes-edit-{}.md", &id));
+        // Use a draft file for editor-based edits so we can validate before writing
+        let original_content = render_doc(&original_doc);
+        let tmp_path = draft_path(&store.name, &doc.id, &original_title, &original_content)?;
         fs::copy(&path, &tmp_path)?;
         open_editor(&tmp_path)?;
         let edited_doc = parse_doc(&tmp_path)?;
