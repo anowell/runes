@@ -1,0 +1,6 @@
+setup {
+    copy src="target"
+    share src="runes.kdl"
+}
+
+destroy { }
