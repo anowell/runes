@@ -376,8 +376,12 @@ struct DeleteArgs {
 
 #[derive(Debug, Parser)]
 struct LogArgs {
-    /// Project name or rune ID (project:shortid); omit for default project log
+    /// Rune ID: <project>-<shortid>, <store>:<project>-<shortid>, or bare <shortid>
+    /// (bare shortid requires the rune to still exist on disk)
     id: Option<String>,
+    /// Filter by project (or store:project)
+    #[arg(long, conflicts_with_all = ["id", "all"])]
+    project: Option<String>,
     /// Max number of entries to show
     #[arg(long)]
     limit: Option<usize>,
@@ -394,7 +398,7 @@ struct LogArgs {
     #[arg(long)]
     no_pager: bool,
     /// Show all projects (ignore default project)
-    #[arg(long)]
+    #[arg(long, conflicts_with = "id")]
     all: bool,
 }
 
@@ -3249,6 +3253,7 @@ fn format_log_entries(
 fn run_log(args: LogArgs) -> Result<()> {
     let LogArgs {
         id,
+        project,
         limit,
         section,
         changed_by,
@@ -3259,27 +3264,31 @@ fn run_log(args: LogArgs) -> Result<()> {
     let limit = limit.unwrap_or(50);
     let (cfg, user_cfg, cwd) = load_context()?;
 
-    // Parse the positional arg into project filter vs rune filter:
-    //   <project>-<shortid> → rune filter (rune_id contains hyphen)
-    //   <store>:<project>-<shortid> → rune filter with store hint
-    //   <project> (no hyphen) → project filter
-    //   None → default project (unless --all)
-    let (rune_filter, project_filter) = match &id {
-        Some(spec) if split_store_prefix(spec).1.contains('-') => {
-            // rune_id (with optional store prefix) — don't require file to exist (may be deleted)
-            let (_, resolved) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, spec)?;
+    // Resolve scope: a specific rune (positional), a project (--project), all (--all),
+    // or the default project (no args). Clap enforces mutual exclusion.
+    let (rune_filter, project_filter) = match (&id, &project) {
+        (Some(spec), _) => {
+            let (_, id_part) = split_store_prefix(spec);
+            if id_part.is_empty() {
+                return Err(Error::new("ID may not be empty"));
+            }
+            let resolved = if id_part.contains('-') {
+                // Full form (project-shortid): no FS lookup, so deleted runes still work.
+                let (_, full) = resolve_store_and_id(&cfg, &user_cfg, &cwd, None, spec)?;
+                full
+            } else {
+                // Bare shortid: scan filesystem to recover the project.
+                let (_, path) = resolve_rune_id(&cfg, &user_cfg, &cwd, spec)?;
+                parse_doc(&path)?.id
+            };
             (Some(resolved), None)
         }
-        Some(proj) => {
-            // Project-level filter (no hyphen, so it's a project name)
+        (None, Some(proj)) => {
             let (_, proj_name) = split_store_prefix(proj);
             (None, Some(proj_name.to_string()))
         }
-        None if all => {
-            // --all: no filtering
-            (None, None)
-        }
-        None => {
+        (None, None) if all => (None, None),
+        (None, None) => {
             // Use default project if configured
             let proj = user_cfg
                 .default_project
