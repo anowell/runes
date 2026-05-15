@@ -1,7 +1,7 @@
 mod color;
 mod user_config;
 use atty::Stream;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use pijul_interaction::{set_context, InteractiveContext};
 use runes_core::backend::{self, LogEntry};
 use runes_core::cache;
@@ -1380,6 +1380,22 @@ fn has_vcs_marker(path: &Path) -> bool {
         || path.join(".pj").exists()
 }
 
+/// Print a notice that the current repo has no runes project configured,
+/// followed by `runes init` usage help. Shown when a list command would
+/// otherwise spill runes from every project in the store.
+fn print_uninitialized_notice() {
+    println!("This repo has not been initialized for runes.");
+    println!();
+    println!("Run `runes init` to configure a project for this repo:");
+    println!();
+    let mut cmd = Cli::command();
+    if let Some(init) = cmd.find_subcommand_mut("init") {
+        let mut init = init.clone().bin_name("runes init");
+        let _ = init.print_help();
+        println!();
+    }
+}
+
 fn run_list(args: ListArgs) -> Result<()> {
     let ListArgs {
         view,
@@ -1510,6 +1526,14 @@ fn run_list(args: ListArgs) -> Result<()> {
     filters.archived = Some(archived_mode);
     if kind_explicitly_set {
         filters.kind = Some(list_kind.kind_name().to_string());
+    }
+    // When no project context could be determined (no --project flag, no repo-local
+    // runes.kdl, no default project), the repo likely hasn't been initialized for
+    // runes. Listing every rune across all projects is confusing in a fresh repo, so
+    // show an init hint instead. Skipped for --json to keep programmatic output stable.
+    if !json && !project_flag_present && !query_set_project && filters.project.is_none() {
+        print_uninitialized_notice();
+        return Ok(());
     }
     // For --ready, add non-terminal status filter if no explicit statuses set
     if filters.blocked == Some(false) && filters.statuses.is_empty() {
