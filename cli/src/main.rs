@@ -1770,10 +1770,35 @@ fn format_updated(updated: Option<i64>, is_uncommitted: bool) -> String {
     }
 }
 
+fn terminal_width() -> Option<usize> {
+    terminal_size::terminal_size().map(|(w, _)| w.0 as usize)
+}
+
+fn truncate_to_width(s: &str, max: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if s.width() <= max {
+        return s.to_string();
+    }
+    let budget = max.saturating_sub(3);
+    let mut out = String::new();
+    let mut width = 0;
+    for c in s.chars() {
+        let cw = c.width().unwrap_or(0);
+        if width + cw > budget {
+            break;
+        }
+        out.push(c);
+        width += cw;
+    }
+    out.push_str("...");
+    out
+}
+
 fn print_issue_table(
     rows: &[cache::CacheRow],
     uncommitted_ids: &std::collections::HashSet<String>,
 ) {
+    use unicode_width::UnicodeWidthStr;
     if rows.is_empty() {
         return;
     }
@@ -1822,13 +1847,28 @@ fn print_issue_table(
         if has_labels {
             w_labels = w_labels.max(label_strs[i].len());
         }
-        w_title = w_title.max(row.title.len());
+        w_title = w_title.max(row.title.width());
     }
+    // Cap the title column so rows fit the viewport; wider titles get truncated.
+    if let Some(term_width) = terminal_width() {
+        let fixed = w_updated
+            + w_id
+            + w_kind
+            + w_status
+            + w_assignee
+            + if has_labels { w_labels + 2 } else { 0 }
+            + 5 * 2; // two-space separators between columns
+        w_title = w_title.min(term_width.saturating_sub(fixed).max("title".len()));
+    }
+    let title_strs: Vec<String> = rows
+        .iter()
+        .map(|r| truncate_to_width(&r.title, w_title))
+        .collect();
     // Header
     if has_labels {
         println!(
-            "{:<w_updated$}  {:<w_id$}  {:<w_kind$}  {:<w_status$}  {:<w_assignee$}  {:<w_labels$}  {:<w_title$}",
-            "updated", "id", "kind", "status", "assignee", "labels", "title"
+            "{:<w_updated$}  {:<w_id$}  {:<w_kind$}  {:<w_status$}  {:<w_assignee$}  {:<w_labels$}  title",
+            "updated", "id", "kind", "status", "assignee", "labels"
         );
         println!(
             "{:-<w_updated$}  {:-<w_id$}  {:-<w_kind$}  {:-<w_status$}  {:-<w_assignee$}  {:-<w_labels$}  {:-<w_title$}",
@@ -1836,8 +1876,8 @@ fn print_issue_table(
         );
     } else {
         println!(
-            "{:<w_updated$}  {:<w_id$}  {:<w_kind$}  {:<w_status$}  {:<w_assignee$}  {:<w_title$}",
-            "updated", "id", "kind", "status", "assignee", "title"
+            "{:<w_updated$}  {:<w_id$}  {:<w_kind$}  {:<w_status$}  {:<w_assignee$}  title",
+            "updated", "id", "kind", "status", "assignee"
         );
         println!(
             "{:-<w_updated$}  {:-<w_id$}  {:-<w_kind$}  {:-<w_status$}  {:-<w_assignee$}  {:-<w_title$}",
@@ -1863,12 +1903,12 @@ fn print_issue_table(
         let status_pad = w_status.saturating_sub(status_strs[i].len());
         if has_labels {
             println!(
-                "{}  {}{:id_pad$}  {:<w_kind$}  {}{:status_pad$}  {:<w_assignee$}  {:<w_labels$}  {:<w_title$}",
-                updated_display, id_display, "", row.kind, status_display, "", row.assignee, label_strs[i], row.title
+                "{}  {}{:id_pad$}  {:<w_kind$}  {}{:status_pad$}  {:<w_assignee$}  {:<w_labels$}  {}",
+                updated_display, id_display, "", row.kind, status_display, "", row.assignee, label_strs[i], title_strs[i]
             );
         } else {
             println!(
-                "{}  {}{:id_pad$}  {:<w_kind$}  {}{:status_pad$}  {:<w_assignee$}  {:<w_title$}",
+                "{}  {}{:id_pad$}  {:<w_kind$}  {}{:status_pad$}  {:<w_assignee$}  {}",
                 updated_display,
                 id_display,
                 "",
@@ -1876,7 +1916,7 @@ fn print_issue_table(
                 status_display,
                 "",
                 row.assignee,
-                row.title
+                title_strs[i]
             );
         }
     }
@@ -4126,4 +4166,32 @@ fn run_quickstart() -> Result<()> {
     println!();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_to_width;
+    use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn truncate_noop_when_within_width() {
+        assert_eq!(truncate_to_width("short title", 20), "short title");
+        assert_eq!(truncate_to_width("exact", 5), "exact");
+    }
+
+    #[test]
+    fn truncate_long_ascii() {
+        let out = truncate_to_width("a very long title that overflows", 12);
+        assert_eq!(out, "a very lo...");
+        assert_eq!(out.width(), 12);
+    }
+
+    #[test]
+    fn truncate_wide_chars_stays_within_width() {
+        // CJK chars are 2 columns wide; truncation must count display width,
+        // not chars or bytes, and must not split a wide char.
+        let out = truncate_to_width("日本語のタイトルです", 10);
+        assert!(out.ends_with("..."));
+        assert!(out.width() <= 10);
+    }
 }
