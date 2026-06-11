@@ -740,7 +740,8 @@ fn home_dir() -> Result<PathBuf> {
 fn find_repo_root(start: &Path) -> Option<PathBuf> {
     let mut cursor = start.to_path_buf();
     loop {
-        if cursor.join(".git").exists()
+        if cursor.join("runes.kdl").exists()
+            || cursor.join(".git").exists()
             || cursor.join(".jj").exists()
             || cursor.join(".pijul").exists()
         {

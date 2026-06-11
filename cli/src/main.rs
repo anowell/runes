@@ -1364,7 +1364,7 @@ fn repo_root_basename(start: &Path) -> Option<String> {
 fn find_repo_root(start: &Path) -> Option<PathBuf> {
     let mut cursor = start.to_path_buf();
     loop {
-        if has_vcs_marker(&cursor) {
+        if cursor.join("runes.kdl").exists() || has_vcs_marker(&cursor) {
             return Some(cursor);
         }
         if !cursor.pop() {
@@ -1374,10 +1374,7 @@ fn find_repo_root(start: &Path) -> Option<PathBuf> {
 }
 
 fn has_vcs_marker(path: &Path) -> bool {
-    path.join(".git").exists()
-        || path.join(".jj").exists()
-        || path.join(".pjul").exists()
-        || path.join(".pj").exists()
+    path.join(".git").exists() || path.join(".jj").exists() || path.join(".pijul").exists()
 }
 
 /// Print a notice that the current repo has no runes project configured,
@@ -3788,6 +3785,16 @@ fn run_init(args: InitArgs) -> Result<()> {
     let cwd = std::env::current_dir().map_err(|e| Error::new(e.to_string()))?;
     let global_path = user_config::global_config_path()?;
 
+    // Local config lands at the repo/config root if there is one, else cwd.
+    let local_path = user_config::local_config_path(&cwd).unwrap_or_else(|| cwd.join("runes.kdl"));
+    let root = local_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| cwd.clone());
+    if args.stealth && !root.join(".git").exists() {
+        return Err(Error::new("--stealth only works in a git repo"));
+    }
+
     // Ensure global config exists
     if !global_path.exists() {
         if !stdin_is_tty() {
@@ -3860,70 +3867,62 @@ fn run_init(args: InitArgs) -> Result<()> {
         backend::init_store(&store_path, backend_kind)?;
         user_config::config_set(&global_path, "defaults.store", store_name)?;
         println!("Global config created.");
-    } else {
-        println!("Global config already exists at {}", global_path.display());
     }
 
-    // Create local config if in a repo
-    let repo_root = find_repo_root(&cwd);
-    if let Some(root) = repo_root {
-        let local_path = root.join("runes.kdl");
-        if !local_path.exists() {
-            let project = if let Some(spec) = &args.project {
-                let (_store_hint, proj) = split_store_prefix(spec);
-                proj.to_string()
-            } else if stdin_is_tty() {
-                let default_name = root
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("myproject");
-                eprint!("Project prefix [{}]: ", default_name);
-                let mut input = String::new();
-                io::stdin()
-                    .read_line(&mut input)
-                    .map_err(|e| Error::new(e.to_string()))?;
-                let input = input.trim();
-                if input.is_empty() {
-                    default_name.to_string()
-                } else {
-                    input.to_string()
-                }
+    // Create local config
+    if !local_path.exists() {
+        let project = if let Some(spec) = &args.project {
+            let (_store_hint, proj) = split_store_prefix(spec);
+            proj.to_string()
+        } else if stdin_is_tty() {
+            let default_name = root
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("myproject");
+            eprint!("Project prefix [{}]: ", default_name);
+            let mut input = String::new();
+            io::stdin()
+                .read_line(&mut input)
+                .map_err(|e| Error::new(e.to_string()))?;
+            let input = input.trim();
+            if input.is_empty() {
+                default_name.to_string()
             } else {
-                return Err(Error::new(
-                    "Use --project to specify the project prefix non-interactively.",
-                ));
-            };
-
-            // If project spec included a store, set that too
-            if let Some(spec) = &args.project {
-                let (store_hint, _) = split_store_prefix(spec);
-                if let Some(store) = store_hint {
-                    user_config::config_set(&local_path, "defaults.store", &store)?;
-                }
+                input.to_string()
             }
-            user_config::config_set(&local_path, "defaults.project", &project)?;
-
-            if args.stealth {
-                let exclude_path = root.join(".git").join("info").join("exclude");
-                if exclude_path.parent().is_some_and(|p| p.exists()) {
-                    let existing = fs::read_to_string(&exclude_path).unwrap_or_default();
-                    if !existing.lines().any(|l| l.trim() == "runes.kdl") {
-                        let mut content = existing;
-                        if !content.ends_with('\n') && !content.is_empty() {
-                            content.push('\n');
-                        }
-                        content.push_str("runes.kdl\n");
-                        fs::write(&exclude_path, content)?;
-                        println!("Added runes.kdl to .git/info/exclude");
-                    }
-                }
-            }
-            println!("Local config created at {}", local_path.display());
         } else {
-            println!("Local config already exists at {}", local_path.display());
+            return Err(Error::new(
+                "Use --project to specify the project prefix non-interactively.",
+            ));
+        };
+
+        // If project spec included a store, set that too
+        if let Some(spec) = &args.project {
+            let (store_hint, _) = split_store_prefix(spec);
+            if let Some(store) = store_hint {
+                user_config::config_set(&local_path, "defaults.store", &store)?;
+            }
         }
+        user_config::config_set(&local_path, "defaults.project", &project)?;
+
+        if args.stealth {
+            let info_dir = root.join(".git").join("info");
+            fs::create_dir_all(&info_dir)?;
+            let exclude_path = info_dir.join("exclude");
+            let existing = fs::read_to_string(&exclude_path).unwrap_or_default();
+            if !existing.lines().any(|l| l.trim() == "runes.kdl") {
+                let mut content = existing;
+                if !content.ends_with('\n') && !content.is_empty() {
+                    content.push('\n');
+                }
+                content.push_str("runes.kdl\n");
+                fs::write(&exclude_path, content)?;
+                println!("Added runes.kdl to .git/info/exclude");
+            }
+        }
+        println!("Local config created at {}", local_path.display());
     } else {
-        println!("Not in a repo; skipping local config.");
+        println!("Local config already exists at {}", local_path.display());
     }
 
     Ok(())

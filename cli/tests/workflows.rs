@@ -101,6 +101,60 @@ fn copy_dir_recursive(from: &Path, to: &Path) {
 }
 
 #[test]
+fn init_outside_repo() {
+    let home = unique_tmp_home("init-outside-repo");
+    let work = home.join("work");
+    fs::create_dir_all(&work).expect("create work dir");
+
+    // --stealth needs .git/info/exclude, so it must fail outside a git repo
+    let output = Command::new(env!("CARGO_BIN_EXE_runes"))
+        .args(["init", "--project", "demo", "--stealth"])
+        .current_dir(&work)
+        .env("HOME", &home)
+        .env("RUNES_USER", "Test User <test@runes.dev>")
+        .output()
+        .expect("run runes command");
+    assert!(
+        !output.status.success(),
+        "init --stealth should fail outside a git repo"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--stealth only works in a git repo"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(!work.join("runes.kdl").exists());
+
+    // Without --stealth the local config is created even outside a repo
+    runes_ok(
+        &home,
+        &["config", "set", "user.email", "test@runes.dev", "--global"],
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_runes"))
+        .args(["init", "--project", "demo"])
+        .current_dir(&work)
+        .env("HOME", &home)
+        .env("RUNES_USER", "Test User <test@runes.dev>")
+        .output()
+        .expect("run runes command");
+    assert!(
+        output.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("Global config already exists"),
+        "init should not mention existing global config: {stdout}"
+    );
+    let local = fs::read_to_string(work.join("runes.kdl")).expect("local config created");
+    assert!(
+        local.contains("demo"),
+        "project missing from config: {local}"
+    );
+}
+
+#[test]
 fn jj_issue_lifecycle_and_cache_query() {
     if !command_exists("jj") {
         eprintln!("skipping: jj not installed");
