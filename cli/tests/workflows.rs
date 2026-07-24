@@ -1710,6 +1710,108 @@ fn search_rebuilds_cache_without_index() {
     );
 }
 
+/// Test: committing one rune leaves another dirty rune uncommitted
+#[test]
+fn jj_commit_is_scoped_to_requested_paths() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let (home, store_path) = setup_jj_store("jj-commit-scope");
+    let store = Path::new(&store_path);
+    let id_a = last_line(&runes_ok(
+        &home,
+        &["new", "--project", "test:proj", "Rune A"],
+    ))
+    .to_string();
+    let id_b = last_line(&runes_ok(
+        &home,
+        &["new", "--project", "test:proj", "Rune B"],
+    ))
+    .to_string();
+    let path_a = find_rune_file(store, &id_a);
+    let path_b = find_rune_file(store, &id_b);
+
+    // Dirty both runes without committing
+    for path in [&path_a, &path_b] {
+        let content = fs::read_to_string(path).expect("read doc");
+        let updated = content.replace("## Description\n", "## Description\n\nEdited.\n");
+        assert_ne!(content, updated, "description marker not found");
+        fs::write(path, updated).expect("write doc");
+    }
+
+    // Commit only rune A
+    runes_ok(
+        &home,
+        &["commit", &format!("test:{id_a}"), "-m", "Scoped commit"],
+    );
+
+    let name_a = path_a.file_name().unwrap().to_string_lossy().to_string();
+    let name_b = path_b.file_name().unwrap().to_string_lossy().to_string();
+    let summary = command_ok(&home, "jj", &["diff", "-r", "@-", "--summary"], Some(store));
+    assert!(
+        summary.contains(&name_a),
+        "commit missing rune A ({name_a}): {summary}"
+    );
+    assert!(
+        !summary.contains(&name_b),
+        "commit swept in rune B ({name_b}): {summary}"
+    );
+
+    let described = command_ok(
+        &home,
+        "jj",
+        &[
+            "log",
+            "--no-graph",
+            "-r",
+            "@-",
+            "-T",
+            r#"description ++ "|" ++ author.email()"#,
+        ],
+        Some(store),
+    );
+    assert!(
+        described.contains("Scoped commit"),
+        "unexpected description: {described}"
+    );
+    assert!(described.contains('@'), "missing author email: {described}");
+
+    let diff_a = runes_ok(&home, &["diff", &format!("test:{id_a}")]);
+    assert!(diff_a.trim().is_empty(), "rune A still dirty: {diff_a}");
+    let diff_b = runes_ok(&home, &["diff", &format!("test:{id_b}")]);
+    assert!(
+        diff_b.contains("Edited."),
+        "rune B lost its pending change: {diff_b}"
+    );
+    let content_b = fs::read_to_string(&path_b).expect("read doc b");
+    assert!(content_b.contains("Edited."), "rune B file was reverted");
+
+    // Re-committing the now-clean rune A must not record rune B under A's message
+    runes_ok(
+        &home,
+        &["commit", &format!("test:{id_a}"), "-m", "Should be a no-op"],
+    );
+    let head = command_ok(
+        &home,
+        "jj",
+        &["log", "--no-graph", "-r", "@-", "-T", "description"],
+        Some(store),
+    );
+    assert!(
+        head.contains("Scoped commit"),
+        "no-op commit recorded rune B: {head}"
+    );
+
+    // Bare `runes commit` still sweeps up everything in scope
+    runes_ok(&home, &["commit", "-m", "Record the rest"]);
+    let diff_b = runes_ok(&home, &["diff", &format!("test:{id_b}")]);
+    assert!(
+        diff_b.trim().is_empty(),
+        "bare commit left rune B dirty: {diff_b}"
+    );
+}
+
 fn find_rune_file(store_path: &Path, rune_id: &str) -> PathBuf {
     let short = rune_id.split('-').next_back().unwrap_or(rune_id);
     let project = rune_id.split('-').next().unwrap_or("proj");

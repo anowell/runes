@@ -126,8 +126,7 @@ impl BackendAdapter for CliBackend {
         let _ = probe_sdk(store);
         match self.kind {
             BackendKind::Jj => {
-                let _ = paths;
-                jj_sdk_commit_paths(store, message, author_name, author_email)?;
+                jj_sdk_commit_paths(store, paths, message, author_name, author_email)?;
             }
             BackendKind::Pijul => {
                 pijul_sdk_commit_paths(store, paths, message, author_name, author_email)?;

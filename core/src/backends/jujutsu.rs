@@ -9,13 +9,14 @@ use jj_lib::git::{
     GitSettings, GitSidebandLineTerminator, GitSubprocessCallback,
 };
 use jj_lib::gitignore::GitIgnoreFile;
-use jj_lib::matchers::EverythingMatcher;
+use jj_lib::matchers::{EverythingMatcher, FilesMatcher};
 use jj_lib::merged_tree::{MergedTree, TreeDiffIterator};
 use jj_lib::object_id::{HexPrefix, ObjectId, PrefixResolution};
 use jj_lib::refs::{classify_bookmark_push_action, BookmarkPushAction, LocalAndRemoteRef};
 use jj_lib::repo::Repo as _;
 use jj_lib::repo::StoreFactories;
 use jj_lib::repo_path::RepoPathBuf;
+use jj_lib::rewrite::restore_tree;
 use jj_lib::settings::UserSettings;
 use jj_lib::str_util::{StringExpression, StringMatcher};
 use jj_lib::working_copy::SnapshotOptions;
@@ -549,8 +550,11 @@ pub(super) fn jj_sdk_file_rich_log(
     Ok(entries)
 }
 
+/// Commit the working copy, restricted to `paths` (relative to the store root).
+/// Dirty paths outside `paths` stay uncommitted. An empty `paths` commits everything.
 pub(super) fn jj_sdk_commit_paths(
     store: &Store,
+    paths: &[PathBuf],
     message: &str,
     author_name: &str,
     author_email: &str,
@@ -594,7 +598,36 @@ pub(super) fn jj_sdk_commit_paths(
         .block_on()
         .map_err(|e| Error::new(format!("jj-lib snapshot failed: {e}")))?;
 
-    if new_tree.tree_ids_and_labels() == wc_commit.tree().tree_ids_and_labels() {
+    let parent_tree = wc_commit
+        .parent_tree(repo.as_ref())
+        .map_err(|e| Error::new(format!("jj-lib parent tree load failed: {e}")))?;
+
+    let mut repo_paths = Vec::with_capacity(paths.len());
+    for path in paths {
+        let path_raw = path.to_string_lossy().replace('\\', "/");
+        repo_paths.push(
+            RepoPathBuf::from_internal_string(path_raw.clone()).map_err(|_| {
+                Error::new(format!("invalid repo-relative path for jj: {path_raw}"))
+            })?,
+        );
+    }
+
+    // The parent tree, with only the requested paths taken from the snapshot.
+    let commit_tree = if repo_paths.is_empty() {
+        new_tree.clone()
+    } else {
+        restore_tree(
+            &new_tree,
+            &parent_tree,
+            "working copy".to_string(),
+            "parent".to_string(),
+            &FilesMatcher::new(&repo_paths),
+        )
+        .block_on()
+        .map_err(|e| Error::new(format!("jj-lib tree restore failed: {e}")))?
+    };
+
+    if commit_tree.tree_ids() == parent_tree.tree_ids() {
         locked_ws
             .finish(repo.op_id().clone())
             .map_err(|e| Error::new(format!("jj-lib working-copy finalize failed: {e}")))?;
@@ -610,7 +643,7 @@ pub(super) fn jj_sdk_commit_paths(
     };
     let committed = mut_repo
         .rewrite_commit(&wc_commit)
-        .set_tree(new_tree)
+        .set_tree(commit_tree)
         .set_description(message)
         .set_author(author_sig)
         .write()
@@ -618,8 +651,14 @@ pub(super) fn jj_sdk_commit_paths(
     mut_repo
         .rebase_descendants()
         .map_err(|e| Error::new(format!("jj-lib rebase descendants failed: {e}")))?;
+    // Carrying the full snapshot forward leaves the unrequested edits pending
+    // rather than reverting them on disk.
     let new_wc_commit = mut_repo
-        .check_out(workspace_name, &committed)
+        .new_commit(vec![committed.id().clone()], new_tree)
+        .write()
+        .map_err(|e| Error::new(format!("jj-lib working-copy commit failed: {e}")))?;
+    mut_repo
+        .edit(workspace_name, &new_wc_commit)
         .map_err(|e| Error::new(format!("jj-lib checkout commit failed: {e}")))?;
     let repo = tx
         .commit(message)
