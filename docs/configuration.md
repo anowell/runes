@@ -39,15 +39,6 @@ new {
     assignee "self"
   }
 }
-
-query "open" {
-  status "todo"
-}
-
-query "mine" {
-  assignee "self"
-  status "todo"
-}
 ```
 
 ## Local config (per-repo `runes.kdl`)
@@ -97,7 +88,7 @@ A detected agent commits as `<agent>@agents.localhost`, named
 
 - `store` — default store when no `--store` flag or store prefix is given
 - `project` — default project for `runes new` when no `--project` flag is given (accepts `store:project` syntax)
-- `query` — named query applied by default to `runes list`
+- `query` — view applied by default to `runes list` (a built-in view name; defaults to `open`)
 
 ### `store "<name>"`
 
@@ -115,7 +106,13 @@ Creation defaults applied during `runes new`:
 - `new.task.labels` — default labels
 - `new.milestone.status` — default status for milestones
 
-### `query "<name>"`
+### `query "<name>"` (deprecated)
+
+Custom views are deprecated while the built-in views stabilize. `runes list` ships
+with `open`, `mine`, `all`, and `closed`, which need no config — see
+`runes list --help`. Config-defined queries still work (and still shadow a
+built-in of the same name), but using one prints a deprecation warning, and a
+reimagined customization story may replace them.
 
 Saved filter sets for `runes list`. Use with `runes list <name>` or `runes list --query <name>`.
 

@@ -1710,6 +1710,172 @@ fn search_rebuilds_cache_without_index() {
     );
 }
 
+/// Test: the built-in views work with zero config, and a config-defined view
+/// still works but warns that custom views are deprecated.
+#[test]
+fn builtin_views_need_no_config_and_custom_views_warn() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let (home, _) = setup_jj_store("builtin-views");
+    runes_ok(
+        &home,
+        &["config", "set", "user.email", "test@runes.dev", "--global"],
+    );
+
+    let mine = last_line(&runes_ok(
+        &home,
+        &[
+            "new",
+            "--project",
+            "test:proj",
+            "Mine and open",
+            "--assignee",
+            "test@runes.dev",
+        ],
+    ))
+    .to_string();
+    let theirs = last_line(&runes_ok(
+        &home,
+        &[
+            "new",
+            "--project",
+            "test:proj",
+            "Theirs and open",
+            "--assignee",
+            "other@runes.dev",
+        ],
+    ))
+    .to_string();
+    let closed = last_line(&runes_ok(
+        &home,
+        &["new", "--project", "test:proj", "Already finished"],
+    ))
+    .to_string();
+    runes_ok(
+        &home,
+        &["edit", &format!("test:{closed}"), "--status", "done"],
+    );
+
+    let scope = ["--store", "test", "--project", "proj"];
+    let list_view = |view: &[&str]| {
+        let mut args = vec!["list"];
+        args.extend_from_slice(view);
+        args.extend_from_slice(&scope);
+        let output = runes_output(&home, &args);
+        assert!(
+            output.status.success(),
+            "runes {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (
+            String::from_utf8(output.stdout).expect("stdout utf8"),
+            String::from_utf8(output.stderr).expect("stderr utf8"),
+        )
+    };
+
+    // Default view is `open`: closed runes stay out of the way.
+    let (default_view, default_stderr) = list_view(&[]);
+    assert!(default_view.contains(&mine), "default view: {default_view}");
+    assert!(
+        default_view.contains(&theirs),
+        "default view: {default_view}"
+    );
+    assert!(
+        !default_view.contains(&closed),
+        "default view should hide closed runes: {default_view}"
+    );
+    assert!(
+        !default_stderr.contains("deprecated"),
+        "built-in views must not warn: {default_stderr}"
+    );
+
+    let (open_view, _) = list_view(&["open"]);
+    assert_eq!(open_view, default_view, "`open` is the default view");
+
+    for all_form in [vec!["all"], vec!["--all"]] {
+        let (all_view, _) = list_view(&all_form);
+        for id in [&mine, &theirs, &closed] {
+            assert!(
+                all_view.contains(id),
+                "`list {}` missing {id}: {all_view}",
+                all_form.join(" ")
+            );
+        }
+    }
+
+    let (closed_view, _) = list_view(&["closed"]);
+    assert!(
+        closed_view.contains(&closed),
+        "`list closed` missing the done rune: {closed_view}"
+    );
+    assert!(
+        !closed_view.contains(&mine) && !closed_view.contains(&theirs),
+        "`list closed` leaked open runes: {closed_view}"
+    );
+
+    let (mine_view, _) = list_view(&["mine"]);
+    assert!(
+        mine_view.contains(&mine),
+        "`list mine` missing my rune: {mine_view}"
+    );
+    assert!(
+        !mine_view.contains(&theirs) && !mine_view.contains(&closed),
+        "`list mine` should be open runes assigned to me: {mine_view}"
+    );
+
+    // A config-defined view still applies, but says it is on the way out.
+    runes_ok(
+        &home,
+        &["config", "set", "query.wip.status", "done", "--global"],
+    );
+    let (custom_view, custom_stderr) = list_view(&["wip"]);
+    assert!(
+        custom_view.contains(&closed) && !custom_view.contains(&mine),
+        "custom view should still filter: {custom_view}"
+    );
+    assert!(
+        custom_stderr.contains("custom views are deprecated"),
+        "custom view should warn: {custom_stderr}"
+    );
+
+    // A custom view named like a built-in shadows it, and warns as well.
+    runes_ok(
+        &home,
+        &["config", "set", "query.closed.status", "todo", "--global"],
+    );
+    let (shadowed, shadow_stderr) = list_view(&["closed"]);
+    assert!(
+        shadowed.contains(&mine) && !shadowed.contains(&closed),
+        "config view should shadow the built-in: {shadowed}"
+    );
+    assert!(
+        shadow_stderr.contains("custom views are deprecated"),
+        "shadowing view should warn: {shadow_stderr}"
+    );
+}
+
+/// Test: built-in views are discoverable from `list --help` and quickstart.
+#[test]
+fn builtin_views_are_documented_in_help_and_quickstart() {
+    let home = unique_tmp_home("builtin-views-help");
+    let help = runes_ok(&home, &["list", "--help"]);
+    let quickstart = runes_ok(&home, &["quickstart"]);
+    for view in ["open", "mine", "all", "closed"] {
+        assert!(help.contains(view), "`list --help` missing {view}: {help}");
+        assert!(
+            quickstart.contains(&format!("runes list {view}")),
+            "quickstart missing {view}: {quickstart}"
+        );
+    }
+    assert!(
+        help.contains("Built-in views"),
+        "help should label the views: {help}"
+    );
+}
+
 /// Test: committing one rune leaves another dirty rune uncommitted
 #[test]
 fn jj_commit_is_scoped_to_requested_paths() {

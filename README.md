@@ -106,15 +106,17 @@ cat updated.md | runes edit myproject-a3x -f -
 ### Browsing and filtering
 
 ```bash
-# List all runes (uses default query if configured)
+# List open runes (the default view)
 runes list
 
 # Filter by status, assignee, kind
 runes list --status todo --assignee self
 runes list --kind milestones
 
-# Use a saved query
+# Built-in views: open, mine, all, closed
 runes list mine
+runes list closed
+runes list --all      # same as `runes list all`
 
 # Full-text search titles and bodies (all statuses, including done/closed)
 runes search login

@@ -204,9 +204,31 @@ struct NewArgs {
     message: Option<String>,
 }
 
+/// Built-in views, in the order they are listed to users.
+const BUILTIN_VIEWS: &[(&str, &str)] = &[
+    ("open", "runes that aren't closed yet (the default)"),
+    ("mine", "open runes assigned to you"),
+    ("all", "every rune, whatever its status"),
+    ("closed", "runes in a closed status"),
+];
+
+const VIEW_OPEN: &str = "open";
+const VIEW_MINE: &str = "mine";
+const VIEW_ALL: &str = "all";
+const VIEW_CLOSED: &str = "closed";
+
+fn builtin_views_help() -> String {
+    let mut help = String::from("Built-in views (runes list <view>):\n");
+    for (name, description) in BUILTIN_VIEWS {
+        help.push_str(&format!("  {name:<8}{description}\n"));
+    }
+    help
+}
+
 #[derive(Debug, Default, Parser)]
+#[command(after_help = builtin_views_help())]
 struct ListArgs {
-    /// Named query/view to apply
+    /// Built-in view to apply (open, mine, all, closed)
     #[arg(value_name = "view")]
     view: Option<String>,
     /// Store to list from
@@ -215,9 +237,12 @@ struct ListArgs {
     /// Filter by project (or store:project; empty string for all)
     #[arg(long)]
     project: Option<String>,
-    /// Named query from runes.kdl
+    /// Named query from runes.kdl (deprecated; prefer a built-in view)
     #[arg(long)]
     query: Option<String>,
+    /// Show runes in any status (alias for the `all` view)
+    #[arg(long = "all", conflicts_with_all = ["view", "query"])]
+    all: bool,
     /// Filter by kind (e.g. issues, milestones)
     #[arg(short = 'k', long = "kind")]
     kind: Option<String>,
@@ -1585,6 +1610,7 @@ fn run_list(args: ListArgs) -> Result<()> {
         store,
         project,
         query,
+        all,
         kind,
         status,
         assignee,
@@ -1646,54 +1672,68 @@ fn run_list(args: ListArgs) -> Result<()> {
         blocked_by,
         blocks,
     };
-    let query_name = view
+    let view_name = view
         .or(query)
+        .or_else(|| all.then(|| VIEW_ALL.to_string()))
         .or_else(|| user_cfg.query_for_path(&cwd))
-        .or_else(|| user_cfg.default_query.clone());
+        .or_else(|| user_cfg.default_query.clone())
+        .unwrap_or_else(|| VIEW_OPEN.to_string());
     let mut query_set_project = false;
-    if let Some(query_key) = query_name {
-        if let Some(query_cfg) = user_cfg.query(&query_key) {
-            if !project_flag_present {
-                if query_cfg.project.is_some() {
-                    query_set_project = true;
-                }
-                filters.project = query_cfg.project.clone();
+    // Config-defined views shadow built-ins for back-compat, with a nudge to drop them.
+    let builtin_view = if let Some(query_cfg) = user_cfg.query(&view_name) {
+        eprintln!(
+            "warning: custom views are deprecated while built-in views stabilize \
+            (view \"{view_name}\" comes from your config)"
+        );
+        if !project_flag_present {
+            if query_cfg.project.is_some() {
+                query_set_project = true;
             }
-            if !status_flag_present {
-                filters.statuses = query_cfg.statuses.clone();
-            }
-            if !kind_flag_present {
-                if let Some(kind_value) = &query_cfg.kind {
-                    list_kind = ListKind::parse(kind_value);
-                    kind_explicitly_set = true;
-                }
-            }
-            if !archived && !with_archived {
-                if let Some(archived_value) = &query_cfg.archived {
-                    if let Some(parsed) = ArchivedMode::from_keyword(archived_value) {
-                        archived_mode = parsed;
-                    }
-                }
-            }
-            if filters.assignee.is_none() {
-                if let Some(query_assignee) = &query_cfg.assignee {
-                    filters.assignee = user_cfg.resolve_user_alias(query_assignee);
-                }
-            }
-            if !label_flag_present && !query_cfg.labels.is_empty() {
-                filters.labels = query_cfg.labels.clone();
-            }
-            // Apply blocked/blocks/blocked-by from query if not set by CLI flags
-            if filters.blocked.is_none() {
-                filters.blocked = query_cfg.blocked;
-            }
-            if filters.blocks.is_none() {
-                filters.blocks = query_cfg.blocks.clone();
-            }
-            if filters.blocked_by.is_none() {
-                filters.blocked_by = query_cfg.blocked_by.clone();
+            filters.project = query_cfg.project.clone();
+        }
+        if !status_flag_present {
+            filters.statuses = query_cfg.statuses.clone();
+        }
+        if !kind_flag_present {
+            if let Some(kind_value) = &query_cfg.kind {
+                list_kind = ListKind::parse(kind_value);
+                kind_explicitly_set = true;
             }
         }
+        if !archived && !with_archived {
+            if let Some(archived_value) = &query_cfg.archived {
+                if let Some(parsed) = ArchivedMode::from_keyword(archived_value) {
+                    archived_mode = parsed;
+                }
+            }
+        }
+        if filters.assignee.is_none() {
+            if let Some(query_assignee) = &query_cfg.assignee {
+                filters.assignee = user_cfg.resolve_user_alias(query_assignee);
+            }
+        }
+        if !label_flag_present && !query_cfg.labels.is_empty() {
+            filters.labels = query_cfg.labels.clone();
+        }
+        // Apply blocked/blocks/blocked-by from query if not set by CLI flags
+        if filters.blocked.is_none() {
+            filters.blocked = query_cfg.blocked;
+        }
+        if filters.blocks.is_none() {
+            filters.blocks = query_cfg.blocks.clone();
+        }
+        if filters.blocked_by.is_none() {
+            filters.blocked_by = query_cfg.blocked_by.clone();
+        }
+        None
+    } else {
+        BUILTIN_VIEWS
+            .iter()
+            .find(|(name, _)| *name == view_name)
+            .map(|(name, _)| *name)
+    };
+    if builtin_view == Some(VIEW_MINE) && filters.assignee.is_none() {
+        filters.assignee = user_cfg.resolve_user_alias("self");
     }
     // Empty project means "any project" (overrides default_project)
     if filters.project.as_deref() == Some("") {
@@ -1718,21 +1758,22 @@ fn run_list(args: ListArgs) -> Result<()> {
         print_uninitialized_notice();
         return Ok(());
     }
+    // Open/closed come from the project's schema, so views resolve after the project does.
+    if let Some(view) = builtin_view {
+        if !status_flag_present {
+            let (open_statuses, closed_statuses) = open_closed_statuses(&store, &filters);
+            match view {
+                VIEW_OPEN | VIEW_MINE => filters.statuses = open_statuses,
+                VIEW_CLOSED => filters.statuses = closed_statuses,
+                _ => {}
+            }
+        }
+    }
     // For --ready, add non-terminal status filter if no explicit statuses set
     if filters.blocked == Some(false) && filters.statuses.is_empty() {
-        let project_for_schema = filters.project.as_deref();
-        if let Ok(schema) = load_schema(&store.path, project_for_schema) {
-            let kind_name = filters.kind.as_deref().unwrap_or("task");
-            let terminal = schema.terminal_statuses_for_kind(kind_name);
-            let all_statuses = schema.statuses_for_kind(kind_name);
-            let non_terminal: Vec<String> = all_statuses
-                .iter()
-                .filter(|s| !terminal.contains(s))
-                .cloned()
-                .collect();
-            if !non_terminal.is_empty() {
-                filters.statuses = non_terminal;
-            }
+        let (open_statuses, _) = open_closed_statuses(&store, &filters);
+        if !open_statuses.is_empty() {
+            filters.statuses = open_statuses;
         }
     }
     let result = match list_kind {
@@ -1789,6 +1830,23 @@ fn run_list(args: ListArgs) -> Result<()> {
         warn_if_uncommitted(&store);
     }
     result
+}
+
+/// Schema statuses for the filtered kind, split into (open, closed).
+/// Both are empty when the schema can't be loaded, which leaves callers unfiltered.
+fn open_closed_statuses(store: &Store, filters: &CacheFilter) -> (Vec<String>, Vec<String>) {
+    let Ok(schema) = load_schema(&store.path, filters.project.as_deref()) else {
+        return (Vec::new(), Vec::new());
+    };
+    let kind_name = filters.kind.as_deref().unwrap_or("task");
+    let closed = schema.terminal_statuses_for_kind(kind_name);
+    let open = schema
+        .statuses_for_kind(kind_name)
+        .iter()
+        .filter(|status| !closed.contains(status))
+        .cloned()
+        .collect();
+    (open, closed)
 }
 
 fn uncommitted_rune_ids(
@@ -4257,12 +4315,7 @@ fn run_init(args: InitArgs) -> Result<()> {
             &store_path.display().to_string(),
         )?;
 
-        // Create default new and query nodes
         user_config::config_set(&global_path, "new.task.assignee", "self")?;
-        user_config::config_set(&global_path, "query.open.status", "todo")?;
-        user_config::config_set(&global_path, "query.mine.assignee", "self")?;
-        user_config::config_set(&global_path, "query.mine.status", "todo")?;
-        user_config::config_set(&global_path, "defaults.query", "open")?;
 
         // Initialize the store
         let backend_kind = BackendKind::parse(backend)?;
@@ -4420,36 +4473,24 @@ fn run_quickstart() -> Result<()> {
     println!("VIEWING RUNES");
     println!("=============");
     println!();
-    println!("  runes                         # list runes (default view)");
+    println!("  runes                         # list open runes (default view)");
     println!("  runes list                    # same as above");
     println!("  runes list --status todo      # filter by status");
     println!("  runes list --kind bug         # filter by kind");
     println!("  runes show <id>               # show full rune doc");
     println!("  runes search login            # full-text search, any status");
+    println!();
+    println!("  Built-in views:");
+    for (name, description) in BUILTIN_VIEWS {
+        println!("    runes list {:<10}{}", name, description);
+    }
+    println!("    runes list {:<10}same as `runes list all`", "--all");
     if !user_cfg.queries.is_empty() {
-        println!();
-        println!("  Configured views (from runes.kdl):");
-        let mut query_names: Vec<&String> = user_cfg.queries.keys().collect();
+        let mut query_names: Vec<&str> = user_cfg.queries.keys().map(String::as_str).collect();
         query_names.sort();
-        for name in query_names {
-            let q = &user_cfg.queries[name];
-            let mut parts = Vec::new();
-            if let Some(ref k) = q.kind {
-                parts.push(format!("type={k}"));
-            }
-            if !q.statuses.is_empty() {
-                parts.push(format!("status={}", q.statuses.join(",")));
-            }
-            if let Some(ref a) = q.assignee {
-                parts.push(format!("assignee={a}"));
-            }
-            let desc = if parts.is_empty() {
-                String::new()
-            } else {
-                format!("  ({})", parts.join(", "))
-            };
-            println!("    runes list {:<20}{}", name, desc);
-        }
+        println!();
+        println!("  Custom views are deprecated while built-in views stabilize.");
+        println!("  Still defined in your config: {}", query_names.join(", "));
     }
     println!();
 
