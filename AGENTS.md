@@ -1,35 +1,34 @@
 # Runes CLI Agent Guide
 
-This repo models the entire rune lifecycle. Always drive changes through the `runes` CLI and let the tooling manage canonical files inside the configured stores. Use this guide to stay aligned with the expected flow and the documentation maintained under `docs/`.
+This repo *is* the `runes` CLI. It also tracks its own work with runes, in the
+`rn` project (see `runes.kdl`).
 
-## Key references (read before acting)
-- `README.md`: quick overview of the runnable commands, store topology, and developer expectations.
-- `docs/framing.md`: explains the vision and guiding principles that the CLI and workflows should honor.
-- `docs/schema.md`: defines the KDL frontmatter structure, ID naming rules, and directory layout that every rune must obey.
-- `docs/milestones.md`: describes the milestone-driven roadmap (e.g., CLI core, dual-backend, migration discipline) so you can place runes correctly.
-- `docs/backend-sdk-plan.md`: tracks which backend operations already run via `libpijul`/`jj-lib` and which ones are still CLI-backed; reference it when touching backend behavior.
+## Using runes
 
-## Standard operating environment
-- Default store: `proj` located at `~/.runes/stores/proj` (a `pijul` repo).
-- Target project: `runes` inside that store (path `~/.runes/stores/proj/runes`).
-- Always build the CLI before invoking commands, for example `cargo build` or `cargo run -p runes -- help` to ensure CLI behavior matches the code you edit.
+Run `runes quickstart` — it is generated from the live build, so it always
+describes the current commands, states, and views, plus this machine's stores
+and paths. `runes init` installs the same guide as an agent skill
+(`~/.claude/skills/runes/SKILL.md`, `~/.agents/skills/runes/SKILL.md`), minus
+anything machine-specific: those files are global, so their text depends only
+on the binary. Every `runes init` refreshes them; a hand-edited skill is left
+alone until `runes init --force-skill`.
 
-## CLI-first rune lifecycle (follow this order)
-1. Run `runes list --store proj --project runes` to see existing runes and avoid duplication. If you need backend context, run `runes backend status proj` or `runes backend capabilities proj` first.
-2. Create new runes exclusively through the CLI: `runes new --project runes "Title" --store proj [--status <state>] [--label <label>] [--kind issue|milestone]`. If `--project` is omitted the CLI uses `RUNES_PROJECT`, `default_project`, the current directory name, or the repo root name (in that order) to infer the target project, then lets `runes new` pick the canonical filename and metadata.
-3. After `runes new` returns, rerun `runes list...` to confirm the ID and path generated inside `~/.runes/stores/proj/runes`. Capture the file path reported so future edits happen on that doc.
-4. Use CLI helpers to change metadata when possible (`runes issue edit`, `runes issue move`, etc.). Only open the generated markdown if you must add or remove sections that the CLI does not cover yet.
-5. When a change requires editing the underlying backend behavior, coordinate with `runes backend ...` commands (`status`, `log`, `sync`, `probe-sdk`), and mention in the rune body whether the feature remains CLI-backed (see `docs/backend-sdk-plan.md`).
+Rune docs are markdown files with KDL frontmatter, and editing them directly is
+expected: change the file, `runes diff <id>` to review, `runes commit <id>` to
+record just that rune.
 
-## Documentation discipline
-- Never author or modify rune files directly under `docs/runes/` (those are stores' mirrors, not canonical). All canonical rune files live in `~/.runes/stores/proj/runes/...` and are managed via the CLI.
-- Refer to `docs/schema.md` when editing runes to ensure KDL frontmatter fields (id, status, labels, relations, links) remain consistent.
-- If you need to describe backend capabilities or migration gaps, mention them in the rune body and cite `docs/backend-sdk-plan.md` so future readers know why the CLI flow differs from SDK-backed code.
+## Working on the CLI
 
-## Backend context
-- Keep `docs/backend-sdk-plan.md`, `core/src/backend.rs`, and `core/src/backend/*.rs` aligned: explain in runes when you add SDK-backed functionality and when you fall back to CLI operations.
-- Run `runes backend status proj` and `runes backend capabilities proj` after backend code changes to confirm capability tokens shift from `cli` to `sdk` where expected.
+- Build and test with `cargo build` / `cargo test`. `just fix` runs
+  `cargo clippy --fix` then `cargo fmt`.
+- `cli/src/main.rs` holds the commands; `core/` holds the model, schema, cache,
+  and the `jj` and `pijul` backends.
+- Quickstart text is the installed skill, so keep it accurate and terse, and
+  keep environment-dependent lines behind `QuickstartMode::Live`.
 
-## Tips & reminders
-- Always connect new functionality to the milestone roadmap in `docs/milestones.md`. When crafting a rune, mention which milestone it belongs to (e.g., M04 Dual Backend) so reviewers can assess scope in context.
-- Keep updates focused: avoid large manual patches in `core/` that reimplement behavior already covered by Pijul or Jujutsu SDK crates; prefer wiring existing abstractions where the docs already call them out.
+## Docs
+
+- `README.md`: overview and install.
+- `docs/framing.md`: vision and guiding principles.
+- `docs/schema.md`: KDL frontmatter, ID rules, directory layout.
+- `docs/configuration.md`: global and local config keys.

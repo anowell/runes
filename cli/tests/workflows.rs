@@ -107,6 +107,250 @@ fn copy_dir_recursive(from: &Path, to: &Path) {
     }
 }
 
+fn runes_in_output(home: &Path, cwd: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_runes"))
+        .args(args)
+        .current_dir(cwd)
+        .env("HOME", home)
+        .env("RUNES_USER", "Test User <test@runes.dev>")
+        .output()
+        .expect("run runes command")
+}
+
+fn runes_in(home: &Path, cwd: &Path, args: &[&str]) -> String {
+    let output = runes_in_output(home, cwd, args);
+    assert!(
+        output.status.success(),
+        "command failed: runes {}\nstderr:\n{}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    String::from_utf8(output.stdout).expect("stdout utf8")
+}
+
+/// A home with a global config but no local one, ready for `runes init`.
+fn initable_home(test_name: &str) -> (PathBuf, PathBuf) {
+    let home = unique_tmp_home(test_name);
+    let work = home.join("work");
+    fs::create_dir_all(&work).expect("create work dir");
+    runes_ok(
+        &home,
+        &["config", "set", "user.email", "test@runes.dev", "--global"],
+    );
+    (home, work)
+}
+
+const SKILL_RELPATHS: [&str; 2] = [
+    ".claude/skills/runes/SKILL.md",
+    ".agents/skills/runes/SKILL.md",
+];
+
+#[test]
+fn init_installs_skill_generated_from_quickstart() {
+    let (home, work) = initable_home("init-skill");
+
+    runes_in(&home, &work, &["init", "--project", "demo"]);
+
+    let mut bodies = Vec::new();
+    for relative in SKILL_RELPATHS {
+        let skill = fs::read_to_string(home.join(relative)).expect("skill installed");
+        let (frontmatter, body) = skill
+            .strip_prefix("---\n")
+            .and_then(|rest| rest.split_once("---\n"))
+            .expect("skill has yaml frontmatter");
+        assert!(
+            frontmatter.contains("name: \"Runes task tracking\""),
+            "unexpected frontmatter in {relative}: {frontmatter}"
+        );
+        assert!(
+            frontmatter.contains("description: \"Track tasks and issues"),
+            "unexpected frontmatter in {relative}: {frontmatter}"
+        );
+
+        // The body is generated from the live build, so it carries this
+        // build's command surface rather than a hand-maintained copy.
+        for expected in [
+            "runes edit <id> --dep <id2>",
+            "runes edit <id> --remove-dep <id2>",
+            "runes list --ready",
+            "runes list --blocked ",
+            "runes list --blocked-by <id>",
+            "runes list --blocks <id>",
+        ] {
+            assert!(
+                body.contains(expected),
+                "{relative} is missing `{expected}`"
+            );
+        }
+        bodies.push(body.to_string());
+    }
+    assert_eq!(bodies[0], bodies[1], "skill locations disagree");
+}
+
+/// The skill is one machine-global file shared by every repo, so it must not
+/// describe the machine it was generated on: no store paths, no default
+/// project, no "already initialized". Otherwise the first repo's setup leaks
+/// into every other repo, and a later init reports a hand edit that never
+/// happened.
+#[test]
+fn installed_skill_describes_no_particular_machine() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+
+    let (home, work) = initable_home("init-skill-neutral");
+    let store_path = home.join(".runes").join("stores").join("proj");
+    runes_ok(
+        &home,
+        &[
+            "store",
+            "init",
+            "proj",
+            "--backend",
+            "jj",
+            "--path",
+            &store_path.to_string_lossy(),
+            "--default",
+        ],
+    );
+
+    runes_in(&home, &work, &["init", "--project", "demo"]);
+
+    // The live guide really is machine-specific here...
+    let quickstart = runes_in(&home, &work, &["quickstart"]);
+    assert!(
+        quickstart.contains("PATHS"),
+        "no PATHS section: {quickstart}"
+    );
+    assert!(
+        quickstart.contains("Default project: demo"),
+        "no default project line: {quickstart}"
+    );
+    assert!(
+        quickstart.contains(&store_path.display().to_string()),
+        "no store path: {quickstart}"
+    );
+
+    // ...and the installed skill is not.
+    let home_str = home.display().to_string();
+    for relative in SKILL_RELPATHS {
+        let skill = fs::read_to_string(home.join(relative)).expect("skill installed");
+        assert!(
+            !skill.contains(&home_str),
+            "{relative} leaks an absolute path under {home_str}:\n{skill}"
+        );
+        for leak in ["Default project:", "PATHS", "already initialized"] {
+            assert!(
+                !skill.contains(leak),
+                "{relative} contains `{leak}`:\n{skill}"
+            );
+        }
+        let absolute = skill
+            .lines()
+            .find(|line| line.trim_start().starts_with('/'));
+        assert_eq!(absolute, None, "{relative} contains an absolute path");
+        // It says how to find the paths instead of baking them in.
+        assert!(
+            skill.contains("runes store list") && skill.contains("runes show <id> --json"),
+            "{relative} does not explain how to find rune docs:\n{skill}"
+        );
+    }
+
+    // A later init from a different repo, same machine: same skill, no noise.
+    let other = home.join("other-repo");
+    fs::create_dir_all(&other).expect("create other repo");
+    let before = fs::read_to_string(home.join(SKILL_RELPATHS[0])).expect("skill installed");
+    let stdout = runes_in(&home, &other, &["init", "--project", "other"]);
+    assert!(
+        !stdout.contains("differs") && !stdout.contains("--force-skill"),
+        "second init from another repo reported a hand edit: {stdout}"
+    );
+    assert_eq!(
+        fs::read_to_string(home.join(SKILL_RELPATHS[0])).expect("skill still there"),
+        before,
+        "second init rewrote the skill"
+    );
+}
+
+/// A second skill location is a nice-to-have: if it cannot be written, init
+/// warns and still succeeds.
+#[test]
+fn init_survives_an_unwritable_skill_location() {
+    let (home, work) = initable_home("init-skill-unwritable");
+    let blocked = home.join(".agents");
+    fs::create_dir_all(&blocked).expect("create .agents");
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o500)).expect("chmod .agents");
+    if fs::create_dir(blocked.join("probe")).is_ok() {
+        eprintln!("skipping: filesystem ignores directory permissions");
+        return;
+    }
+
+    let output = runes_in_output(&home, &work, &["init", "--project", "demo"]);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700)).expect("restore .agents");
+
+    assert!(
+        output.status.success(),
+        "init failed on an unwritable skill location\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("warning: could not install the agent skill"),
+        "no warning about the skipped location: {stderr}"
+    );
+    assert!(
+        home.join(SKILL_RELPATHS[0]).exists(),
+        "the writable location was skipped too: {stdout}"
+    );
+}
+
+#[test]
+fn init_no_skill_skips_installation() {
+    let (home, work) = initable_home("init-no-skill");
+
+    runes_in(&home, &work, &["init", "--project", "demo", "--no-skill"]);
+
+    for relative in SKILL_RELPATHS {
+        assert!(
+            !home.join(relative).exists(),
+            "--no-skill still wrote {relative}"
+        );
+    }
+}
+
+#[test]
+fn init_leaves_a_differing_skill_alone_until_forced() {
+    let (home, work) = initable_home("init-force-skill");
+    let skill_path = home.join(SKILL_RELPATHS[0]);
+    fs::create_dir_all(skill_path.parent().expect("skill dir")).expect("create skill dir");
+    fs::write(&skill_path, "hand-written skill\n").expect("seed skill");
+
+    let stdout = runes_in(&home, &work, &["init", "--project", "demo"]);
+    assert_eq!(
+        fs::read_to_string(&skill_path).expect("skill still there"),
+        "hand-written skill\n",
+        "init overwrote an existing skill by default"
+    );
+    assert!(
+        stdout.contains("--force-skill"),
+        "init should hint at --force-skill: {stdout}"
+    );
+    // The untouched location is still seeded.
+    assert!(home.join(SKILL_RELPATHS[1]).exists());
+
+    let stdout = runes_in(&home, &work, &["init", "--force-skill"]);
+    assert!(
+        stdout.contains(&skill_path.display().to_string()),
+        "init --force-skill should report the rewritten skill: {stdout}"
+    );
+    let skill = fs::read_to_string(&skill_path).expect("skill rewritten");
+    assert!(
+        skill.starts_with("---\nname: \"Runes task tracking\""),
+        "--force-skill did not overwrite: {skill}"
+    );
+}
+
 #[test]
 fn init_outside_repo() {
     let home = unique_tmp_home("init-outside-repo");

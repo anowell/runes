@@ -153,6 +153,12 @@ struct InitArgs {
     /// Add runes.kdl to .git/info/exclude instead of committing it
     #[arg(long)]
     stealth: bool,
+    /// Skip installing the agent skill (init refreshes it on every run otherwise)
+    #[arg(long = "no-skill", conflicts_with = "force_skill")]
+    no_skill: bool,
+    /// Overwrite a hand-edited agent skill (unedited ones refresh silently)
+    #[arg(long = "force-skill")]
+    force_skill: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -4834,20 +4840,106 @@ fn run_init(args: InitArgs) -> Result<()> {
         println!("Local config already exists at {}", local_path.display());
     }
 
+    if !args.no_skill {
+        install_skill(args.force_skill)?;
+    }
+
     Ok(())
 }
 
-fn run_quickstart() -> Result<()> {
-    let cwd = std::env::current_dir().map_err(|e| Error::new(e.to_string()))?;
-    let global_path = user_config::global_config_path()?;
-    let global_exists = global_path.exists();
-    let has_local = find_repo_root(&cwd)
-        .map(|root| root.join("runes.kdl").exists())
-        .unwrap_or(false);
+/// Skill locations relative to $HOME. Codex, Gemini and Cursor are left out:
+/// they have no skill directory, only a global instructions file the user owns.
+const SKILL_PATHS: &[&str] = &[
+    ".claude/skills/runes/SKILL.md",
+    ".agents/skills/runes/SKILL.md",
+];
 
-    let (all_stores, user_cfg) = load_context()
-        .map(|(stores, cfg, _)| (stores, cfg))
-        .unwrap_or_default();
+const SKILL_DESCRIPTION: &str = "Track tasks and issues as VCS-backed markdown docs via the runes CLI. Use when creating, finding, updating, commenting on, or committing runes (tasks/issues) in a project that uses runes.";
+
+fn skill_document() -> Result<String> {
+    let mut body = Vec::new();
+    write_quickstart(&mut body, QuickstartMode::Neutral)?;
+    let body = String::from_utf8(body).map_err(|e| Error::new(e.to_string()))?;
+    Ok(format!(
+        "---\nname: \"Runes task tracking\"\ndescription: \"{SKILL_DESCRIPTION}\"\n---\n\n{body}"
+    ))
+}
+
+fn install_skill(force: bool) -> Result<()> {
+    let home = home_dir()?;
+    let document = skill_document()?;
+    let mut installed = false;
+    let mut failure = None;
+    for relative in SKILL_PATHS {
+        let path = home.join(relative);
+        match write_skill(&path, &document, force) {
+            Ok(()) => installed = true,
+            Err(e) => {
+                // One unwritable agent directory should not fail the whole init.
+                eprintln!(
+                    "warning: could not install the agent skill at {}: {e}",
+                    path.display()
+                );
+                failure = Some(e);
+            }
+        }
+    }
+    match failure {
+        Some(e) if !installed => Err(e),
+        _ => Ok(()),
+    }
+}
+
+/// Writes the skill unless the file on disk was hand-edited. Identical content
+/// is rewritten silently, so re-running `runes init` keeps the skill in step
+/// with the binary without any output.
+fn write_skill(path: &Path, document: &str, force: bool) -> Result<()> {
+    if !force && path.exists() {
+        if fs::read_to_string(path).unwrap_or_default() != document {
+            println!(
+                "Agent skill at {} differs; leaving it alone (use --force-skill to overwrite)",
+                path.display()
+            );
+        }
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, document)?;
+    println!("Agent skill written to {}", path.display());
+    Ok(())
+}
+
+/// Which flavor of the guide to render.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum QuickstartMode {
+    /// `runes quickstart`: describes this machine - its store, paths and schema.
+    Live,
+    /// The installed agent skill. It lives in one machine-global file shared by
+    /// every repo, so it must depend on nothing but the binary: no paths, no
+    /// config, no "already initialized". That also keeps the leave-a-differing-
+    /// skill-alone check meaningful - it only fires on real hand edits.
+    Neutral,
+}
+
+fn run_quickstart() -> Result<()> {
+    let stdout = io::stdout();
+    write_quickstart(&mut stdout.lock(), QuickstartMode::Live)
+}
+
+/// Shared by `runes quickstart` and the skill `runes init` installs, so the
+/// installed skill cannot drift from the live guide.
+fn write_quickstart(out: &mut impl io::Write, mode: QuickstartMode) -> Result<()> {
+    let live = mode == QuickstartMode::Live;
+
+    let (all_stores, user_cfg) = if live {
+        load_context()
+            .map(|(stores, cfg, _)| (stores, cfg))
+            .unwrap_or_default()
+    } else {
+        Default::default()
+    };
 
     let default_store = user_cfg.default_store.as_deref();
     let default_project = user_cfg.default_project.as_deref();
@@ -4859,151 +4951,341 @@ fn run_quickstart() -> Result<()> {
     let schema = active_store.and_then(|store| load_schema(&store.path, default_project).ok());
 
     // -- Header --
-    println!("runes - A local-first issue tracker stored as markdown rune docs");
-    println!();
+    writeln!(
+        out,
+        "runes - A local-first issue tracker stored as markdown rune docs"
+    )?;
+    writeln!(out)?;
 
-    // -- Initialization --
-    if !global_exists {
-        println!("GETTING STARTED");
-        println!("===============");
-        println!();
-        println!("  Run `runes init` to set up runes. This will:");
-        println!("  - Create a global config at ~/.runes/config.kdl");
-        println!("  - Initialize a store backed by jj or pijul");
-        println!("  - Optionally create a local runes.kdl config for the current repo");
-        println!();
-        println!("  Example:");
-        println!("    runes init                     # interactive setup");
-        println!("    runes init --project myapp     # non-interactive with project prefix");
-        println!();
-    } else if !has_local {
-        println!("runes is initialized globally. Run `runes init` in a repo to create a");
-        println!("local runes.kdl config for project-specific settings.");
-        println!();
-    } else {
-        println!("runes is already initialized.");
-        println!();
+    // -- Initialization -- (live only: it reports this machine's setup)
+    if live {
+        let cwd = std::env::current_dir().map_err(|e| Error::new(e.to_string()))?;
+        let global_exists = user_config::global_config_path()?.exists();
+        let has_local = find_repo_root(&cwd)
+            .map(|root| root.join("runes.kdl").exists())
+            .unwrap_or(false);
+
+        if !global_exists {
+            writeln!(out, "GETTING STARTED")?;
+            writeln!(out, "===============")?;
+            writeln!(out)?;
+            writeln!(out, "  Run `runes init` to set up runes. This will:")?;
+            writeln!(out, "  - Create a global config at ~/.runes/config.kdl")?;
+            writeln!(out, "  - Initialize a store backed by jj or pijul")?;
+            writeln!(
+                out,
+                "  - Optionally create a local runes.kdl config for the current repo"
+            )?;
+            writeln!(out)?;
+            writeln!(out, "  Example:")?;
+            writeln!(
+                out,
+                "    runes init                     # interactive setup"
+            )?;
+            writeln!(
+                out,
+                "    runes init --project myapp     # non-interactive with project prefix"
+            )?;
+            writeln!(out)?;
+        } else if !has_local {
+            writeln!(
+                out,
+                "runes is initialized globally. Run `runes init` in a repo to create a"
+            )?;
+            writeln!(out, "local runes.kdl config for project-specific settings.")?;
+            writeln!(out)?;
+        } else {
+            writeln!(out, "runes is already initialized.")?;
+            writeln!(out)?;
+        }
     }
 
     // -- Paths --
     if let Some(store) = active_store {
-        println!("PATHS");
-        println!("=====");
-        println!();
-        println!(
+        writeln!(out, "PATHS")?;
+        writeln!(out, "=====")?;
+        writeln!(out)?;
+        writeln!(
+            out,
             "  Store \"{}\" (backend: {})",
             store.name,
             match store.backend {
                 BackendKind::Pijul => "pijul",
                 BackendKind::Jj => "jj",
             }
-        );
-        println!("    {}", store.path.display());
+        )?;
+        writeln!(out, "    {}", store.path.display())?;
         if let Some(proj) = default_project {
-            println!();
-            println!("  Default project: {}", proj);
-            println!("    {}", store.path.join(proj).display());
+            writeln!(out)?;
+            writeln!(out, "  Default project: {}", proj)?;
+            writeln!(out, "    {}", store.path.join(proj).display())?;
         }
-        println!();
-        println!("  Rune docs are plain markdown files with KDL frontmatter. You can edit");
-        println!("  them directly in your editor or file manager. Direct edits are tracked");
-        println!("  as uncommitted changes until you run:");
-        println!();
-        println!("    runes commit <id>        # just that rune");
-        println!("    runes commit [-m <msg>]  # everything pending");
-        println!();
+        writeln!(out)?;
+        writeln!(
+            out,
+            "  Rune docs are plain markdown files with KDL frontmatter. You can edit"
+        )?;
+        writeln!(
+            out,
+            "  them directly in your editor or file manager. Direct edits are tracked"
+        )?;
+        writeln!(out, "  as uncommitted changes until you run:")?;
+        writeln!(out)?;
+        writeln!(out, "    runes commit <id>        # just that rune")?;
+        writeln!(out, "    runes commit [-m <msg>]  # everything pending")?;
+        writeln!(out)?;
+    } else if !live {
+        // Same ground, minus this machine: say how to look the paths up.
+        writeln!(out, "RUNE DOCS")?;
+        writeln!(out, "=========")?;
+        writeln!(out)?;
+        writeln!(
+            out,
+            "  Rune docs are plain markdown files with KDL frontmatter, kept in a store"
+        )?;
+        writeln!(out, "  outside the repo. To find them:")?;
+        writeln!(out)?;
+        writeln!(
+            out,
+            "    runes store list            # configured stores and where they live"
+        )?;
+        writeln!(
+            out,
+            "    runes show <id> --json      # store name + the doc path within it"
+        )?;
+        writeln!(
+            out,
+            "    runes new <title>           # prints the absolute path of the new doc"
+        )?;
+        writeln!(
+            out,
+            "    runes quickstart            # this machine's stores, paths and schema"
+        )?;
+        writeln!(out)?;
+        writeln!(
+            out,
+            "  You can edit those files directly in your editor or file manager. Direct"
+        )?;
+        writeln!(
+            out,
+            "  edits are tracked as uncommitted changes until you run:"
+        )?;
+        writeln!(out)?;
+        writeln!(out, "    runes commit <id>        # just that rune")?;
+        writeln!(out, "    runes commit [-m <msg>]  # everything pending")?;
+        writeln!(out)?;
     }
 
     // -- Creating runes --
-    println!("CREATING RUNES");
-    println!("==============");
-    println!();
-    println!("  The canonical flow is: new -> edit the printed file -> commit <id>.");
-    println!("  `runes new` prints the id and the absolute path of the doc it created,");
-    println!("  and leaves it uncommitted so you can fill it in before recording it:");
-    println!();
-    println!("    runes new \"Fix login bug\"       # prints id + path, nothing committed yet");
-    println!("    $EDITOR <the printed path>     # write the description");
-    println!("    runes diff <id>                # review what is pending");
-    println!("    runes commit <id>              # record it");
-    println!("    runes delete <id>              # discard it (no --force until committed)");
-    println!();
-    println!("  Providing the content up front commits it right away instead:");
-    println!();
-    println!("    runes new \"Add auth\" --kind bug --commit       # skip the editing step");
-    println!("    runes new \"Write tests\" -e                    # open in editor, then commit");
-    println!(
+    writeln!(out, "CREATING RUNES")?;
+    writeln!(out, "==============")?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "  The canonical flow is: new -> edit the printed file -> commit <id>."
+    )?;
+    writeln!(
+        out,
+        "  `runes new` prints the id and the absolute path of the doc it created,"
+    )?;
+    writeln!(
+        out,
+        "  and leaves it uncommitted so you can fill it in before recording it:"
+    )?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "    runes new \"Fix login bug\"       # prints id + path, nothing committed yet"
+    )?;
+    writeln!(
+        out,
+        "    $EDITOR <the printed path>     # write the description"
+    )?;
+    writeln!(
+        out,
+        "    runes diff <id>                # review what is pending"
+    )?;
+    writeln!(out, "    runes commit <id>              # record it")?;
+    writeln!(
+        out,
+        "    runes delete <id>              # discard it (no --force until committed)"
+    )?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "  Providing the content up front commits it right away instead:"
+    )?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "    runes new \"Add auth\" --kind bug --commit       # skip the editing step"
+    )?;
+    writeln!(
+        out,
+        "    runes new \"Write tests\" -e                    # open in editor, then commit"
+    )?;
+    writeln!(
+        out,
         "    runes new \"Fix flake\" -f notes.md             # body (or full doc) from a file"
-    );
-    println!("    runes new \"Fix flake\" -f notes.md --no-commit # ...but leave it uncommitted");
-    println!("    runes new \"v2.0 release\" --kind milestone");
-    println!();
+    )?;
+    writeln!(
+        out,
+        "    runes new \"Fix flake\" -f notes.md --no-commit # ...but leave it uncommitted"
+    )?;
+    writeln!(out, "    runes new \"v2.0 release\" --kind milestone")?;
+    writeln!(out)?;
 
     // -- Viewing runes --
-    println!("VIEWING RUNES");
-    println!("=============");
-    println!();
-    println!("  runes                         # list open runes (default view)");
-    println!("  runes list                    # same as above");
-    println!("  runes list --status wip       # filter by state (matches wip:review too)");
-    println!("  runes list --kind bug         # filter by kind");
-    println!("  runes show <id>               # show full rune doc");
-    println!("  runes search login            # full-text search, any status");
-    println!();
-    println!("  Built-in views:");
+    writeln!(out, "VIEWING RUNES")?;
+    writeln!(out, "=============")?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "  runes                         # list open runes (default view)"
+    )?;
+    writeln!(out, "  runes list                    # same as above")?;
+    writeln!(
+        out,
+        "  runes list --status wip       # filter by state (matches wip:review too)"
+    )?;
+    writeln!(out, "  runes list --kind bug         # filter by kind")?;
+    writeln!(out, "  runes show <id>               # show full rune doc")?;
+    writeln!(
+        out,
+        "  runes search login            # full-text search, any status"
+    )?;
+    writeln!(out)?;
+    writeln!(out, "  Built-in views:")?;
     for (name, description) in BUILTIN_VIEWS {
-        println!("    runes list {:<10}{}", name, description);
+        writeln!(out, "    runes list {:<10}{}", name, description)?;
     }
-    println!("    runes list {:<10}same as `runes list all`", "--all");
+    writeln!(
+        out,
+        "    runes list {:<10}same as `runes list all`",
+        "--all"
+    )?;
+    writeln!(out)?;
+    writeln!(out, "  Dependencies:")?;
+    writeln!(
+        out,
+        "    runes list --ready            # no unresolved deps left"
+    )?;
+    writeln!(
+        out,
+        "    runes list --blocked          # waiting on an unresolved dep"
+    )?;
+    writeln!(
+        out,
+        "    runes list --blocked-by <id>  # runes waiting on <id>"
+    )?;
+    writeln!(
+        out,
+        "    runes list --blocks <id>      # runes <id> is waiting on"
+    )?;
     if !user_cfg.queries.is_empty() {
         let mut query_names: Vec<&str> = user_cfg.queries.keys().map(String::as_str).collect();
         query_names.sort();
-        println!();
-        println!("  Custom views are deprecated while built-in views stabilize.");
-        println!("  Still defined in your config: {}", query_names.join(", "));
+        writeln!(out)?;
+        writeln!(
+            out,
+            "  Custom views are deprecated while built-in views stabilize."
+        )?;
+        writeln!(
+            out,
+            "  Still defined in your config: {}",
+            query_names.join(", ")
+        )?;
     }
-    println!();
+    writeln!(out)?;
 
     // -- Updating runes --
-    println!("UPDATING RUNES");
-    println!("==============");
-    println!();
-    println!("  runes edit <id> --status wip:review        # change state");
-    println!("  runes edit <id> --status closed            # close it");
-    println!("  runes edit <id> --title \"New title\"        # rename (updates the h1 line)");
-    println!("  runes edit <id> --assignee alice           # reassign");
-    println!("  runes edit <id> --label urgent             # add a label");
-    println!("  runes edit <id> --remove-label urgent      # remove a label");
-    println!("  runes edit <id> --milestone <mid>          # link to milestone");
-    println!("  runes edit <id> -e                         # open in editor");
-    println!("  runes comment <id> -m \"Looks good\"         # add a comment");
-    println!();
-    println!("  Or edit the markdown file directly, then `runes diff <id>` to review");
-    println!("  and `runes commit <id>` to record just that rune.");
-    println!();
+    writeln!(out, "UPDATING RUNES")?;
+    writeln!(out, "==============")?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "  runes edit <id> --status wip:review        # change state"
+    )?;
+    writeln!(
+        out,
+        "  runes edit <id> --status closed            # close it"
+    )?;
+    writeln!(
+        out,
+        "  runes edit <id> --title \"New title\"        # rename (updates the h1 line)"
+    )?;
+    writeln!(
+        out,
+        "  runes edit <id> --assignee alice           # reassign"
+    )?;
+    writeln!(
+        out,
+        "  runes edit <id> --label urgent             # add a label"
+    )?;
+    writeln!(
+        out,
+        "  runes edit <id> --remove-label urgent      # remove a label"
+    )?;
+    writeln!(
+        out,
+        "  runes edit <id> --milestone <mid>          # link to milestone"
+    )?;
+    writeln!(
+        out,
+        "  runes edit <id> --dep <id2>                # <id> waits on <id2>"
+    )?;
+    writeln!(
+        out,
+        "  runes edit <id> --remove-dep <id2>         # drop that dependency"
+    )?;
+    writeln!(
+        out,
+        "  runes edit <id> -e                         # open in editor"
+    )?;
+    writeln!(
+        out,
+        "  runes comment <id> -m \"Looks good\"         # add a comment"
+    )?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "  Or edit the markdown file directly, then `runes diff <id>` to review"
+    )?;
+    writeln!(out, "  and `runes commit <id>` to record just that rune.")?;
+    writeln!(out)?;
 
     // -- Schema info --
     {
-        println!("SCHEMA");
-        println!("======");
-        println!();
+        writeln!(out, "SCHEMA")?;
+        writeln!(out, "======")?;
+        writeln!(out)?;
 
+        // Neutral mode has no config to read, so this is the built-in default.
         let states = user_cfg.state_config().unwrap_or_default();
-        println!("  States: {}", state::CORE_STATES.join(", "));
+        writeln!(out, "  States: {}", state::CORE_STATES.join(", "))?;
         for core in state::CORE_STATES {
-            println!("    {}", states.allowed_display(core));
+            writeln!(out, "    {}", states.allowed_display(core))?;
         }
-        println!();
+        writeln!(out)?;
+
+        if !live {
+            writeln!(
+                out,
+                "  Substates, kinds and custom fields are per-project: run `runes quickstart`"
+            )?;
+            writeln!(out, "  for the schema in effect here.")?;
+            writeln!(out)?;
+        }
 
         if let Some(ref schema) = schema {
             let kinds = schema.available_kinds();
             if !kinds.is_empty() {
-                println!("  Kinds: {}", kinds.join(", "));
+                writeln!(out, "  Kinds: {}", kinds.join(", "))?;
             }
             // Show custom fields
             if !schema.fields.is_empty() {
-                println!();
-                println!("  Custom fields:");
+                writeln!(out)?;
+                writeln!(out, "  Custom fields:")?;
                 let mut field_names: Vec<&String> = schema.fields.keys().collect();
                 field_names.sort();
                 for name in field_names {
@@ -5015,10 +5297,10 @@ fn run_quickstart() -> Result<()> {
                     if field.optional {
                         desc.push_str(" [optional]");
                     }
-                    println!("    {}{}", name, desc);
+                    writeln!(out, "    {}{}", name, desc)?;
                 }
             }
-            println!();
+            writeln!(out)?;
 
             // Show kind templates with custom paths if any exist
             if let Some(store) = active_store {
@@ -5027,50 +5309,83 @@ fn run_quickstart() -> Result<()> {
                 });
 
                 if has_custom_templates {
-                    println!("  Kind templates:");
+                    writeln!(out, "  Kind templates:")?;
                     for kind in &kinds {
                         if let Some(path) =
                             find_kind_template_path(&store.path, default_project, kind)
                         {
-                            println!("    {}: {}", kind, path.display());
+                            writeln!(out, "    {}: {}", kind, path.display())?;
                         } else {
-                            println!("    {}: (builtin default)", kind);
+                            writeln!(out, "    {}: (builtin default)", kind)?;
                         }
                     }
-                    println!();
+                    writeln!(out)?;
                 }
             }
         }
 
-        println!("  Default rune template is markdown with \"## Description\" and \"## Acceptance\" sections.");
-        println!();
+        writeln!(out, "  Default rune template is markdown with \"## Description\" and \"## Acceptance\" sections.")?;
+        writeln!(out)?;
     }
 
     // -- Other commands --
-    println!("OTHER COMMANDS");
-    println!("==============");
-    println!();
-    println!("  runes log                     # change history for the project");
-    println!("  runes log <id>                # change history for a specific rune");
-    println!("  runes diff <id>               # show uncommitted changes to a rune");
-    println!("  runes archive <id>            # archive a rune");
-    println!("  runes delete <id>             # delete a rune");
-    println!("  runes move <id> --project p   # move rune to another project");
-    println!("  runes restore <id> --revision r  # restore to a previous revision");
-    println!("  runes sync                    # sync store with backend");
-    println!();
+    writeln!(out, "OTHER COMMANDS")?;
+    writeln!(out, "==============")?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "  runes log                     # change history for the project"
+    )?;
+    writeln!(
+        out,
+        "  runes log <id>                # change history for a specific rune"
+    )?;
+    writeln!(
+        out,
+        "  runes diff <id>               # show uncommitted changes to a rune"
+    )?;
+    writeln!(out, "  runes archive <id>            # archive a rune")?;
+    writeln!(out, "  runes delete <id>             # delete a rune")?;
+    writeln!(
+        out,
+        "  runes move <id> --project p   # move rune to another project"
+    )?;
+    writeln!(
+        out,
+        "  runes restore <id> --revision r  # restore to a previous revision"
+    )?;
+    writeln!(
+        out,
+        "  runes sync                    # sync store with backend"
+    )?;
+    writeln!(out)?;
 
     // -- Agent integration --
-    println!("AGENT INTEGRATION");
-    println!("=================");
-    println!();
-    println!("  The following commands support --json for programmatic parsing:");
-    println!();
-    println!("    runes list --json           # JSON array of rune summaries");
-    println!("    runes search <term> --json  # JSON array of matching runes");
-    println!("    runes show <id> --json      # JSON object with full rune details");
-    println!("    runes log --json            # JSON array of log entries");
-    println!();
+    writeln!(out, "AGENT INTEGRATION")?;
+    writeln!(out, "=================")?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "  The following commands support --json for programmatic parsing:"
+    )?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "    runes list --json           # JSON array of rune summaries"
+    )?;
+    writeln!(
+        out,
+        "    runes search <term> --json  # JSON array of matching runes"
+    )?;
+    writeln!(
+        out,
+        "    runes show <id> --json      # JSON object with full rune details"
+    )?;
+    writeln!(
+        out,
+        "    runes log --json            # JSON array of log entries"
+    )?;
+    writeln!(out)?;
 
     Ok(())
 }
