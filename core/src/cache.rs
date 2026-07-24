@@ -61,6 +61,7 @@ pub fn rebuild_cache(store: &Store) -> Result<()> {
     conn.execute_batch(
         "DROP TABLE IF EXISTS runes;
          DROP TABLE IF EXISTS rune_deps;
+         DROP TABLE IF EXISTS rune_fts;
          CREATE TABLE runes (
            id TEXT PRIMARY KEY,
            short_id TEXT NOT NULL,
@@ -85,7 +86,8 @@ pub fn rebuild_cache(store: &Store) -> Result<()> {
          CREATE INDEX idx_runes_assignee ON runes(assignee);
          CREATE INDEX idx_runes_blocked ON runes(blocked);
          CREATE INDEX idx_rune_deps_rune ON rune_deps(rune_id);
-         CREATE INDEX idx_rune_deps_dep ON rune_deps(dep_id);",
+         CREATE INDEX idx_rune_deps_dep ON rune_deps(dep_id);
+         CREATE VIRTUAL TABLE rune_fts USING fts5(id UNINDEXED, title, body);",
     )?;
 
     // Collect all docs with their deps for a two-pass approach:
@@ -108,6 +110,8 @@ pub fn rebuild_cache(store: &Store) -> Result<()> {
         )?;
         let mut dep_stmt =
             tx.prepare("INSERT OR IGNORE INTO rune_deps (rune_id, dep_id) VALUES (?1, ?2)")?;
+        let mut fts_stmt =
+            tx.prepare("INSERT INTO rune_fts (id, title, body) VALUES (?1, ?2, ?3)")?;
 
         for entry in std::fs::read_dir(&store.path)? {
             let entry = entry?;
@@ -138,6 +142,8 @@ pub fn rebuild_cache(store: &Store) -> Result<()> {
                     doc.id, short_id, project, doc.kind, doc.status, assignee, doc.title, rel_path,
                     labels,
                 ])?;
+                // Comments live in the body, so indexing it covers them too.
+                fts_stmt.execute(params![doc.id, doc.title, doc.body])?;
                 for dep in &doc.deps {
                     dep_stmt.execute(params![doc.id, dep])?;
                 }
@@ -230,13 +236,15 @@ pub struct CacheRow {
     pub blocked: bool,
 }
 
-pub fn query_cache(store: &Store, filter: &CacheFilter) -> Result<Vec<CacheRow>> {
-    let db_path = cache_path(store)?;
-    if !db_path.exists() {
-        rebuild_cache(store)?;
-    }
-    let conn = open_db(store)?;
+/// SQL fragments for a `CacheFilter`. Bindings are positional, so `params` must
+/// follow any param appearing earlier in the composed statement.
+struct FilterSql {
+    joins: Vec<String>,
+    conditions: Vec<String>,
+    params: Vec<Box<dyn rusqlite::types::ToSql>>,
+}
 
+fn filter_sql(filter: &CacheFilter) -> FilterSql {
     let mut conditions = Vec::new();
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     let mut joins = Vec::new();
@@ -307,48 +315,137 @@ pub fn query_cache(store: &Store, filter: &CacheFilter) -> Result<Vec<CacheRow>>
         param_values.push(Box::new(blocks_id.clone()));
     }
 
-    let where_clause = if conditions.is_empty() {
-        "1=1".to_string()
+    FilterSql {
+        joins,
+        conditions,
+        params: param_values,
+    }
+}
+
+const ROW_COLUMNS: &str = "runes.id, runes.project, runes.kind, runes.status, runes.assignee, runes.title, runes.path, runes.labels, runes.updated, runes.blocked";
+
+fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CacheRow> {
+    let labels_str: String = row.get(7)?;
+    let labels = if labels_str.is_empty() {
+        Vec::new()
     } else {
-        conditions.join(" AND ")
+        labels_str.split(',').map(|s| s.to_string()).collect()
     };
+    Ok(CacheRow {
+        id: row.get(0)?,
+        project: row.get(1)?,
+        kind: row.get(2)?,
+        status: row.get(3)?,
+        assignee: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+        title: row.get(5)?,
+        path: row.get(6)?,
+        labels,
+        updated: row.get(8)?,
+        blocked: row.get::<_, i32>(9)? != 0,
+    })
+}
 
-    let join_clause = joins.join(" ");
-
-    let sql = format!(
-        "SELECT runes.id, runes.project, runes.kind, runes.status, runes.assignee, runes.title, runes.path, runes.labels, runes.updated, runes.blocked FROM runes {} WHERE {} ORDER BY runes.updated DESC NULLS LAST, runes.id",
-        join_clause, where_clause
-    );
-
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-        param_values.iter().map(|p| p.as_ref()).collect();
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(param_refs.as_slice(), |row| {
-        let labels_str: String = row.get(7)?;
-        let labels = if labels_str.is_empty() {
-            Vec::new()
-        } else {
-            labels_str.split(',').map(|s| s.to_string()).collect()
-        };
-        Ok(CacheRow {
-            id: row.get(0)?,
-            project: row.get(1)?,
-            kind: row.get(2)?,
-            status: row.get(3)?,
-            assignee: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-            title: row.get(5)?,
-            path: row.get(6)?,
-            labels,
-            updated: row.get(8)?,
-            blocked: row.get::<_, i32>(9)? != 0,
-        })
-    })?;
-
+fn collect_rows(
+    conn: &Connection,
+    sql: &str,
+    params: &[Box<dyn rusqlite::types::ToSql>],
+) -> Result<Vec<CacheRow>> {
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(param_refs.as_slice(), map_row)?;
     let mut result = Vec::new();
     for row in rows {
         result.push(row?);
     }
     Ok(result)
+}
+
+fn where_clause(conditions: &[String]) -> String {
+    if conditions.is_empty() {
+        "1=1".to_string()
+    } else {
+        conditions.join(" AND ")
+    }
+}
+
+pub fn query_cache(store: &Store, filter: &CacheFilter) -> Result<Vec<CacheRow>> {
+    let db_path = cache_path(store)?;
+    if !db_path.exists() {
+        rebuild_cache(store)?;
+    }
+    let conn = open_db(store)?;
+
+    let parts = filter_sql(filter);
+    let sql = format!(
+        "SELECT {} FROM runes {} WHERE {} ORDER BY runes.updated DESC NULLS LAST, runes.id",
+        ROW_COLUMNS,
+        parts.joins.join(" "),
+        where_clause(&parts.conditions)
+    );
+    collect_rows(&conn, &sql, &parts.params)
+}
+
+/// Build an FTS5 MATCH expression from a user term. Each token becomes a quoted
+/// prefix phrase so punctuation and FTS operators are matched literally rather
+/// than changing the query. `None` when the term has no searchable token.
+fn fts_match_expr(term: &str) -> Option<String> {
+    let tokens: Vec<String> = term
+        .split_whitespace()
+        .filter(|token| token.chars().any(|c| c.is_alphanumeric()))
+        .map(|token| format!("\"{}\"*", token.replace('"', "\"\"")))
+        .collect();
+    if tokens.is_empty() {
+        return None;
+    }
+    Some(tokens.join(" AND "))
+}
+
+/// Full-text search over rune titles and bodies, ranked with title matches first.
+/// Every status is searched — done and closed runes match unless the caller
+/// narrows `filter`.
+pub fn search_cache(store: &Store, term: &str, filter: &CacheFilter) -> Result<Vec<CacheRow>> {
+    let Some(match_expr) = fts_match_expr(term) else {
+        return Ok(Vec::new());
+    };
+    ensure_search_index(store)?;
+    let conn = open_db(store)?;
+
+    let parts = filter_sql(filter);
+    // Title hits sort above body-only hits; bm25 (lower is better) breaks ties.
+    let sql = format!(
+        "SELECT {} FROM rune_fts \
+         JOIN runes ON runes.id = rune_fts.id \
+         LEFT JOIN (SELECT id FROM rune_fts WHERE rune_fts MATCH ?) title_hit ON title_hit.id = runes.id {} \
+         WHERE rune_fts MATCH ? AND {} \
+         ORDER BY title_hit.id IS NULL, bm25(rune_fts), runes.updated DESC NULLS LAST, runes.id",
+        ROW_COLUMNS,
+        parts.joins.join(" "),
+        where_clause(&parts.conditions)
+    );
+
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+        Box::new(format!("title : ({match_expr})")),
+        Box::new(match_expr),
+    ];
+    params.extend(parts.params);
+    collect_rows(&conn, &sql, &params)
+}
+
+/// Rebuild caches that are missing or predate the search index (built by an
+/// older binary).
+fn ensure_search_index(store: &Store) -> Result<()> {
+    if !cache_path(store)?.exists() {
+        return rebuild_cache(store);
+    }
+    let has_index: i64 = open_db(store)?.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'rune_fts'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_index == 0 {
+        rebuild_cache(store)?;
+    }
+    Ok(())
 }
 
 pub fn lookup_status(store: &Store, id: &str) -> Result<Option<String>> {
@@ -364,5 +461,33 @@ pub fn lookup_status(store: &Store, id: &str) -> Result<Option<String>> {
         Ok(status) => Ok(Some(status)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fts_expr_quotes_and_ands_tokens() {
+        assert_eq!(fts_match_expr("login"), Some("\"login\"*".to_string()));
+        assert_eq!(
+            fts_match_expr("login  flow"),
+            Some("\"login\"* AND \"flow\"*".to_string())
+        );
+    }
+
+    #[test]
+    fn fts_expr_neutralizes_operators() {
+        // Operators and punctuation are matched literally, not interpreted.
+        assert_eq!(
+            fts_match_expr("OR rn-bpp"),
+            Some("\"OR\"* AND \"rn-bpp\"*".to_string())
+        );
+        assert_eq!(
+            fts_match_expr("say \"hi\""),
+            Some("\"say\"* AND \"\"\"hi\"\"\"*".to_string())
+        );
+        assert_eq!(fts_match_expr("  -- "), None);
     }
 }

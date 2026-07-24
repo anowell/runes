@@ -36,6 +36,8 @@ enum CliCommand {
     New(NewArgs),
     /// List rune docs with optional filters
     List(ListArgs),
+    /// Full-text search rune titles and bodies
+    Search(SearchArgs),
     /// Show a rune doc by ID
     Show(ShowArgs),
     /// Edit metadata on an existing rune doc
@@ -246,6 +248,33 @@ struct ListArgs {
     /// Show runes that block a specific rune ID
     #[arg(long)]
     blocks: Option<String>,
+    /// Output as JSON
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Parser)]
+struct SearchArgs {
+    /// Text to look for in rune titles and bodies (including comments)
+    term: String,
+    /// Store to search
+    #[arg(long)]
+    store: Option<String>,
+    /// Filter by project (or store:project; empty string for all)
+    #[arg(long)]
+    project: Option<String>,
+    /// Filter by status (all statuses are searched by default)
+    #[arg(long)]
+    status: Option<String>,
+    /// Filter by label (repeatable)
+    #[arg(short = 'l', long = "label")]
+    labels: Vec<String>,
+    /// Search only archived docs
+    #[arg(long, conflicts_with = "with_archived")]
+    archived: bool,
+    /// Include archived docs in results
+    #[arg(long = "with-archived", conflicts_with = "archived")]
+    with_archived: bool,
     /// Output as JSON
     #[arg(long)]
     json: bool,
@@ -471,6 +500,7 @@ fn handle_command(command: CliCommand) -> Result<()> {
     match command {
         CliCommand::New(args) => run_new(args),
         CliCommand::List(args) => run_list(args),
+        CliCommand::Search(args) => run_search(args),
         CliCommand::Show(args) => run_show(args),
         CliCommand::Edit(args) => run_edit(args),
         CliCommand::Commit(args) => run_commit(args),
@@ -1552,22 +1582,7 @@ fn run_list(args: ListArgs) -> Result<()> {
     let result = match list_kind {
         ListKind::Issues => {
             let mut rows = cache::query_cache(&store, &filters)?;
-            // Determine which runes have uncommitted changes
-            let uncommitted_paths: std::collections::HashSet<String> =
-                backend::uncommitted_rune_paths(&store)
-                    .unwrap_or_default()
-                    .iter()
-                    .filter_map(|p| {
-                        p.strip_prefix(&store.path)
-                            .ok()
-                            .map(|rel| rel.display().to_string())
-                    })
-                    .collect();
-            let uncommitted_ids: std::collections::HashSet<String> = rows
-                .iter()
-                .filter(|r| uncommitted_paths.contains(&r.path))
-                .map(|r| r.id.clone())
-                .collect();
+            let uncommitted_ids = uncommitted_rune_ids(&store, &rows);
             // Sort: uncommitted first, then by updated DESC (nulls last)
             rows.sort_by(|a, b| {
                 let a_uncommitted = uncommitted_ids.contains(&a.id);
@@ -1583,27 +1598,7 @@ fn run_list(args: ListArgs) -> Result<()> {
                     },
                 }
             });
-            if json {
-                let json_rows: Vec<serde_json::Value> = rows.iter().map(|row| {
-                    serde_json::json!({
-                        "kind": row.kind,
-                        "id": row.id,
-                        "title": row.title,
-                        "store": store.name,
-                        "project": row.project,
-                        "path": row.path,
-                        "status": row.status,
-                        "assignee": if row.assignee.is_empty() { None } else { Some(&row.assignee) },
-                        "labels": row.labels,
-                        "updated": row.updated,
-                        "uncommitted": uncommitted_ids.contains(&row.id),
-                        "blocked": row.blocked,
-                    })
-                }).collect();
-                println!("{}", serde_json::to_string_pretty(&json_rows).unwrap());
-            } else {
-                print_issue_table(&rows, &uncommitted_ids);
-            }
+            output_issue_rows(&store, &rows, &uncommitted_ids, json);
             Ok(())
         }
         ListKind::Milestones => {
@@ -1632,6 +1627,113 @@ fn run_list(args: ListArgs) -> Result<()> {
     }
     result
 }
+
+fn uncommitted_rune_ids(
+    store: &Store,
+    rows: &[cache::CacheRow],
+) -> std::collections::HashSet<String> {
+    let uncommitted_paths: std::collections::HashSet<String> =
+        backend::uncommitted_rune_paths(store)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|p| {
+                p.strip_prefix(&store.path)
+                    .ok()
+                    .map(|rel| rel.display().to_string())
+            })
+            .collect();
+    rows.iter()
+        .filter(|r| uncommitted_paths.contains(&r.path))
+        .map(|r| r.id.clone())
+        .collect()
+}
+
+/// Render rune rows in the shared list/search shape, in the order given.
+fn output_issue_rows(
+    store: &Store,
+    rows: &[cache::CacheRow],
+    uncommitted_ids: &std::collections::HashSet<String>,
+    json: bool,
+) {
+    if json {
+        let json_rows: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|row| {
+                serde_json::json!({
+                    "kind": row.kind,
+                    "id": row.id,
+                    "title": row.title,
+                    "store": store.name,
+                    "project": row.project,
+                    "path": row.path,
+                    "status": row.status,
+                    "assignee": if row.assignee.is_empty() { None } else { Some(&row.assignee) },
+                    "labels": row.labels,
+                    "updated": row.updated,
+                    "uncommitted": uncommitted_ids.contains(&row.id),
+                    "blocked": row.blocked,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&json_rows).unwrap());
+    } else {
+        print_issue_table(rows, uncommitted_ids);
+    }
+}
+
+fn run_search(args: SearchArgs) -> Result<()> {
+    let SearchArgs {
+        term,
+        store,
+        project,
+        status,
+        labels,
+        archived,
+        with_archived,
+        json,
+    } = args;
+    let (cfg, user_cfg, cwd) = load_context()?;
+    let project_flag_present = project.is_some();
+    let effective_project = project.filter(|p| !p.is_empty());
+    let (store, mut project_proj) = resolve_store_and_project(
+        &cfg,
+        &user_cfg,
+        &cwd,
+        store.as_deref(),
+        effective_project.as_ref(),
+    )?;
+    // `--project ''` searches every project; no flag falls back to the default.
+    if project_proj.is_none() && !project_flag_present {
+        if let Some(default_spec) = user_cfg.default_project.as_deref() {
+            let (_, proj_name) = split_store_prefix(default_spec);
+            if !proj_name.is_empty() {
+                project_proj = Some(proj_name.to_string());
+            }
+        }
+    }
+    let filters = CacheFilter {
+        project: project_proj,
+        // No status filter by default: finding closed or done runes is the point.
+        statuses: status.map(|value| vec![value]).unwrap_or_default(),
+        labels,
+        archived: Some(if archived {
+            ArchivedMode::Only
+        } else if with_archived {
+            ArchivedMode::Include
+        } else {
+            ArchivedMode::Exclude
+        }),
+        ..CacheFilter::default()
+    };
+    let rows = cache::search_cache(&store, &term, &filters)?;
+    let uncommitted_ids = uncommitted_rune_ids(&store, &rows);
+    output_issue_rows(&store, &rows, &uncommitted_ids, json);
+    if !json && rows.is_empty() {
+        println!("No runes match '{term}'.");
+    }
+    Ok(())
+}
+
 fn all_projects(store: &Store) -> Result<Vec<String>> {
     let mut projects = Vec::new();
     for entry in fs::read_dir(&store.path)? {
@@ -4023,6 +4125,7 @@ fn run_quickstart() -> Result<()> {
     println!("  runes list --status todo      # filter by status");
     println!("  runes list --kind bug         # filter by kind");
     println!("  runes show <id>               # show full rune doc");
+    println!("  runes search login            # full-text search, any status");
     if !user_cfg.queries.is_empty() {
         println!();
         println!("  Configured views (from runes.kdl):");
@@ -4160,6 +4263,7 @@ fn run_quickstart() -> Result<()> {
     println!("  The following commands support --json for programmatic parsing:");
     println!();
     println!("    runes list --json           # JSON array of rune summaries");
+    println!("    runes search <term> --json  # JSON array of matching runes");
     println!("    runes show <id> --json      # JSON object with full rune details");
     println!("    runes log --json            # JSON array of log entries");
     println!();

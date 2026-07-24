@@ -941,6 +941,137 @@ fn jj_rename_preserves_history() {
     assert!(shown.contains("created_at"), "missing created_at: {shown}");
 }
 
+/// Position of a rune ID in command output, for rank assertions.
+fn rank_of(output: &str, id: &str) -> usize {
+    output
+        .find(id)
+        .unwrap_or_else(|| panic!("{id} missing from output:\n{output}"))
+}
+
+/// Test: search matches body text (including comments), spans every status,
+/// ranks title hits first, and honours project/archive scoping.
+#[test]
+fn search_matches_body_and_closed_runes() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let (home, _) = setup_jj_store("search-fts");
+
+    let body_match = last_line(&runes_ok(
+        &home,
+        &["new", "--project", "test:proj", "Fix the auth flow"],
+    ))
+    .to_string();
+    runes_ok(
+        &home,
+        &[
+            "comment",
+            &format!("test:{body_match}"),
+            "-m",
+            "users cannot login after a redirect",
+        ],
+    );
+    // A done rune must still be findable — that is the point of search.
+    runes_ok(
+        &home,
+        &["edit", &format!("test:{body_match}"), "--status", "done"],
+    );
+    let title_match = last_line(&runes_ok(
+        &home,
+        &["new", "--project", "test:proj", "Login page redesign"],
+    ))
+    .to_string();
+    let other_project = last_line(&runes_ok(
+        &home,
+        &["new", "--project", "test:other", "Login provider setup"],
+    ))
+    .to_string();
+
+    let found = runes_ok(&home, &["search", "login", "--project", "proj"]);
+    assert!(
+        found.contains(&body_match),
+        "body-only match missing: {found}"
+    );
+    assert!(found.contains(&title_match), "title match missing: {found}");
+    assert!(
+        !found.contains(&other_project),
+        "search leaked another project: {found}"
+    );
+    assert!(
+        rank_of(&found, &title_match) < rank_of(&found, &body_match),
+        "title match should rank above body-only match: {found}"
+    );
+
+    let none = runes_ok(&home, &["search", "kubernetes", "--project", "proj"]);
+    assert!(none.contains("No runes match"), "unexpected output: {none}");
+
+    // --project '' searches every project in the store.
+    let all_projects = runes_ok(&home, &["search", "login", "--project", ""]);
+    assert!(
+        all_projects.contains(&other_project),
+        "--project '' should search all projects: {all_projects}"
+    );
+
+    let json = runes_ok(&home, &["search", "login", "--project", "proj", "--json"]);
+    let parsed: Vec<serde_json::Value> = serde_json::from_str(&json).expect("parse search json");
+    let ids: Vec<&str> = parsed.iter().filter_map(|r| r["id"].as_str()).collect();
+    assert_eq!(
+        ids,
+        vec![title_match.as_str(), body_match.as_str()],
+        "json rows should mirror ranked list output: {json}"
+    );
+    assert_eq!(parsed[1]["status"].as_str(), Some("done"));
+
+    // Archived runes are excluded by default and opt-in via --with-archived.
+    runes_ok(&home, &["archive", &format!("test:{title_match}")]);
+    let default_scope = runes_ok(&home, &["search", "login", "--project", "proj"]);
+    assert!(
+        !default_scope.contains(&title_match),
+        "archived rune should be hidden by default: {default_scope}"
+    );
+    let with_archived = runes_ok(
+        &home,
+        &["search", "login", "--project", "proj", "--with-archived"],
+    );
+    assert!(
+        with_archived.contains(&title_match),
+        "--with-archived should include archived runes: {with_archived}"
+    );
+}
+
+/// Test: a cache without the search index (built by an older binary) is rebuilt
+/// on demand, and `store doctor` regenerates the index too.
+#[test]
+fn search_rebuilds_cache_without_index() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let (home, _) = setup_jj_store("search-reindex");
+    let id = last_line(&runes_ok(
+        &home,
+        &["new", "--project", "test:proj", "Rune about telemetry"],
+    ))
+    .to_string();
+
+    let cache_file = home.join(".runes").join("cache").join("test.sqlite");
+    let conn = rusqlite::Connection::open(&cache_file).expect("open cache");
+    conn.execute_batch("DROP TABLE rune_fts;")
+        .expect("drop fts");
+    drop(conn);
+
+    let found = runes_ok(&home, &["search", "telemetry", "--project", "proj"]);
+    assert!(found.contains(&id), "index not rebuilt on demand: {found}");
+
+    runes_ok(&home, &["store", "doctor", "test"]);
+    let after_doctor = runes_ok(&home, &["search", "telemetry", "--project", "proj"]);
+    assert!(
+        after_doctor.contains(&id),
+        "doctor did not regenerate the index: {after_doctor}"
+    );
+}
+
 fn find_rune_file(store_path: &Path, rune_id: &str) -> PathBuf {
     let short = rune_id.split('-').last().unwrap_or(rune_id);
     let project = rune_id.split('-').next().unwrap_or("proj");

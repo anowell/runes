@@ -116,6 +116,10 @@ runes list --kind milestones
 # Use a saved query
 runes list mine
 
+# Full-text search titles and bodies (all statuses, including done/closed)
+runes search login
+runes search "auth flow" --project '' --with-archived
+
 # Show a specific rune
 runes show myproject-a3x
 
