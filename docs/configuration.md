@@ -68,6 +68,31 @@ Use `--stealth` with `runes init` to add `runes.kdl` to `.git/info/exclude` so i
 
 - `email` — your identity for VCS operations
 
+### `attribution`
+
+- `detect` — automatic AI agent detection for commit authorship (default `true`)
+
+When no `--author` flag and no `RUNES_USER` are given, runes checks well-known
+agent environment markers, first match wins:
+
+1. `RUNES_AGENT` — explicit escape hatch, its value is the agent name
+2. purpose-built markers — `CLAUDECODE` → `claude`, `GEMINI_CLI` → `gemini`,
+   `CODEX_*` → `codex`, `CURSOR_*` → `cursor`, then `AUGMENT_AGENT`,
+   `OPENCODE*`, `JUNIE_*`, `CLINE_ACTIVE`
+3. generic `AI_AGENT`, then `AGENT` — their value names the agent
+
+Purpose-built markers beat `AI_AGENT`/`AGENT` because they map to an exact
+name, while the generic vars carry whatever the agent stamped there — Claude
+Code sets `AI_AGENT=claude-code_2-1-218_agent` alongside `CLAUDECODE=1`, and
+attributing to a version-stamped name would fragment history. Generic values
+are cut at the first `_` (`claude-code_2-1-218_agent` → `claude-code`). Names
+are lowercased and must match `[a-z0-9][a-z0-9._-]*`; anything else is ignored
+and the next signal is tried.
+
+A detected agent commits as `<agent>@agents.localhost`, named
+`<agent> (on behalf of <your email>)` when `user.email` is configured. Set
+`attribution.detect false` to always commit as `user.email`.
+
 ### `defaults`
 
 - `store` — default store when no `--store` flag or store prefix is given

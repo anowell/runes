@@ -800,16 +800,115 @@ fn parse_author_string(s: &str) -> (String, String) {
     (s.to_string(), s.to_string())
 }
 
-/// Resolve commit author from: override flag > RUNES_USER env > config
+/// Environment lookup, injected so agent detection stays unit-testable.
+type EnvLookup<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+/// Read an env var, trimmed, treating blank values as unset.
+fn system_env(key: &str) -> Option<String> {
+    std::env::var(key).ok().and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
+}
+
+/// Explicit, caller-chosen agent slug. Outranks every other signal.
+const AGENT_OVERRIDE_VAR: &str = "RUNES_AGENT";
+
+/// Generic conventions whose value names the agent. Lowest confidence: the
+/// value is free-form and often version-stamped (Claude Code exports
+/// `AI_AGENT=claude-code_2-1-218_agent`), so it is normalized to its first
+/// `_`-separated token and only used when no canonical marker matched.
+const AGENT_SLUG_VARS: &[&str] = &["AI_AGENT", "AGENT"];
+
+/// Env markers implying a fixed agent slug: (var, required value, slug).
+/// Only markers an agent sets for its own subprocesses — terminal/IDE hints
+/// like TERM_PROGRAM describe the terminal, not the agent.
+const AGENT_MARKER_VARS: &[(&str, Option<&str>, &str)] = &[
+    ("CLAUDECODE", None, "claude"),
+    ("GEMINI_CLI", None, "gemini"),
+    ("CODEX_SANDBOX", None, "codex"),
+    ("CODEX_THREAD_ID", None, "codex"),
+    ("CURSOR_AGENT", None, "cursor"),
+    ("CURSOR_EXTENSION_HOST_ROLE", Some("agent-exec"), "cursor"),
+    ("AUGMENT_AGENT", None, "augment"),
+    ("OPENCODE", None, "opencode"),
+    ("OPENCODE_CLIENT", None, "opencode"),
+    ("JUNIE_DATA", None, "junie"),
+    ("JUNIE_SHIM_PATH", None, "junie"),
+    ("CLINE_ACTIVE", None, "cline"),
+];
+
+/// Normalize an env value into an agent slug, or `None` if it can't be one.
+/// The slug lands in the author name and in `<slug>@agents.localhost`, so it
+/// must be lowercase and match `[a-z0-9][a-z0-9._-]*`; anything else (spaces,
+/// `@`, quotes) is rejected rather than injected into an identity.
+fn agent_slug(value: &str) -> Option<String> {
+    let slug = value.trim().to_lowercase();
+    let mut chars = slug.chars();
+    if !chars.next()?.is_ascii_alphanumeric() {
+        return None;
+    }
+    chars
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        .then_some(slug)
+}
+
+/// Detect the AI agent running this command, first match wins:
+/// `RUNES_AGENT` > canonical markers > generic `AI_AGENT`/`AGENT`. Canonical
+/// markers outrank the generic vars because their slug is exact, while a
+/// generic value is whatever the agent chose to stamp there.
+fn detect_agent(env: EnvLookup) -> Option<String> {
+    if let Some(slug) = env(AGENT_OVERRIDE_VAR).as_deref().and_then(agent_slug) {
+        return Some(slug);
+    }
+    for (var, required, slug) in AGENT_MARKER_VARS {
+        let Some(value) = env(var) else { continue };
+        let value = value.trim();
+        if !value.is_empty() && required.is_none_or(|expected| value == expected) {
+            return Some((*slug).to_string());
+        }
+    }
+    AGENT_SLUG_VARS
+        .iter()
+        .filter_map(|var| env(var))
+        .find_map(|value| agent_slug(value.split('_').next().unwrap_or_default()))
+}
+
+/// Identity for a detected agent, recording the configured human (if any)
+/// as on-behalf-of unless that identity is the agent itself.
+fn agent_identity(slug: &str, on_behalf_of: Option<&str>) -> (String, String) {
+    let email = format!("{slug}@agents.localhost");
+    match on_behalf_of {
+        Some(human) if !human.eq_ignore_ascii_case(&email) && !human.eq_ignore_ascii_case(slug) => {
+            (format!("{slug} (on behalf of {human})"), email)
+        }
+        _ => (slug.to_string(), email),
+    }
+}
+
+/// Resolve commit author from: override flag > RUNES_USER env > detected agent > config
 fn resolve_commit_author(
     user_cfg: &UserConfig,
     author_override: Option<&str>,
 ) -> Result<(String, String)> {
+    resolve_commit_author_env(user_cfg, author_override, &system_env)
+}
+
+fn resolve_commit_author_env(
+    user_cfg: &UserConfig,
+    author_override: Option<&str>,
+    env: EnvLookup,
+) -> Result<(String, String)> {
     if let Some(author_str) = author_override {
         return Ok(parse_author_string(author_str));
     }
-    if let Ok(env_val) = std::env::var("RUNES_USER") {
+    if let Some(env_val) = env("RUNES_USER") {
         return Ok(parse_author_string(&env_val));
+    }
+    if user_cfg.attribution_detect() {
+        if let Some(slug) = detect_agent(env) {
+            return Ok(agent_identity(&slug, user_cfg.identity_email.as_deref()));
+        }
     }
     if let Some(email) = &user_cfg.identity_email {
         let name = user_cfg.identity_name.as_deref().unwrap_or(email);
@@ -4273,8 +4372,228 @@ fn run_quickstart() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_to_width;
+    use super::{detect_agent, resolve_commit_author_env, truncate_to_width, UserConfig};
     use unicode_width::UnicodeWidthStr;
+
+    /// Env lookup over a fixed list, returning values verbatim — detection has
+    /// to cope with padding and blanks on its own, not lean on `system_env`.
+    fn env_of<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |key| {
+            vars.iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    fn cfg_with_email(email: Option<&str>) -> UserConfig {
+        UserConfig {
+            identity_email: email.map(str::to_string),
+            ..UserConfig::default()
+        }
+    }
+
+    #[test]
+    fn detect_agent_marker_vars() {
+        let cases = [
+            (vec![("CLAUDECODE", "1")], "claude"),
+            (vec![("GEMINI_CLI", "1")], "gemini"),
+            (vec![("CODEX_SANDBOX", "seatbelt")], "codex"),
+            (vec![("CODEX_THREAD_ID", "abc123")], "codex"),
+            (vec![("CURSOR_AGENT", "1")], "cursor"),
+            (vec![("CURSOR_EXTENSION_HOST_ROLE", "agent-exec")], "cursor"),
+            (vec![("AUGMENT_AGENT", "1")], "augment"),
+            (vec![("OPENCODE", "1")], "opencode"),
+            (vec![("OPENCODE_CLIENT", "cli")], "opencode"),
+            (vec![("JUNIE_DATA", "/tmp/junie")], "junie"),
+            (vec![("JUNIE_SHIM_PATH", "/tmp/shim")], "junie"),
+            (vec![("CLINE_ACTIVE", "1")], "cline"),
+        ];
+        for (vars, expected) in cases {
+            assert_eq!(
+                detect_agent(&env_of(&vars)).as_deref(),
+                Some(expected),
+                "unexpected detection for {vars:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn detect_agent_marker_values_are_trimmed() {
+        assert_eq!(
+            detect_agent(&env_of(&[("CLAUDECODE", " 1\n")])).as_deref(),
+            Some("claude")
+        );
+        assert_eq!(
+            detect_agent(&env_of(&[("CURSOR_EXTENSION_HOST_ROLE", " agent-exec ")])).as_deref(),
+            Some("cursor")
+        );
+    }
+
+    #[test]
+    fn detect_agent_generic_vars_use_their_value() {
+        assert_eq!(
+            detect_agent(&env_of(&[("AGENT", "goose")])).as_deref(),
+            Some("goose")
+        );
+        assert_eq!(
+            detect_agent(&env_of(&[("AI_AGENT", "amp")])).as_deref(),
+            Some("amp")
+        );
+        assert_eq!(
+            detect_agent(&env_of(&[("AGENT", "goose"), ("AI_AGENT", "amp")])).as_deref(),
+            Some("amp")
+        );
+    }
+
+    #[test]
+    fn detect_agent_generic_values_drop_version_stamp() {
+        // Claude Code exports AI_AGENT=claude-code_2-1-218_agent; keeping the
+        // whole value would fragment history across releases.
+        assert_eq!(
+            detect_agent(&env_of(&[("AI_AGENT", "claude-code_2-1-218_agent")])).as_deref(),
+            Some("claude-code")
+        );
+        assert_eq!(
+            detect_agent(&env_of(&[("AGENT", " Goose_1-2-3 ")])).as_deref(),
+            Some("goose")
+        );
+    }
+
+    #[test]
+    fn detect_agent_canonical_markers_beat_generic_vars() {
+        // The live Claude Code env exports both; the exact marker must win so
+        // commits land on claude@agents.localhost, not claude-code@...
+        let env = env_of(&[
+            ("AI_AGENT", "claude-code_2-1-218_agent"),
+            ("CLAUDECODE", "1"),
+        ]);
+        assert_eq!(detect_agent(&env).as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn detect_agent_runes_agent_overrides_all() {
+        let env = env_of(&[
+            ("RUNES_AGENT", " Scribe "),
+            ("AGENT", "goose"),
+            ("CLAUDECODE", "1"),
+        ]);
+        assert_eq!(detect_agent(&env).as_deref(), Some("scribe"));
+    }
+
+    #[test]
+    fn detect_agent_rejects_unusable_slugs() {
+        // Values that can't be a slug are ignored, never injected verbatim.
+        for value in ["My Tool v2", "-leading", "a@b", "\"quoted\"", "  ", "_"] {
+            assert_eq!(
+                detect_agent(&env_of(&[("RUNES_AGENT", value)])),
+                None,
+                "RUNES_AGENT={value:?} should not detect"
+            );
+            assert_eq!(
+                detect_agent(&env_of(&[("AI_AGENT", value)])),
+                None,
+                "AI_AGENT={value:?} should not detect"
+            );
+        }
+        // ...and detection falls through to the next precedence level.
+        let env = env_of(&[("RUNES_AGENT", "My Tool v2"), ("CLAUDECODE", "1")]);
+        assert_eq!(detect_agent(&env).as_deref(), Some("claude"));
+        let env = env_of(&[("AI_AGENT", "My Tool v2"), ("AGENT", "goose")]);
+        assert_eq!(detect_agent(&env).as_deref(), Some("goose"));
+    }
+
+    #[test]
+    fn detect_agent_ignores_terminal_and_blank_markers() {
+        let env = env_of(&[
+            ("TERM_PROGRAM", "vscode"),
+            ("GIT_EDITOR", "code --wait"),
+            ("COPILOT_MODEL", "gpt-5"),
+            ("CLAUDECODE", ""),
+            ("CURSOR_EXTENSION_HOST_ROLE", "ui"),
+        ]);
+        assert_eq!(detect_agent(&env), None);
+    }
+
+    #[test]
+    fn author_explicit_signals_win_without_decoration() {
+        let cfg = cfg_with_email(Some("anowell@gmail.com"));
+        let env = env_of(&[("CLAUDECODE", "1"), ("RUNES_USER", "Bot <bot@example.com>")]);
+
+        let (name, email) =
+            resolve_commit_author_env(&cfg, Some("Ann <ann@example.com>"), &env).unwrap();
+        assert_eq!((name.as_str(), email.as_str()), ("Ann", "ann@example.com"));
+
+        let (name, email) = resolve_commit_author_env(&cfg, None, &env).unwrap();
+        assert_eq!((name.as_str(), email.as_str()), ("Bot", "bot@example.com"));
+    }
+
+    #[test]
+    fn author_detected_agent_acts_on_behalf_of_human() {
+        let cfg = cfg_with_email(Some("anowell@gmail.com"));
+        let (name, email) =
+            resolve_commit_author_env(&cfg, None, &env_of(&[("CLAUDECODE", "1")])).unwrap();
+        assert_eq!(name, "claude (on behalf of anowell@gmail.com)");
+        assert_eq!(email, "claude@agents.localhost");
+    }
+
+    #[test]
+    fn author_detected_agent_without_human_identity() {
+        let (name, email) =
+            resolve_commit_author_env(&cfg_with_email(None), None, &env_of(&[("CLAUDECODE", "1")]))
+                .unwrap();
+        assert_eq!(
+            (name.as_str(), email.as_str()),
+            ("claude", "claude@agents.localhost")
+        );
+    }
+
+    #[test]
+    fn author_skips_on_behalf_of_when_identity_is_the_agent() {
+        let cfg = cfg_with_email(Some("claude@agents.localhost"));
+        let (name, email) =
+            resolve_commit_author_env(&cfg, None, &env_of(&[("CLAUDECODE", "1")])).unwrap();
+        assert_eq!(
+            (name.as_str(), email.as_str()),
+            ("claude", "claude@agents.localhost")
+        );
+    }
+
+    #[test]
+    fn author_unusable_agent_slug_falls_back_to_config() {
+        let cfg = cfg_with_email(Some("anowell@gmail.com"));
+        let (name, email) =
+            resolve_commit_author_env(&cfg, None, &env_of(&[("RUNES_AGENT", "My Tool v2")]))
+                .unwrap();
+        assert_eq!(
+            (name.as_str(), email.as_str()),
+            ("anowell@gmail.com", "anowell@gmail.com")
+        );
+    }
+
+    #[test]
+    fn author_detection_disabled_falls_back_to_config() {
+        let cfg = UserConfig {
+            identity_email: Some("anowell@gmail.com".to_string()),
+            identity_name: Some("Anthony".to_string()),
+            attribution_detect: Some(false),
+            ..UserConfig::default()
+        };
+        let (name, email) =
+            resolve_commit_author_env(&cfg, None, &env_of(&[("CLAUDECODE", "1")])).unwrap();
+        assert_eq!(
+            (name.as_str(), email.as_str()),
+            ("Anthony", "anowell@gmail.com")
+        );
+    }
+
+    #[test]
+    fn author_errors_without_any_identity() {
+        let err = resolve_commit_author_env(&cfg_with_email(None), None, &env_of(&[])).unwrap_err();
+        assert!(
+            err.to_string().contains("No author configured"),
+            "unexpected error: {err}"
+        );
+    }
 
     #[test]
     fn truncate_noop_when_within_width() {

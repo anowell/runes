@@ -14,6 +14,8 @@ pub struct UserConfig {
     pub default_project: Option<String>,
     pub creation_defaults: HashMap<String, CreationDefaults>,
     pub creation_fallback: CreationDefaults,
+    /// `attribution.detect`: automatic agent detection for commit authorship (default on).
+    pub attribution_detect: Option<bool>,
     pub(crate) path_entries: Vec<PathEntry>,
     pub(crate) queries: HashMap<String, QueryDefinition>,
     pub(crate) stores: Vec<StoreDefinition>,
@@ -85,6 +87,11 @@ impl UserConfig {
                     }
                     if let Some(name) = value_string(node, "name") {
                         config.identity_name = Some(name);
+                    }
+                }
+                "attribution" => {
+                    if let Some(detect) = value_string(node, "detect") {
+                        config.attribution_detect = Some(parse_bool(&detect));
                     }
                 }
                 "defaults" => {
@@ -187,10 +194,14 @@ impl UserConfig {
             default_project,
             creation_defaults,
             creation_fallback,
+            attribution_detect,
             path_entries,
             queries,
             stores,
         } = other;
+        if let Some(detect) = attribution_detect {
+            self.attribution_detect = Some(detect);
+        }
         if let Some(user) = identity_email {
             self.identity_email = Some(user);
         }
@@ -294,6 +305,11 @@ impl UserConfig {
         self.creation_fallback.clone()
     }
 
+    /// Whether commit authorship may fall back to a detected AI agent identity.
+    pub fn attribution_detect(&self) -> bool {
+        self.attribution_detect.unwrap_or(true)
+    }
+
     #[allow(dead_code)]
     pub fn identity_email(&self) -> Option<&str> {
         self.identity_email.as_deref()
@@ -336,6 +352,11 @@ pub fn config_list(path: &Path) -> Result<Vec<(String, String)>> {
                 }
                 if let Some(v) = value_string(node, "name") {
                     pairs.push(("user.name".to_string(), v));
+                }
+            }
+            "attribution" => {
+                if let Some(v) = value_string(node, "detect") {
+                    pairs.push(("attribution.detect".to_string(), v));
                 }
             }
             "defaults" => {
@@ -622,8 +643,12 @@ fn parse_old_creation_node(node: &KdlNode) -> CreationDefaults {
     }
 }
 
+fn parse_bool(value: &str) -> bool {
+    value.eq_ignore_ascii_case("true") || value == "1"
+}
+
 fn parse_query_node(node: &KdlNode) -> QueryDefinition {
-    let blocked = value_string(node, "blocked").map(|v| v.eq_ignore_ascii_case("true") || v == "1");
+    let blocked = value_string(node, "blocked").map(|v| parse_bool(&v));
     QueryDefinition {
         project: value_string(node, "project"),
         statuses: collect_property_values(node, "status"),

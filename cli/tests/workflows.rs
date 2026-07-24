@@ -638,6 +638,47 @@ fn setup_jj_store(test_name: &str) -> (PathBuf, String) {
     (home, store_path_s)
 }
 
+/// Cleared before each run: the test runner may itself be an agent shell.
+const AGENT_ENV_VARS: &[&str] = &[
+    "RUNES_AGENT",
+    "AI_AGENT",
+    "AGENT",
+    "CLAUDECODE",
+    "GEMINI_CLI",
+    "CODEX_SANDBOX",
+    "CODEX_THREAD_ID",
+    "CURSOR_AGENT",
+    "CURSOR_EXTENSION_HOST_ROLE",
+    "AUGMENT_AGENT",
+    "OPENCODE",
+    "OPENCODE_CLIENT",
+    "JUNIE_DATA",
+    "JUNIE_SHIM_PATH",
+    "CLINE_ACTIVE",
+];
+
+/// Run runes with RUNES_USER and all agent markers unset, then apply `envs`.
+fn runes_no_user(home: &Path, envs: &[(&str, &str)], args: &[&str]) -> String {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_runes"));
+    cmd.args(args).env("HOME", home).env_remove("RUNES_USER");
+    for var in AGENT_ENV_VARS {
+        cmd.env_remove(var);
+    }
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+    let output = cmd.output().expect("run runes command");
+    if !output.status.success() {
+        panic!(
+            "command failed: runes {}\nstdout:\n{}\nstderr:\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+    String::from_utf8(output.stdout).expect("stdout utf8")
+}
+
 fn setup_pijul_store(test_name: &str) -> Option<(PathBuf, String)> {
     if !command_exists("pijul") {
         eprintln!("skipping: pijul not installed");
@@ -734,6 +775,89 @@ fn jj_show_comment_attribution() {
     assert!(
         shown.contains("This is a comment"),
         "missing comment text: {shown}"
+    );
+}
+
+/// Test: with RUNES_USER unset, an agent shell is attributed to the agent
+/// identity, on behalf of the configured human; the detect knob turns it off.
+#[test]
+fn jj_agent_attribution() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let (home, store_path) = setup_jj_store("jj-agent-attr");
+    runes_ok(
+        &home,
+        &[
+            "config",
+            "set",
+            "user.email",
+            "human@example.com",
+            "--global",
+        ],
+    );
+
+    // Both vars set, as a real Claude Code shell exports them: the canonical
+    // marker must win over the version-stamped generic value.
+    let id = last_line(&runes_no_user(
+        &home,
+        &[
+            ("CLAUDECODE", "1"),
+            ("AI_AGENT", "claude-code_2-1-218_agent"),
+        ],
+        &["new", "--project", "test:proj", "Agent attribution"],
+    ))
+    .to_string();
+    let shown = runes_ok(&home, &["show", &format!("test:{id}")]);
+    assert!(
+        shown.contains("created_by \"claude (on behalf of human@example.com)\""),
+        "missing agent attribution: {shown}"
+    );
+    let authors = command_ok(
+        &home,
+        "jj",
+        &[
+            "log",
+            "--no-graph",
+            "-r",
+            "all()",
+            "-T",
+            r#"author.email() ++ "\n""#,
+        ],
+        Some(Path::new(&store_path)),
+    );
+    assert!(
+        authors.contains("claude@agents.localhost"),
+        "commit not authored by the agent: {authors}"
+    );
+
+    runes_no_user(
+        &home,
+        &[("CLAUDECODE", "1")],
+        &["comment", &format!("test:{id}"), "-m", "Agent comment"],
+    );
+    let shown = runes_ok(&home, &["show", &format!("test:{id}")]);
+    assert!(
+        shown.contains("by claude (on behalf of human@example.com)"),
+        "missing on-behalf-of attribution: {shown}"
+    );
+
+    // Detection disabled → commits fall back to the configured human identity
+    runes_ok(
+        &home,
+        &["config", "set", "attribution.detect", "false", "--global"],
+    );
+    let id = last_line(&runes_no_user(
+        &home,
+        &[("CLAUDECODE", "1")],
+        &["new", "--project", "test:proj", "Detection disabled"],
+    ))
+    .to_string();
+    let shown = runes_ok(&home, &["show", &format!("test:{id}")]);
+    assert!(
+        shown.contains("created_by \"human@example.com\"") && !shown.contains("claude"),
+        "detection knob ignored: {shown}"
     );
 }
 
