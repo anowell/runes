@@ -36,6 +36,11 @@ fn runes_ok(home: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).expect("stdout utf8")
 }
 
+fn stderr_of(output: &Output) -> String {
+    assert!(output.status.success(), "command failed");
+    String::from_utf8_lossy(&output.stderr).trim().to_string()
+}
+
 fn runes_output_with_env(home: &Path, envs: &[(&str, &str)], args: &[&str]) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_runes"));
     cmd.args(args)
@@ -60,12 +65,9 @@ fn runes_with_env(home: &Path, envs: &[(&str, &str)], args: &[&str]) -> String {
     String::from_utf8(output.stdout).expect("stdout utf8")
 }
 
-fn last_line(output: &str) -> &str {
-    output
-        .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("")
+/// The id `runes new` reports: always its first output line.
+fn rune_id(new_output: &str) -> &str {
+    new_output.lines().next().unwrap_or("").trim()
 }
 
 fn command_exists(cmd: &str) -> bool {
@@ -192,7 +194,7 @@ fn jj_issue_lifecycle_and_cache_query() {
             "Lock v1 schema and workflow",
         ],
     );
-    let issue_id = last_line(&issue_output).to_string();
+    let issue_id = rune_id(&issue_output).to_string();
     assert!(issue_id.starts_with("runes-"));
 
     runes_ok(
@@ -282,7 +284,7 @@ fn new_default_project_from_env_var() {
         &[("RUNES_PROJECT", "runes")],
         &["new", "--store", "test", "Env var project"],
     );
-    let issue_id = last_line(&issue_output).to_string();
+    let issue_id = rune_id(&issue_output).to_string();
     assert!(issue_id.starts_with("runes-"));
 
     let shown = runes_ok(&home, &["show", &format!("test:{issue_id}")]);
@@ -358,7 +360,7 @@ fn jj_milestone_hierarchy_and_progress() {
             "milestone",
         ],
     );
-    let milestone = last_line(&milestone_output).to_string();
+    let milestone = rune_id(&milestone_output).to_string();
     assert_eq!(milestone, "runes-m01");
 
     let child1_output = runes_ok(
@@ -372,7 +374,7 @@ fn jj_milestone_hierarchy_and_progress() {
             &milestone,
         ],
     );
-    let child1 = last_line(&child1_output).to_string();
+    let child1 = rune_id(&child1_output).to_string();
     let _child2 = runes_ok(
         &home,
         &[
@@ -439,7 +441,7 @@ fn milestone_list_and_project_progress() {
             "milestone",
         ],
     );
-    let milestone = last_line(&milestone_output).to_string();
+    let milestone = rune_id(&milestone_output).to_string();
 
     let list_output = runes_ok(
         &home,
@@ -511,7 +513,7 @@ fn pijul_issue_lifecycle_with_sdk_observability() {
             "Validate libpijul-backed workflows",
         ],
     );
-    let issue_id = last_line(&issue_output).to_string();
+    let issue_id = rune_id(&issue_output).to_string();
     assert!(issue_id.starts_with("runes-"));
     let pijul_log = command_ok(&home, "pijul", &["log", "--limit", "1"], Some(&store_path));
     if pijul_log.is_empty() {
@@ -598,7 +600,7 @@ fn pijul_cross_store_move_updates_both_stores() {
             "Move me between stores",
         ],
     );
-    let issue_id = last_line(&issue_output).to_string();
+    let issue_id = rune_id(&issue_output).to_string();
     runes_ok(
         &home,
         &[
@@ -734,9 +736,9 @@ fn jj_show_new_rune_has_created_metadata() {
         return;
     }
     let (home, _) = setup_jj_store("jj-show-new");
-    let id = last_line(&runes_ok(
+    let id = rune_id(&runes_ok(
         &home,
-        &["new", "--project", "test:proj", "Test rune"],
+        &["new", "--project", "test:proj", "Test rune", "--commit"],
     ))
     .to_string();
     let shown = runes_ok(&home, &["show", &format!("test:{id}")]);
@@ -762,9 +764,9 @@ fn jj_show_comment_attribution() {
         return;
     }
     let (home, _) = setup_jj_store("jj-comment-attr");
-    let id = last_line(&runes_ok(
+    let id = rune_id(&runes_ok(
         &home,
-        &["new", "--project", "test:proj", "Comment test"],
+        &["new", "--project", "test:proj", "Comment test", "--commit"],
     ))
     .to_string();
     runes_ok(
@@ -809,13 +811,19 @@ fn jj_agent_attribution() {
 
     // Both vars set, as a real Claude Code shell exports them: the canonical
     // marker must win over the version-stamped generic value.
-    let id = last_line(&runes_no_user(
+    let id = rune_id(&runes_no_user(
         &home,
         &[
             ("CLAUDECODE", "1"),
             ("AI_AGENT", "claude-code_2-1-218_agent"),
         ],
-        &["new", "--project", "test:proj", "Agent attribution"],
+        &[
+            "new",
+            "--project",
+            "test:proj",
+            "Agent attribution",
+            "--commit",
+        ],
     ))
     .to_string();
     let shown = runes_ok(&home, &["show", &format!("test:{id}")]);
@@ -857,10 +865,16 @@ fn jj_agent_attribution() {
         &home,
         &["config", "set", "attribution.detect", "false", "--global"],
     );
-    let id = last_line(&runes_no_user(
+    let id = rune_id(&runes_no_user(
         &home,
         &[("CLAUDECODE", "1")],
-        &["new", "--project", "test:proj", "Detection disabled"],
+        &[
+            "new",
+            "--project",
+            "test:proj",
+            "Detection disabled",
+            "--commit",
+        ],
     ))
     .to_string();
     let shown = runes_ok(&home, &["show", &format!("test:{id}")]);
@@ -878,9 +892,9 @@ fn jj_show_section_edit_annotation() {
         return;
     }
     let (home, store_path) = setup_jj_store("jj-section-edit");
-    let id = last_line(&runes_ok(
+    let id = rune_id(&runes_ok(
         &home,
-        &["new", "--project", "test:proj", "Section test"],
+        &["new", "--project", "test:proj", "Section test", "--commit"],
     ))
     .to_string();
     // Edit the file directly to add content to Description section
@@ -903,6 +917,445 @@ fn jj_show_section_edit_annotation() {
     );
 }
 
+/// Test: the canonical lifecycle — `new` leaves an editable draft on disk,
+/// direct edits land, and `commit <id>` is what puts it into history.
+#[test]
+fn jj_new_leaves_draft_until_commit() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let (home, store_path) = setup_jj_store("jj-new-draft");
+    let created = runes_ok(&home, &["new", "--project", "test:proj", "Draft me"]);
+    let mut lines = created.lines();
+    let id = lines.next().expect("id line").to_string();
+    let printed_path = PathBuf::from(lines.next().expect("path line"));
+    let hint = lines.next().expect("commit hint").to_string();
+
+    assert!(id.starts_with("proj-"), "id must come first: {created}");
+    assert!(
+        printed_path.is_absolute() && printed_path.is_file(),
+        "second line must be the absolute doc path: {created}"
+    );
+    assert_eq!(printed_path, find_rune_file(Path::new(&store_path), &id));
+    // "uncommitted" would contain "committed": the line has to stay greppable.
+    assert!(
+        hint.contains("draft")
+            && !hint.contains("committed")
+            && hint.contains(&format!("runes commit {id}")),
+        "missing commit hint: {created}"
+    );
+
+    // Nothing recorded yet, but the draft is listed and marked as such.
+    let log = runes_ok(&home, &["log", &format!("test:{id}"), "--no-pager"]);
+    assert!(!log.contains(&id), "draft should have no history: {log}");
+    let listed = runes_ok(&home, &["list", "--store", "test", "--project", "proj"]);
+    assert!(
+        listed.contains(&format!("{id} *")) && listed.contains("(draft)"),
+        "draft not marked in list: {listed}"
+    );
+
+    let content = fs::read_to_string(&printed_path).expect("read draft");
+    fs::write(
+        &printed_path,
+        content.replace("## Description\n", "## Description\n\nWritten in place.\n"),
+    )
+    .expect("write draft");
+    runes_ok(&home, &["commit", &format!("test:{id}")]);
+
+    let log = runes_ok(&home, &["log", &format!("test:{id}"), "--no-pager"]);
+    assert!(log.contains(&id), "commit not recorded: {log}");
+    let shown = runes_ok(&home, &["show", &format!("test:{id}")]);
+    assert!(
+        shown.contains("Written in place.") && !shown.contains("<not committed>"),
+        "in-place edit not committed: {shown}"
+    );
+}
+
+/// Test: content supplied up front commits; --no-commit and --commit override.
+#[test]
+fn jj_new_commits_when_content_is_supplied() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let (home, _) = setup_jj_store("jj-new-commit-flags");
+    let body = home.join("body.md");
+    fs::write(&body, "# From file\n\nProvided up front.\n").expect("write body");
+    let body_s = body.to_string_lossy().to_string();
+
+    let from_file = runes_ok(
+        &home,
+        &["new", "--project", "test:proj", "From file", "-f", &body_s],
+    );
+    assert!(
+        from_file.lines().nth(2) == Some("committed"),
+        "-f should commit: {from_file}"
+    );
+    let id = rune_id(&from_file).to_string();
+    let log = runes_ok(&home, &["log", &format!("test:{id}"), "--no-pager"]);
+    assert!(log.contains(&id), "-f left no history: {log}");
+
+    let suppressed = runes_ok(
+        &home,
+        &[
+            "new",
+            "--project",
+            "test:proj",
+            "Held back",
+            "-f",
+            &body_s,
+            "--no-commit",
+        ],
+    );
+    assert!(
+        suppressed.contains("draft"),
+        "--no-commit should suppress the commit: {suppressed}"
+    );
+    let held = rune_id(&suppressed).to_string();
+    let log = runes_ok(&home, &["log", &format!("test:{held}"), "--no-pager"]);
+    assert!(!log.contains(&held), "--no-commit still recorded: {log}");
+
+    let forced = runes_ok(
+        &home,
+        &["new", "--project", "test:proj", "Skip editing", "--commit"],
+    );
+    let forced_id = rune_id(&forced).to_string();
+    let log = runes_ok(&home, &["log", &format!("test:{forced_id}"), "--no-pager"]);
+    assert!(log.contains(&forced_id), "--commit did not commit: {log}");
+}
+
+/// Test: `new --status <legacy alias>` normalizes before the draft is written,
+/// so a rune that never reached history still carries the core state on disk,
+/// in the listing, and once it is finally recorded.
+#[test]
+fn jj_new_draft_normalizes_a_legacy_status() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let (home, store_path) = setup_jj_store("jj-new-draft-legacy");
+    let store = Path::new(&store_path);
+    let created = runes_ok(
+        &home,
+        &[
+            "new",
+            "--project",
+            "test:proj",
+            "Started before it landed",
+            "--status",
+            "in-progress",
+        ],
+    );
+    let id = rune_id(&created).to_string();
+    assert!(created.contains("draft"), "not left as a draft: {created}");
+
+    // Normalization happens on the way in, so the alias never reaches the file.
+    let doc = fs::read_to_string(find_rune_file(store, &id)).expect("read draft");
+    assert!(
+        doc.contains("status \"wip\"") && !doc.contains("in-progress"),
+        "draft kept the legacy status: {doc}"
+    );
+
+    // A draft is expected, so it is marked as one and draws no drift nudge.
+    let list_args = &[
+        "list",
+        "--store",
+        "test",
+        "--project",
+        "proj",
+        "--status",
+        "wip",
+    ];
+    let listed = runes_ok(&home, list_args);
+    assert!(
+        listed.contains(&format!("{id} *")) && listed.contains("(draft)"),
+        "draft not listed under its core state: {listed}"
+    );
+    let quiet = stderr_of(&runes_output(&home, list_args));
+    assert!(quiet.is_empty(), "draft triggered a hint: {quiet}");
+
+    // The alias still selects it, through the same normalization.
+    let by_alias = runes_ok(
+        &home,
+        &[
+            "list",
+            "--store",
+            "test",
+            "--project",
+            "proj",
+            "--status",
+            "in-progress",
+        ],
+    );
+    assert!(by_alias.contains(&id), "alias filter missed it: {by_alias}");
+
+    // Recording the draft keeps the core state and clears the draft marker.
+    runes_ok(&home, &["commit", &format!("test:{id}")]);
+    let shown = runes_ok(&home, &["show", &format!("test:{id}")]);
+    assert!(
+        shown.contains("status \"wip\"") && !shown.contains("<not committed>"),
+        "commit did not record the normalized draft: {shown}"
+    );
+}
+
+/// Test: discarding a never-committed rune leaves no trace, and needs no
+/// --force; a committed rune still does.
+#[test]
+fn jj_delete_discards_draft_without_force() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let (home, store_path) = setup_jj_store("jj-delete-draft");
+    let draft = rune_id(&runes_ok(
+        &home,
+        &["new", "--project", "test:proj", "Discard me"],
+    ))
+    .to_string();
+    let draft_path = find_rune_file(Path::new(&store_path), &draft);
+    let kept = rune_id(&runes_ok(
+        &home,
+        &["new", "--project", "test:proj", "Keep me", "--commit"],
+    ))
+    .to_string();
+
+    runes_ok(&home, &["delete", &format!("test:{draft}")]);
+    assert!(!draft_path.exists(), "draft file survived delete");
+    let log = runes_ok(&home, &["log", "--project", "proj", "--no-pager"]);
+    assert!(
+        !log.contains(&draft) && log.contains(&kept),
+        "discarded draft left history behind: {log}"
+    );
+    let listed = runes_ok(&home, &["list", "--store", "test", "--project", "proj"]);
+    assert!(!listed.contains(&draft), "draft still listed: {listed}");
+
+    // A committed rune keeps its guard rail.
+    let refused = runes_output(&home, &["delete", &format!("test:{kept}")]);
+    assert!(
+        !refused.status.success(),
+        "committed delete skipped --force"
+    );
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("--force"),
+        "unexpected error: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(find_rune_file(Path::new(&store_path), &kept).exists());
+}
+
+/// Test: deleting a committed rune records only that rune. Drafts are the norm
+/// now, so a sweeping commit would bury every pending one under "Delete <id>".
+#[test]
+fn jj_delete_commits_only_the_deleted_rune() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let (home, store_path) = setup_jj_store("jj-delete-scope");
+    let store = Path::new(&store_path);
+    let draft = rune_id(&runes_ok(
+        &home,
+        &["new", "--project", "test:proj", "Keep me pending"],
+    ))
+    .to_string();
+    let draft_path = find_rune_file(store, &draft);
+    let doomed = rune_id(&runes_ok(
+        &home,
+        &["new", "--project", "test:proj", "Delete me", "--commit"],
+    ))
+    .to_string();
+    let doomed_path = find_rune_file(store, &doomed);
+
+    // Give the draft pending content worth losing
+    let content = fs::read_to_string(&draft_path).expect("read draft");
+    let edited = content.replace("## Description\n", "## Description\n\nStill drafting.\n");
+    assert_ne!(content, edited, "description marker not found");
+    fs::write(&draft_path, &edited).expect("write draft");
+
+    runes_ok(&home, &["delete", &format!("test:{doomed}"), "--force"]);
+
+    let name_doomed = doomed_path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let name_draft = draft_path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let summary = command_ok(&home, "jj", &["diff", "-r", "@-", "--summary"], Some(store));
+    assert!(
+        summary.contains(&name_doomed),
+        "delete did not record its own rune ({name_doomed}): {summary}"
+    );
+    assert!(
+        !summary.contains(&name_draft),
+        "delete swept in draft ({name_draft}): {summary}"
+    );
+
+    // The draft is untouched on disk and still absent from history
+    assert_eq!(
+        fs::read_to_string(&draft_path).expect("read draft"),
+        edited,
+        "draft file was rewritten by the delete"
+    );
+    let log = runes_ok(&home, &["log", "--project", "proj", "--no-pager"]);
+    assert!(!log.contains(&draft), "draft reached history: {log}");
+    let listed = runes_ok(&home, &["list", "--store", "test", "--project", "proj"]);
+    assert!(
+        listed.contains(&draft) && !listed.contains(&doomed),
+        "unexpected list after delete: {listed}"
+    );
+}
+
+/// Test: the pending-changes hint fires for a rune that is already in history
+/// and has drifted, and stays quiet about the drafts `new` leaves behind.
+#[test]
+fn jj_hint_names_the_modified_rune_only() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let (home, store_path) = setup_jj_store("jj-modified-hint");
+    let store = Path::new(&store_path);
+    let draft = rune_id(&runes_ok(
+        &home,
+        &["new", "--project", "test:proj", "Just a draft"],
+    ))
+    .to_string();
+    let tracked = rune_id(&runes_ok(
+        &home,
+        &["new", "--project", "test:proj", "Recorded", "--commit"],
+    ))
+    .to_string();
+
+    let list_args = &["list", "--store", "test", "--project", "proj"];
+    let quiet = stderr_of(&runes_output(&home, list_args));
+    assert!(quiet.is_empty(), "draft triggered a hint: {quiet}");
+    let quiet_show = stderr_of(&runes_output(&home, &["show", &format!("test:{draft}")]));
+    assert!(
+        quiet_show.is_empty(),
+        "draft triggered a hint: {quiet_show}"
+    );
+
+    // An edit to a rune that reached history is what deserves the nudge.
+    let path = find_rune_file(store, &tracked);
+    let content = fs::read_to_string(&path).expect("read doc");
+    let edited = content.replace("## Description\n", "## Description\n\nEdited.\n");
+    assert_ne!(content, edited, "description marker not found");
+    fs::write(&path, edited).expect("write doc");
+
+    let listed = runes_ok(&home, list_args);
+    assert!(
+        listed.contains(&format!("{tracked} *")),
+        "modified rune not marked in list: {listed}"
+    );
+    let nudged = stderr_of(&runes_output(&home, list_args));
+    assert!(
+        nudged.contains(&format!("runes commit {tracked}")),
+        "hint should name the per-id form: {nudged}"
+    );
+    assert!(!nudged.contains(&draft), "hint named the draft: {nudged}");
+    let shown = stderr_of(&runes_output(&home, &["show", &format!("test:{tracked}")]));
+    assert!(
+        shown.contains(&format!("runes commit {tracked}")),
+        "show should nudge about its own rune: {shown}"
+    );
+}
+
+/// Test: `new --json` is a stable {id, path, committed} contract.
+#[test]
+fn jj_new_json_reports_id_path_and_commit_state() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let (home, store_path) = setup_jj_store("jj-new-json");
+    let drafted = runes_ok(
+        &home,
+        &[
+            "new",
+            "--project",
+            "test:proj",
+            "Machine readable",
+            "--json",
+        ],
+    );
+    let value: serde_json::Value = serde_json::from_str(&drafted).expect("valid json");
+    let id = value["id"].as_str().expect("id field").to_string();
+    let path = PathBuf::from(value["path"].as_str().expect("path field"));
+    assert!(
+        path.is_absolute() && path.is_file(),
+        "path must be an absolute file: {drafted}"
+    );
+    assert_eq!(path, find_rune_file(Path::new(&store_path), &id));
+    assert_eq!(
+        value["committed"].as_bool(),
+        Some(false),
+        "a draft is not committed: {drafted}"
+    );
+
+    let recorded = runes_ok(
+        &home,
+        &[
+            "new",
+            "--project",
+            "test:proj",
+            "Recorded",
+            "--commit",
+            "--json",
+        ],
+    );
+    let value: serde_json::Value = serde_json::from_str(&recorded).expect("valid json");
+    assert_eq!(
+        value["committed"].as_bool(),
+        Some(true),
+        "--commit must report committed=true: {recorded}"
+    );
+}
+
+/// Test: the working copy is not history — `log --section` must not report a
+/// pending draft as a change.
+#[test]
+fn jj_log_section_skips_the_working_copy() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let (home, _) = setup_jj_store("jj-section-draft");
+    let draft = rune_id(&runes_ok(
+        &home,
+        &["new", "--project", "test:proj", "Draft body"],
+    ))
+    .to_string();
+    // Committing another rune snapshots the draft into the working copy commit.
+    runes_ok(
+        &home,
+        &["new", "--project", "test:proj", "Recorded", "--commit"],
+    );
+
+    let sectioned = runes_ok(
+        &home,
+        &[
+            "log",
+            &format!("test:{draft}"),
+            "--section",
+            "Description",
+            "--no-pager",
+        ],
+    );
+    assert!(
+        sectioned.contains("No matching section edits found"),
+        "draft reported as history: {sectioned}"
+    );
+    assert!(
+        !sectioned.contains("(no description)"),
+        "working copy leaked into the section log: {sectioned}"
+    );
+}
+
 /// Test: show uncommitted rune has red "<not committed>"
 #[test]
 fn jj_show_uncommitted_rune() {
@@ -911,7 +1364,7 @@ fn jj_show_uncommitted_rune() {
         return;
     }
     let (home, _) = setup_jj_store("jj-uncommitted");
-    let id = last_line(&runes_ok(
+    let id = rune_id(&runes_ok(
         &home,
         &[
             "new",
@@ -937,9 +1390,9 @@ fn jj_show_pending_section_changes() {
         return;
     }
     let (home, store_path) = setup_jj_store("jj-pending");
-    let id = last_line(&runes_ok(
+    let id = rune_id(&runes_ok(
         &home,
-        &["new", "--project", "test:proj", "Pending test"],
+        &["new", "--project", "test:proj", "Pending test", "--commit"],
     ))
     .to_string();
     let store = Path::new(&store_path);
@@ -967,12 +1420,12 @@ fn jj_log_uses_changed_files_not_description() {
     }
     let (home, _) = setup_jj_store("jj-log-files");
     // Create two runes with --no-commit, then commit together
-    let id1 = last_line(&runes_ok(
+    let id1 = rune_id(&runes_ok(
         &home,
         &["new", "--project", "test:proj", "Rune one", "--no-commit"],
     ))
     .to_string();
-    let id2 = last_line(&runes_ok(
+    let id2 = rune_id(&runes_ok(
         &home,
         &["new", "--project", "test:proj", "Rune two", "--no-commit"],
     ))
@@ -1012,16 +1465,22 @@ fn jj_log_uses_changed_files_not_description() {
 /// Shared assertions: the rune/project filter must be applied before `--limit`
 /// truncates the history, and an empty result must say so.
 fn assert_log_filters_before_limit(home: &Path) {
-    let old = last_line(&runes_ok(
+    let old = rune_id(&runes_ok(
         home,
-        &["new", "--project", "test:proj", "Oldest rune"],
+        &["new", "--project", "test:proj", "Oldest rune", "--commit"],
     ))
     .to_string();
     // Bury the old rune's only commit well past the default limit of 50
     for i in 0..55 {
         runes_ok(
             home,
-            &["new", "--project", "test:proj", &format!("Filler {i}")],
+            &[
+                "new",
+                "--project",
+                "test:proj",
+                &format!("Filler {i}"),
+                "--commit",
+            ],
         );
     }
 
@@ -1084,15 +1543,15 @@ fn pijul_log_filters_before_limit() {
 /// Shared assertions: `--limit` counts matching *commits* in both output modes,
 /// so a commit touching several runes emits all its rows but is counted once.
 fn assert_log_limit_counts_commits(home: &Path) {
-    let solo = last_line(&runes_ok(
+    let solo = rune_id(&runes_ok(
         home,
-        &["new", "--project", "test:proj", "Solo rune"],
+        &["new", "--project", "test:proj", "Solo rune", "--commit"],
     ))
     .to_string();
     let mut bulk_ids = Vec::new();
     for i in 0..3 {
         bulk_ids.push(
-            last_line(&runes_ok(
+            rune_id(&runes_ok(
                 home,
                 &[
                     "new",
@@ -1182,7 +1641,7 @@ fn pijul_show_new_rune_has_created_metadata() {
         Some(v) => v,
         None => return,
     };
-    let id = last_line(&runes_ok(
+    let id = rune_id(&runes_ok(
         &home,
         &["new", "--project", "test:proj", "Pijul test"],
     ))
@@ -1203,7 +1662,7 @@ fn pijul_log_uses_changed_files() {
         Some(v) => v,
         None => return,
     };
-    let id = last_line(&runes_ok(
+    let id = rune_id(&runes_ok(
         &home,
         &["new", "--project", "test:proj", "Pijul log test"],
     ))
@@ -1220,7 +1679,7 @@ fn jj_rename_preserves_history() {
         return;
     }
     let (home, _) = setup_jj_store("jj-rename");
-    let id = last_line(&runes_ok(
+    let id = rune_id(&runes_ok(
         &home,
         &["new", "--project", "test:proj", "Original title"],
     ))
@@ -1299,7 +1758,7 @@ fn milestone_list_json_includes_child_rollup() {
         return;
     }
     let (home, _) = setup_jj_store("jj-milestone-json");
-    let milestone = last_line(&runes_ok(
+    let milestone = rune_id(&runes_ok(
         &home,
         &[
             "new",
@@ -1313,7 +1772,7 @@ fn milestone_list_json_includes_child_rollup() {
         ],
     ))
     .to_string();
-    let child = last_line(&runes_ok(
+    let child = rune_id(&runes_ok(
         &home,
         &[
             "new",
@@ -1406,7 +1865,7 @@ fn edit_draft_survives_failure_then_is_pruned_on_recovery() {
         return;
     }
     let (home, store_path) = setup_jj_store("jj-edit-drafts");
-    let id = last_line(&runes_ok(
+    let id = rune_id(&runes_ok(
         &home,
         &["new", "--project", "test:proj", "Draft me"],
     ))
@@ -1511,7 +1970,7 @@ fn comment_editor_draft_lives_under_runes_drafts() {
         return;
     }
     let (home, _) = setup_jj_store("jj-comment-draft");
-    let id = last_line(&runes_ok(
+    let id = rune_id(&runes_ok(
         &home,
         &["new", "--project", "test:proj", "Comment target"],
     ))
@@ -1600,7 +2059,7 @@ fn search_matches_body_and_closed_runes() {
     }
     let (home, _) = setup_jj_store("search-fts");
 
-    let body_match = last_line(&runes_ok(
+    let body_match = rune_id(&runes_ok(
         &home,
         &["new", "--project", "test:proj", "Fix the auth flow"],
     ))
@@ -1619,12 +2078,12 @@ fn search_matches_body_and_closed_runes() {
         &home,
         &["edit", &format!("test:{body_match}"), "--status", "closed"],
     );
-    let title_match = last_line(&runes_ok(
+    let title_match = rune_id(&runes_ok(
         &home,
         &["new", "--project", "test:proj", "Login page redesign"],
     ))
     .to_string();
-    let other_project = last_line(&runes_ok(
+    let other_project = rune_id(&runes_ok(
         &home,
         &["new", "--project", "test:other", "Login provider setup"],
     ))
@@ -1691,7 +2150,7 @@ fn search_rebuilds_cache_without_index() {
         return;
     }
     let (home, _) = setup_jj_store("search-reindex");
-    let id = last_line(&runes_ok(
+    let id = rune_id(&runes_ok(
         &home,
         &["new", "--project", "test:proj", "Rune about telemetry"],
     ))
@@ -1728,7 +2187,7 @@ fn builtin_views_need_no_config_and_custom_views_warn() {
         &["config", "set", "user.email", "test@runes.dev", "--global"],
     );
 
-    let mine = last_line(&runes_ok(
+    let mine = rune_id(&runes_ok(
         &home,
         &[
             "new",
@@ -1740,7 +2199,7 @@ fn builtin_views_need_no_config_and_custom_views_warn() {
         ],
     ))
     .to_string();
-    let theirs = last_line(&runes_ok(
+    let theirs = rune_id(&runes_ok(
         &home,
         &[
             "new",
@@ -1752,7 +2211,7 @@ fn builtin_views_need_no_config_and_custom_views_warn() {
         ],
     ))
     .to_string();
-    let closed = last_line(&runes_ok(
+    let closed = rune_id(&runes_ok(
         &home,
         &["new", "--project", "test:proj", "Already finished"],
     ))
@@ -1766,7 +2225,7 @@ fn builtin_views_need_no_config_and_custom_views_warn() {
             "closed:canceled",
         ],
     );
-    let reviewing = last_line(&runes_ok(
+    let reviewing = rune_id(&runes_ok(
         &home,
         &[
             "new",
@@ -1904,6 +2363,25 @@ fn builtin_views_are_documented_in_help_and_quickstart() {
     );
 }
 
+/// Test: quickstart teaches new -> edit the printed file -> commit <id>.
+#[test]
+fn quickstart_documents_the_canonical_flow() {
+    let home = unique_tmp_home("quickstart-flow");
+    let quickstart = runes_ok(&home, &["quickstart"]);
+    for expected in [
+        "new -> edit the printed file -> commit <id>",
+        "runes commit <id>",
+        "runes delete <id>",
+        "--commit",
+        "--no-commit",
+    ] {
+        assert!(
+            quickstart.contains(expected),
+            "quickstart missing {expected}: {quickstart}"
+        );
+    }
+}
+
 /// Test: committing one rune leaves another dirty rune uncommitted
 #[test]
 fn jj_commit_is_scoped_to_requested_paths() {
@@ -1913,12 +2391,12 @@ fn jj_commit_is_scoped_to_requested_paths() {
     }
     let (home, store_path) = setup_jj_store("jj-commit-scope");
     let store = Path::new(&store_path);
-    let id_a = last_line(&runes_ok(
+    let id_a = rune_id(&runes_ok(
         &home,
         &["new", "--project", "test:proj", "Rune A"],
     ))
     .to_string();
-    let id_b = last_line(&runes_ok(
+    let id_b = rune_id(&runes_ok(
         &home,
         &["new", "--project", "test:proj", "Rune B"],
     ))
@@ -2016,7 +2494,7 @@ fn jj_edit_file_accepts_full_doc() {
     }
     let (home, store_path) = setup_jj_store("jj-edit-full-doc");
     let store_path = PathBuf::from(store_path);
-    let id = last_line(&runes_ok(
+    let id = rune_id(&runes_ok(
         &home,
         &["new", "--project", "test:proj", "Round trip me"],
     ))
@@ -2097,7 +2575,7 @@ fn jj_edit_file_full_doc_validation() {
         return;
     }
     let (home, _) = setup_jj_store("jj-edit-full-doc-invalid");
-    let id = last_line(&runes_ok(
+    let id = rune_id(&runes_ok(
         &home,
         &["new", "--project", "test:proj", "Validate me"],
     ))
@@ -2152,7 +2630,7 @@ fn jj_new_file_accepts_full_doc() {
     }
     let (home, store_path) = setup_jj_store("jj-new-full-doc");
     let store_path = PathBuf::from(store_path);
-    let id = last_line(&runes_ok(
+    let id = rune_id(&runes_ok(
         &home,
         &[
             "new",
@@ -2173,7 +2651,7 @@ fn jj_new_file_accepts_full_doc() {
     fs::write(&input, runes_ok(&home, &["show", &format!("test:{id}")])).expect("write full doc");
 
     // Frontmatter fields are defaults, and the CLI still owns the id
-    let copy_id = last_line(&runes_ok(
+    let copy_id = rune_id(&runes_ok(
         &home,
         &["new", "--project", "test:proj", "Copy", "-f", &input_s],
     ))
@@ -2195,7 +2673,7 @@ fn jj_new_file_accepts_full_doc() {
     );
 
     // Explicit flags win over the input frontmatter
-    let flagged_id = last_line(&runes_ok(
+    let flagged_id = rune_id(&runes_ok(
         &home,
         &[
             "new",
@@ -2253,12 +2731,12 @@ fn jj_edit_file_full_doc_round_trip_is_byte_stable() {
     }
     let (home, store_path) = setup_jj_store("jj-edit-full-doc-stable");
     let store_path = PathBuf::from(store_path);
-    let dep = last_line(&runes_ok(
+    let dep = rune_id(&runes_ok(
         &home,
         &["new", "--project", "test:proj", "Dependency"],
     ))
     .to_string();
-    let id = last_line(&runes_ok(
+    let id = rune_id(&runes_ok(
         &home,
         &[
             "new",
@@ -2309,7 +2787,7 @@ fn jj_edit_file_with_field_flags() {
     }
     let (home, store_path) = setup_jj_store("jj-edit-file-flags");
     let store_path = PathBuf::from(store_path);
-    let id = last_line(&runes_ok(
+    let id = rune_id(&runes_ok(
         &home,
         &[
             "new",
@@ -2393,7 +2871,7 @@ fn states_accept_configured_substates_and_legacy_aliases() {
     let (home, store_path) = setup_jj_store("state-substates");
     let store = Path::new(&store_path);
 
-    let reviewing = last_line(&runes_ok(
+    let reviewing = rune_id(&runes_ok(
         &home,
         &[
             "new",
@@ -2485,12 +2963,12 @@ fn closed_substates_are_terminal_and_filterable() {
         return;
     }
     let (home, _) = setup_jj_store("closed-substates");
-    let blocker = last_line(&runes_ok(
+    let blocker = rune_id(&runes_ok(
         &home,
         &["new", "--project", "test:proj", "Blocking work"],
     ))
     .to_string();
-    let blocked = last_line(&runes_ok(
+    let blocked = rune_id(&runes_ok(
         &home,
         &[
             "new",
@@ -2564,7 +3042,7 @@ fn store_doctor_migrates_legacy_statuses() {
     }
     let (home, store_path) = setup_jj_store("doctor-migrate");
     let store = Path::new(&store_path);
-    let legacy = last_line(&runes_ok(
+    let legacy = rune_id(&runes_ok(
         &home,
         &["new", "--project", "test:proj", "Written by an older runes"],
     ))
@@ -2621,7 +3099,7 @@ fn store_doctor_migrates_archived_runes() {
     }
     let (home, store_path) = setup_jj_store("doctor-migrate-archived");
     let store = Path::new(&store_path);
-    let legacy = last_line(&runes_ok(
+    let legacy = rune_id(&runes_ok(
         &home,
         &["new", "--project", "test:proj", "Old and put away"],
     ))
@@ -2669,17 +3147,17 @@ fn legacy_statuses_on_disk_read_as_core_states_without_doctor() {
     let (home, store_path) = setup_jj_store("legacy-read-path");
     let store = Path::new(&store_path);
 
-    let started = last_line(&runes_ok(
+    let started = rune_id(&runes_ok(
         &home,
         &["new", "--project", "test:proj", "Still going"],
     ))
     .to_string();
-    let finished = last_line(&runes_ok(
+    let finished = rune_id(&runes_ok(
         &home,
         &["new", "--project", "test:proj", "Long since landed"],
     ))
     .to_string();
-    let dependent = last_line(&runes_ok(
+    let dependent = rune_id(&runes_ok(
         &home,
         &[
             "new",

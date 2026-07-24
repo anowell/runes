@@ -54,9 +54,22 @@ Create your first rune:
 runes new "My first issue"
 ```
 
-That's it. A markdown file is created, committed to your store, and you get back an ID like `myproject-a3x`.
+You get back an ID like `myproject-a3x` and the absolute path of the markdown file
+that was created. It is not committed yet: edit the file, then record it.
 
-Want to write a description right away? Open it in your editor:
+```bash
+$EDITOR /path/from/the/output.md
+runes diff myproject-a3x     # what is pending
+runes commit myproject-a3x   # record just this rune
+```
+
+That is the canonical flow: `new` → edit the printed file → `commit <id>`. A rune
+you never committed is only a file, so `runes delete <id>` discards it outright —
+no `--force`, no trace in the log. Skip the editing step with
+`runes new "My first issue" --commit`.
+
+Want to write a description right away? Open it in your editor (this commits, since
+the content is already there):
 
 ```bash
 runes new "My first issue" -e
@@ -67,6 +80,9 @@ Or pipe content in:
 ```bash
 echo "Some details" | runes new "My first issue" -f -
 ```
+
+Scripts can skip the text output entirely — `runes new "..." --json` prints
+`{"id": ..., "path": <absolute>, "committed": <bool>}`.
 
 List your runes:
 
@@ -79,14 +95,15 @@ runes list
 ### Creating and editing runes
 
 ```bash
-# Create an issue
+# Create an issue: prints the id, the path, and that it is still a draft
 runes new "Fix the login bug"
+runes commit myproject-a3x            # after editing the printed file
 
-# Create and open in $EDITOR
+# Create and open in $EDITOR (-e and -f commit on their own; --no-commit opts out)
 runes new "Design the API" -e
 
-# Create with metadata
-runes new "Refactor auth" --status wip --label backend --assignee self
+# Create with metadata, committing immediately
+runes new "Refactor auth" --status wip --label backend --assignee self --commit
 
 # Create a milestone
 runes new "v1 Release" --kind milestone

@@ -391,6 +391,19 @@ fn jj_collect_commits_for_path(
         if !seen.insert(commit_id.clone()) {
             continue;
         }
+        let commit = repo
+            .store()
+            .get_commit(&commit_id)
+            .map_err(|e| Error::new(format!("jj-lib commit load failed: {e}")))?;
+        if commit.description().trim().is_empty() && commit.parent_ids().len() <= 1 {
+            // Skip the empty working-copy commit: pending edits are not history yet
+            for parent_id in commit.parent_ids() {
+                if !seen.contains(parent_id) {
+                    queue.push_back(parent_id.clone());
+                }
+            }
+            continue;
+        }
         let mut changed = false;
         if let Some(paths) = repo
             .index()
@@ -404,10 +417,6 @@ fn jj_collect_commits_for_path(
                 }
             }
         }
-        let commit = repo
-            .store()
-            .get_commit(&commit_id)
-            .map_err(|e| Error::new(format!("jj-lib commit load failed: {e}")))?;
         if changed {
             let desc = commit
                 .description()
@@ -482,6 +491,15 @@ pub(super) fn jj_sdk_file_rich_log(
             .store()
             .get_commit(&commit_id)
             .map_err(|e| Error::new(format!("jj-lib commit load failed: {e}")))?;
+        if commit.description().trim().is_empty() && commit.parent_ids().len() <= 1 {
+            // Skip the empty working-copy commit: pending edits are not history yet
+            for parent_id in commit.parent_ids() {
+                if !seen.contains(parent_id) {
+                    queue.push_back(parent_id.clone());
+                }
+            }
+            continue;
+        }
         let (changed, all_changed_files) = match repo
             .index()
             .changed_paths_in_commit(&commit_id)

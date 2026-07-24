@@ -198,12 +198,18 @@ struct NewArgs {
     /// Open editor after creation
     #[arg(short = 'e', long = "edit")]
     edit: bool,
-    /// Skip auto-commit after creation
+    /// Commit immediately instead of leaving the doc for in-place editing
+    #[arg(long = "commit", conflicts_with = "no_commit")]
+    commit: bool,
+    /// Leave the new doc uncommitted even when -e/-f/-m provided content
     #[arg(long = "no-commit")]
     no_commit: bool,
     /// Commit message (implies commit)
     #[arg(short = 'm', long = "message")]
     message: Option<String>,
+    /// Emit {id, path, committed} as JSON instead of the three text lines
+    #[arg(long)]
+    json: bool,
 }
 
 /// Built-in views, in the order they are listed to users.
@@ -1195,9 +1201,11 @@ fn maybe_commit(
     user_message: Option<&str>,
     default_message: &str,
     user_cfg: &UserConfig,
-    rune_path: Option<&Path>,
+    rune_paths: &[PathBuf],
 ) -> Result<()> {
     if no_commit && user_message.is_none() {
+        // list/search read the cache, not the store files, so it tracks drafts too.
+        cache::rebuild_cache(store)?;
         eprintln!(
             "hint: uncommitted changes pending. Will be included in next commit or `runes commit`."
         );
@@ -1205,13 +1213,10 @@ fn maybe_commit(
     }
     let msg = user_message.unwrap_or(default_message);
     let (author_name, author_email) = resolve_commit_author(user_cfg, None)?;
-    let paths: Vec<PathBuf> = match rune_path {
-        Some(p) => {
-            let rel = p.strip_prefix(&store.path).unwrap_or(p);
-            vec![rel.to_path_buf()]
-        }
-        None => vec![],
-    };
+    let paths: Vec<PathBuf> = rune_paths
+        .iter()
+        .map(|p| p.strip_prefix(&store.path).unwrap_or(p).to_path_buf())
+        .collect();
     commit_store_changes(store, &paths, msg, &author_name, &author_email)
 }
 
@@ -1221,10 +1226,57 @@ fn normalize_status(doc: &mut RuneDoc, states: &StateConfig) -> Result<()> {
     states.validate(&doc.status)
 }
 
-fn warn_if_uncommitted(store: &Store) {
-    if let Ok(true) = backend::has_uncommitted_changes(store) {
-        eprintln!("hint: store has uncommitted changes. Run `runes commit` to commit them.");
+/// Whether the file on disk differs from what `revision` recorded.
+/// Unreadable either way counts as unchanged: a hint is not worth an error.
+fn has_drifted_from(store: &Store, rel_path: &Path, revision: &str) -> bool {
+    let Ok(recorded) = backend::file_at_revision(store, rel_path, revision) else {
+        return false;
+    };
+    let Ok(current) = fs::read_to_string(store.path.join(rel_path)) else {
+        return false;
+    };
+    current != recorded
+}
+
+/// Whether the file was touched at or after `epoch_secs`.
+fn touched_since(store: &Store, rel_path: &Path, epoch_secs: i64) -> bool {
+    let Ok(mtime) = fs::metadata(store.path.join(rel_path)).and_then(|m| m.modified()) else {
+        return false;
+    };
+    let Ok(since_epoch) = mtime.duration_since(std::time::UNIX_EPOCH) else {
+        return false;
+    };
+    since_epoch.as_secs() as i64 >= epoch_secs
+}
+
+/// Nudge only about runes that are already in history but have drifted on disk.
+/// A never-committed draft is what `runes new` leaves behind by design, so
+/// warning about one would nag on every single list.
+fn warn_modified(modified: &[&str]) {
+    let Some(first) = modified.first() else {
+        return;
+    };
+    if modified.len() == 1 {
+        eprintln!(
+            "hint: {first} has edits not yet in history. Record them with `runes commit {first}`."
+        );
+    } else {
+        eprintln!(
+            "hint: {} runes have edits not yet in history, e.g. `runes commit {first}`.",
+            modified.len()
+        );
     }
+}
+
+/// A rune with no timestamp never reached history, so it is a draft, not a
+/// modification — only the latter is worth a nudge.
+fn warn_if_modified(rows: &[cache::CacheRow], uncommitted_ids: &std::collections::HashSet<String>) {
+    let modified: Vec<&str> = rows
+        .iter()
+        .filter(|row| row.updated.is_some() && uncommitted_ids.contains(&row.id))
+        .map(|row| row.id.as_str())
+        .collect();
+    warn_modified(&modified);
 }
 
 fn stdin_is_tty() -> bool {
@@ -1570,8 +1622,10 @@ fn run_new(args: NewArgs) -> Result<()> {
         mut deps,
         file,
         edit,
+        commit,
         no_commit,
         message,
+        json,
     } = args;
     let relation_inputs = relations;
     let (cfg, user_cfg, cwd) = load_context()?;
@@ -1722,17 +1776,51 @@ fn run_new(args: NewArgs) -> Result<()> {
         let _ = fs::remove_file(&tmp_path);
     }
     let final_path = reconcile_filename(&doc_path, &identifier)?;
-    let default_msg = build_commit_message("Add", &identifier, std::slice::from_ref(&status));
-    maybe_commit(
-        &store,
-        no_commit,
-        message.as_deref(),
-        &default_msg,
-        &user_cfg,
-        Some(&final_path),
-    )?;
+    // Content supplied up front (-e/-f/-m) is finished work; a bare `new` leaves a draft.
+    let should_commit = !no_commit && (commit || edit || file.is_some() || message.is_some());
+    if should_commit {
+        let default_msg = build_commit_message("Add", &identifier, std::slice::from_ref(&status));
+        maybe_commit(
+            &store,
+            false,
+            message.as_deref(),
+            &default_msg,
+            &user_cfg,
+            std::slice::from_ref(&final_path),
+        )?;
+    } else {
+        cache::rebuild_cache(&store)?;
+    }
+    let abs_path = absolute_path(&final_path, &cwd);
+    if json {
+        let out = serde_json::json!({
+            "id": identifier,
+            "path": abs_path.display().to_string(),
+            "committed": should_commit,
+        });
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        return Ok(());
+    }
+    // The id stays on the first line so callers can keep parsing it out.
     println!("{identifier}");
+    println!("{}", abs_path.display());
+    // "uncommitted" would contain "committed": the status line has to stay
+    // greppable for automation that only has stdout to go on.
+    if should_commit {
+        println!("committed");
+    } else {
+        println!("draft — edit the file, then run: runes commit {identifier}");
+    }
     Ok(())
+}
+
+/// Absolute form of `path`, resolved against `cwd` when the store root is relative.
+fn absolute_path(path: &Path, cwd: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    }
 }
 
 fn resolve_store_and_project_from_spec(
@@ -2029,7 +2117,7 @@ fn run_list(args: ListArgs) -> Result<()> {
     if filters.blocked == Some(false) && filters.statuses.is_empty() {
         filters.statuses = open_statuses();
     }
-    let result = match list_kind {
+    match list_kind {
         ListKind::Issues => {
             let mut rows = cache::query_cache(&store, &filters)?;
             let uncommitted_ids = uncommitted_rune_ids(&store, &rows);
@@ -2049,6 +2137,9 @@ fn run_list(args: ListArgs) -> Result<()> {
                 }
             });
             output_issue_rows(&store, &rows, &uncommitted_ids, json);
+            if !json {
+                warn_if_modified(&rows, &uncommitted_ids);
+            }
             Ok(())
         }
         ListKind::Milestones => {
@@ -2078,11 +2169,7 @@ fn run_list(args: ListArgs) -> Result<()> {
             }
             Ok(())
         }
-    };
-    if !json {
-        warn_if_uncommitted(&store);
     }
-    result
 }
 
 /// The non-terminal core states, which match their substates too.
@@ -2094,20 +2181,25 @@ fn uncommitted_rune_ids(
     store: &Store,
     rows: &[cache::CacheRow],
 ) -> std::collections::HashSet<String> {
-    let uncommitted_paths: std::collections::HashSet<String> =
-        backend::uncommitted_rune_paths(store)
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|p| {
-                p.strip_prefix(&store.path)
-                    .ok()
-                    .map(|rel| rel.display().to_string())
-            })
-            .collect();
+    // No timestamp means it never reached history: a draft. Anything else has
+    // to be compared against what history recorded.
     rows.iter()
-        .filter(|r| uncommitted_paths.contains(&r.path))
-        .map(|r| r.id.clone())
+        .filter(|row| row.updated.is_none() || has_unrecorded_edits(store, row))
+        .map(|row| row.id.clone())
         .collect()
+}
+
+/// Whether a rune that reached history has since drifted on disk. The mtime
+/// gate keeps the content comparison off the common path: a commit never
+/// rewrites the file it records, so an older mtime rules drift out.
+fn has_unrecorded_edits(store: &Store, row: &cache::CacheRow) -> bool {
+    let rel_path = Path::new(&row.path);
+    row.updated
+        .is_some_and(|ts| touched_since(store, rel_path, ts))
+        && backend::file_rich_log(store, rel_path, 1)
+            .ok()
+            .and_then(|log| log.first().map(|entry| entry.revision.clone()))
+            .is_some_and(|revision| has_drifted_from(store, rel_path, &revision))
 }
 
 /// Render rune rows in the shared list/search shape, in the order given.
@@ -2648,7 +2740,14 @@ fn run_show(args: ShowArgs) -> Result<()> {
             }
         }
     }
-    warn_if_uncommitted(&store);
+    // Only a rune that reached history can carry unrecorded modifications;
+    // `show` already marks a draft as `<not committed>` in its frontmatter.
+    if history
+        .first()
+        .is_some_and(|entry| has_drifted_from(&store, rel_path, &entry.revision))
+    {
+        warn_modified(&[&doc.id]);
+    }
     Ok(())
 }
 
@@ -3348,7 +3447,7 @@ fn run_edit(args: EditArgs) -> Result<()> {
         message.as_deref(),
         &default_msg,
         &user_cfg,
-        Some(&final_path),
+        std::slice::from_ref(&final_path),
     )?;
     Ok(())
 }
@@ -3482,7 +3581,7 @@ fn run_comment(args: CommentArgs) -> Result<()> {
         None,
         &default_msg,
         &user_cfg,
-        Some(&path),
+        std::slice::from_ref(&path),
     )?;
     Ok(())
 }
@@ -3657,7 +3756,7 @@ fn run_move(args: MoveArgs) -> Result<()> {
             message.as_deref(),
             &move_msg,
             &user_cfg,
-            None,
+            &[],
         )?;
     } else {
         let move_in_msg = format!("Move in {} from {}", source_doc.id, from_store.name);
@@ -3667,7 +3766,7 @@ fn run_move(args: MoveArgs) -> Result<()> {
             message.as_deref(),
             &move_in_msg,
             &user_cfg,
-            None,
+            &[],
         )?;
         // Commit the removal from the source store
         if !no_commit || message.is_some() {
@@ -3695,7 +3794,7 @@ fn run_archive(args: ArchiveArgs) -> Result<()> {
         message.as_deref(),
         &default_msg,
         &user_cfg,
-        None,
+        &[],
     )?;
     Ok(())
 }
@@ -3738,32 +3837,48 @@ fn run_delete(args: DeleteArgs) -> Result<()> {
         no_commit,
         message,
     } = args;
-    if !force {
-        return Err(Error::new("Use --force to delete runes"));
-    }
     let (cfg, user_cfg, cwd) = load_context()?;
     let (store, path) = resolve_rune_id(&cfg, &user_cfg, &cwd, &id)?;
-    let doc = delete_rune(&store, &path)?;
+    let rel_path = path
+        .strip_prefix(&store.path)
+        .map_err(|e| Error::new(e.to_string()))?;
+    // A never-committed rune is just a draft file: discarding it destroys no
+    // history, so it needs neither --force nor a commit to record the removal.
+    let committed = backend::file_rich_log(&store, rel_path, 1).map_or(true, |log| !log.is_empty());
+    if committed && !force {
+        return Err(Error::new("Use --force to delete runes"));
+    }
+    let (doc, removed) = delete_rune(&store, &path)?;
+    if !committed {
+        return cache::rebuild_cache(&store);
+    }
     let default_msg = format!("Delete {}", doc.id);
+    // Scoped to what this delete removed: other pending drafts stay pending
+    // instead of riding along in the "Delete <id>" commit.
     maybe_commit(
         &store,
         no_commit,
         message.as_deref(),
         &default_msg,
         &user_cfg,
-        None,
+        &removed,
     )?;
     Ok(())
 }
 
-fn delete_rune(store: &Store, source_path: &Path) -> Result<RuneDoc> {
+/// Delete a rune, returning its doc and every path removed — a milestone takes
+/// its whole container with it.
+fn delete_rune(store: &Store, source_path: &Path) -> Result<(RuneDoc, Vec<PathBuf>)> {
     let doc = parse_doc(source_path)?;
+    let mut removed = Vec::new();
     if doc.kind == "milestone" {
         let container = source_path
             .parent()
             .ok_or_else(|| Error::new("Invalid container path"))?;
+        collect_files(container, &mut removed)?;
         fs::remove_dir_all(container)?;
     } else {
+        removed.push(source_path.to_path_buf());
         fs::remove_file(source_path)?;
     }
     let rel_path = source_path
@@ -3772,7 +3887,20 @@ fn delete_rune(store: &Store, source_path: &Path) -> Result<RuneDoc> {
         .to_path_buf();
     backend::remove_path(store, &rel_path)?;
     println!("Deleted {}", doc.id);
-    Ok(doc)
+    Ok((doc, removed))
+}
+
+/// Every file under `dir`, recursively.
+fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_files(&path, out)?;
+        } else {
+            out.push(path);
+        }
+    }
+    Ok(())
 }
 fn format_log_timestamp(epoch_secs: i64) -> String {
     use std::time::{Duration, UNIX_EPOCH};
@@ -4277,7 +4405,7 @@ fn run_restore(args: RestoreArgs) -> Result<()> {
         message.as_deref(),
         &default_msg,
         &user_cfg,
-        Some(&final_path),
+        std::slice::from_ref(&final_path),
     )?;
     Ok(())
 }
@@ -4781,7 +4909,8 @@ fn run_quickstart() -> Result<()> {
         println!("  them directly in your editor or file manager. Direct edits are tracked");
         println!("  as uncommitted changes until you run:");
         println!();
-        println!("    runes commit [-m <message>]");
+        println!("    runes commit <id>        # just that rune");
+        println!("    runes commit [-m <msg>]  # everything pending");
         println!();
     }
 
@@ -4789,10 +4918,25 @@ fn run_quickstart() -> Result<()> {
     println!("CREATING RUNES");
     println!("==============");
     println!();
-    println!("  runes new \"Fix login bug\"");
-    println!("  runes new \"Add auth\" --kind bug --status todo");
-    println!("  runes new \"Write tests\" --assignee alice -e    # open in editor");
-    println!("  runes new \"v2.0 release\" --kind milestone");
+    println!("  The canonical flow is: new -> edit the printed file -> commit <id>.");
+    println!("  `runes new` prints the id and the absolute path of the doc it created,");
+    println!("  and leaves it uncommitted so you can fill it in before recording it:");
+    println!();
+    println!("    runes new \"Fix login bug\"       # prints id + path, nothing committed yet");
+    println!("    $EDITOR <the printed path>     # write the description");
+    println!("    runes diff <id>                # review what is pending");
+    println!("    runes commit <id>              # record it");
+    println!("    runes delete <id>              # discard it (no --force until committed)");
+    println!();
+    println!("  Providing the content up front commits it right away instead:");
+    println!();
+    println!("    runes new \"Add auth\" --kind bug --commit       # skip the editing step");
+    println!("    runes new \"Write tests\" -e                    # open in editor, then commit");
+    println!(
+        "    runes new \"Fix flake\" -f notes.md             # body (or full doc) from a file"
+    );
+    println!("    runes new \"Fix flake\" -f notes.md --no-commit # ...but leave it uncommitted");
+    println!("    runes new \"v2.0 release\" --kind milestone");
     println!();
 
     // -- Viewing runes --
@@ -4833,6 +4977,9 @@ fn run_quickstart() -> Result<()> {
     println!("  runes edit <id> --milestone <mid>          # link to milestone");
     println!("  runes edit <id> -e                         # open in editor");
     println!("  runes comment <id> -m \"Looks good\"         # add a comment");
+    println!();
+    println!("  Or edit the markdown file directly, then `runes diff <id>` to review");
+    println!("  and `runes commit <id>` to record just that rune.");
     println!();
 
     // -- Schema info --
