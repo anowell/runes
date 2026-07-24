@@ -3569,6 +3569,7 @@ dependencies = [
  "clap",
  "jiff",
  "kdl",
+ "libc",
  "pijul-interaction",
  "runes-core",
  "rusqlite",

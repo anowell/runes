@@ -8,7 +8,7 @@ use runes_core::cache;
 use runes_core::config::{discover_stores, ensure_dir, get_store, BackendKind, Store};
 use runes_core::model::{
     discover_project_docs, ensure_title, new_milestone_doc, new_rune_doc, next_short_id, parse_doc,
-    parse_full_id, render_doc, replace_title, resolve_issue_path, slugify, RuneDoc,
+    parse_doc_text, parse_full_id, render_doc, replace_title, resolve_issue_path, slugify, RuneDoc,
 };
 use runes_core::schema::{find_kind_template_path, load_kind_template, load_schema};
 use runes_core::{Error, Result};
@@ -487,12 +487,23 @@ struct SyncArgs {
 }
 
 fn main() {
+    restore_default_sigpipe();
     set_context(InteractiveContext::Terminal);
     let cli = Cli::parse();
     let command = cli.command.unwrap_or(CliCommand::List(ListArgs::default()));
     if let Err(err) = handle_command(command) {
         eprintln!("error: {err}");
         std::process::exit(1);
+    }
+}
+
+/// Rust ignores SIGPIPE, so writing past a closed pipe (`runes show <id> | head -3`)
+/// panics instead of ending quietly the way other unix CLIs do.
+fn restore_default_sigpipe() {
+    #[cfg(unix)]
+    // SAFETY: installing a signal disposition before any threads are spawned.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 }
 
@@ -528,6 +539,12 @@ fn default_store_path(name: &str) -> Result<PathBuf> {
     Ok(home_dir()?.join(".runes").join("stores").join(name))
 }
 
+const DRAFT_MAX_AGE_DAYS: u64 = 30;
+
+fn drafts_root(store_name: &str) -> Result<PathBuf> {
+    Ok(home_dir()?.join(".runes").join("drafts").join(store_name))
+}
+
 /// Build a draft file path under `~/.runes/drafts/<store>/<proj>/` for editor-based edits.
 ///
 /// Format: `<rune_id>--<content_hash>--<title_slug>.md`
@@ -535,11 +552,7 @@ fn default_store_path(name: &str) -> Result<PathBuf> {
 fn draft_path(store_name: &str, rune_id: &str, title: &str, content: &str) -> Result<PathBuf> {
     use std::hash::{Hash, Hasher};
     let parsed = parse_full_id(rune_id)?;
-    let drafts_dir = home_dir()?
-        .join(".runes")
-        .join("drafts")
-        .join(store_name)
-        .join(&parsed.project);
+    let drafts_dir = drafts_root(store_name)?.join(&parsed.project);
     ensure_dir(&drafts_dir)?;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     content.hash(&mut hasher);
@@ -547,6 +560,50 @@ fn draft_path(store_name: &str, rune_id: &str, title: &str, content: &str) -> Re
     let slug: String = slugify(title).chars().take(60).collect();
     let filename = format!("{rune_id}--{content_hash}--{slug}.md");
     Ok(drafts_dir.join(filename))
+}
+
+/// Drop drafts for a rune whose edits just landed: what is left over comes from an
+/// aborted or failed editor session and is no longer recoverable state.
+fn prune_drafts_for_rune(store_name: &str, rune_id: &str) {
+    let (Ok(parsed), Ok(root)) = (parse_full_id(rune_id), drafts_root(store_name)) else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(root.join(&parsed.project)) else {
+        return;
+    };
+    let prefix = format!("{rune_id}--");
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Delete drafts untouched for `max_age`, returning how many were removed; younger
+/// drafts stay recoverable.
+fn prune_aged_drafts(store_name: &str, max_age: std::time::Duration) -> Result<usize> {
+    let Ok(projects) = fs::read_dir(drafts_root(store_name)?) else {
+        return Ok(0);
+    };
+    let now = std::time::SystemTime::now();
+    let mut removed = 0;
+    for project in projects.flatten() {
+        let Ok(entries) = fs::read_dir(project.path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let aged = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok())
+                .is_some_and(|age| age >= max_age);
+            if aged && fs::remove_file(entry.path()).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    Ok(removed)
 }
 
 fn load_context() -> Result<(Vec<Store>, UserConfig, PathBuf)> {
@@ -1712,11 +1769,18 @@ fn run_list(args: ListArgs) -> Result<()> {
                     rows.append(&mut project_rows);
                 }
             }
-            if rows.is_empty() {
-                return Err(Error::new("No milestones found"));
-            }
-            for row in rows {
-                println!("{row}");
+            rows.sort_by(|a, b| (&a.project, &a.id).cmp(&(&b.project, &b.id)));
+            if json {
+                let json_rows: Vec<serde_json::Value> =
+                    rows.iter().map(|row| row.to_json(&store.name)).collect();
+                println!("{}", serde_json::to_string_pretty(&json_rows).unwrap());
+            } else {
+                if rows.is_empty() {
+                    return Err(Error::new("No milestones found"));
+                }
+                for row in &rows {
+                    println!("{}", row.to_text());
+                }
             }
             Ok(())
         }
@@ -1849,11 +1913,71 @@ fn all_projects(store: &Store) -> Result<Vec<String>> {
     Ok(projects)
 }
 
+struct MilestoneRow {
+    id: String,
+    title: String,
+    project: String,
+    path: String,
+    status: String,
+    assignee: Option<String>,
+    labels: Vec<String>,
+    archived: bool,
+    total: usize,
+    done: usize,
+    in_progress: usize,
+    todo: usize,
+}
+
+impl MilestoneRow {
+    fn complete_pct(&self) -> f64 {
+        if self.total == 0 {
+            100.0
+        } else {
+            (self.done as f64 / self.total as f64) * 100.0
+        }
+    }
+
+    fn to_text(&self) -> String {
+        format!(
+            "milestone={} status={} total={} done={} in_progress={} todo={} complete_pct={:.1}{} title={}",
+            self.id,
+            self.status,
+            self.total,
+            self.done,
+            self.in_progress,
+            self.todo,
+            self.complete_pct(),
+            if self.archived { " archived=true" } else { "" },
+            self.title
+        )
+    }
+
+    fn to_json(&self, store_name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "milestone",
+            "id": self.id,
+            "title": self.title,
+            "store": store_name,
+            "project": self.project,
+            "path": self.path,
+            "status": self.status,
+            "assignee": self.assignee,
+            "labels": self.labels,
+            "archived": self.archived,
+            "child_total": self.total,
+            "child_done": self.done,
+            "child_in_progress": self.in_progress,
+            "child_todo": self.todo,
+            "complete_pct": (self.complete_pct() * 10.0).round() / 10.0,
+        })
+    }
+}
+
 fn list_project_milestones(
     store: &Store,
     project: &str,
     archived_mode: ArchivedMode,
-) -> Result<Vec<String>> {
+) -> Result<Vec<MilestoneRow>> {
     let mut rows = Vec::new();
     if archived_mode != ArchivedMode::Only {
         rows.append(&mut list_milestones_in_scope(store, project, false)?);
@@ -1864,7 +1988,11 @@ fn list_project_milestones(
     Ok(rows)
 }
 
-fn list_milestones_in_scope(store: &Store, project: &str, archived: bool) -> Result<Vec<String>> {
+fn list_milestones_in_scope(
+    store: &Store,
+    project: &str,
+    archived: bool,
+) -> Result<Vec<MilestoneRow>> {
     let project_root = store.path.join(project);
     let container_root = if archived {
         project_root.join("_archive")
@@ -1893,24 +2021,23 @@ fn list_milestones_in_scope(store: &Store, project: &str, archived: bool) -> Res
             continue;
         }
         let (total, done, in_progress, todo) = count_milestone_children(&entry.path())?;
-        let pct = if total == 0 {
-            100.0
-        } else {
-            (done as f64 / total as f64) * 100.0
-        };
-        let archived_flag = if archived { " archived=true" } else { "" };
-        rows.push(format!(
-            "milestone={} status={} total={} done={} in_progress={} todo={} complete_pct={:.1}{} title={}",
-            doc.id,
-            doc.status,
+        let rel_path = milestone_file
+            .strip_prefix(&store.path)
+            .unwrap_or(&milestone_file);
+        rows.push(MilestoneRow {
+            id: doc.id,
+            title: doc.title,
+            project: project.to_string(),
+            path: rel_path.display().to_string(),
+            status: doc.status,
+            assignee: doc.assignee,
+            labels: doc.labels,
+            archived,
             total,
             done,
             in_progress,
             todo,
-            pct,
-            archived_flag,
-            doc.title
-        ));
+        });
     }
     Ok(rows)
 }
@@ -2836,7 +2963,17 @@ fn run_edit(args: EditArgs) -> Result<()> {
         } else {
             fs::read_to_string(&file_path)?
         };
-        doc.body = contents;
+        // A draft kept after a failed editor edit is a whole rune doc, and reapplying one
+        // is the advertised recovery path, so apply its frontmatter rather than nesting
+        // it in the body. Anything else is a plain body.
+        match parse_doc_text(&contents, &path) {
+            Ok(edited) if edited.id == doc.id => {
+                schema.validate_status(&edited.kind, &edited.status)?;
+                schema.validate_custom_fields(&edited.kind, &edited.frontmatter_extra)?;
+                doc = edited;
+            }
+            _ => doc.body = contents,
+        }
         let (body, effective_title) = ensure_title(&doc.body, &original_title);
         doc.body = body;
         doc.title = effective_title;
@@ -2883,6 +3020,7 @@ fn run_edit(args: EditArgs) -> Result<()> {
         return Err(Error::new("No edits specified and no editor available"));
     }
     let final_path = reconcile_filename(&path, &doc.id)?;
+    prune_drafts_for_rune(&store.name, &doc.id);
     let snippets = edit_change_snippets(&original_doc, &doc);
     let default_msg = build_commit_message("Update", &doc.id, &snippets);
     maybe_commit(
@@ -2917,8 +3055,7 @@ fn run_comment(args: CommentArgs) -> Result<()> {
             fs::read_to_string(&file_path)?
         }
     } else if editor_available() {
-        let tmp_dir = std::env::temp_dir();
-        let tmp_path = tmp_dir.join(format!("runes-comment-{}.md", &id));
+        let tmp_path = draft_path(&store.name, &doc.id, &format!("comment {}", doc.title), "")?;
         fs::write(&tmp_path, "")?;
         open_editor(&tmp_path)?;
         let text = fs::read_to_string(&tmp_path)?;
@@ -3018,6 +3155,7 @@ fn run_comment(args: CommentArgs) -> Result<()> {
 
     doc.body = new_body;
     fs::write(&path, render_doc(&doc))?;
+    prune_drafts_for_rune(&store.name, &doc.id);
     let default_msg = build_commit_message("Comment on", &doc.id, &[]);
     maybe_commit(
         &store,
@@ -3853,7 +3991,7 @@ fn run_store(command: StoreCommand) -> Result<()> {
         StoreCommand::Info { name } => store_info(name),
 
         StoreCommand::Remove { name } => store_remove(name),
-        StoreCommand::Doctor { store } => cache_rebuild(store),
+        StoreCommand::Doctor { store } => store_doctor(store),
     }
 }
 fn store_init(
@@ -3952,10 +4090,15 @@ fn store_remove(name: String) -> Result<()> {
     eprintln!("  rm -rf {}", store.path.display());
     Ok(())
 }
-fn cache_rebuild(store_name: String) -> Result<()> {
+fn store_doctor(store_name: String) -> Result<()> {
     let store = load_store(&store_name)?;
     cache::rebuild_cache(&store)?;
     println!("Cache rebuilt for {}", store.name);
+    let max_age = std::time::Duration::from_secs(DRAFT_MAX_AGE_DAYS * 24 * 60 * 60);
+    let pruned = prune_aged_drafts(&store.name, max_age)?;
+    if pruned > 0 {
+        println!("Pruned {pruned} draft(s) older than {DRAFT_MAX_AGE_DAYS} days");
+    }
     Ok(())
 }
 

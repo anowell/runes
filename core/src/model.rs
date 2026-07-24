@@ -209,6 +209,13 @@ fn parse_relation_line(doc: &mut RuneDoc, trimmed: &str) {
 
 pub fn parse_doc(path: &Path) -> Result<RuneDoc> {
     let text = fs::read_to_string(path)?;
+    parse_doc_text(&text, path)
+}
+
+/// Parse rune doc text that is not (yet) the canonical file at `path`, e.g. a draft
+/// held aside after a failed editor edit. `path` is only used for error messages and
+/// the resulting doc's path.
+pub fn parse_doc_text(text: &str, path: &Path) -> Result<RuneDoc> {
     let mut lines = text.lines();
     let first = lines
         .next()

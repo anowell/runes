@@ -1,7 +1,8 @@
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn unique_tmp_home(test_name: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -35,7 +36,7 @@ fn runes_ok(home: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).expect("stdout utf8")
 }
 
-fn runes_with_env(home: &Path, envs: &[(&str, &str)], args: &[&str]) -> String {
+fn runes_output_with_env(home: &Path, envs: &[(&str, &str)], args: &[&str]) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_runes"));
     cmd.args(args)
         .env("HOME", home)
@@ -43,7 +44,11 @@ fn runes_with_env(home: &Path, envs: &[(&str, &str)], args: &[&str]) -> String {
     for (key, value) in envs {
         cmd.env(key, value);
     }
-    let output = cmd.output().expect("run runes command");
+    cmd.output().expect("run runes command")
+}
+
+fn runes_with_env(home: &Path, envs: &[(&str, &str)], args: &[&str]) -> String {
+    let output = runes_output_with_env(home, envs, args);
     if !output.status.success() {
         panic!(
             "command failed: runes {}\nstdout:\n{}\nstderr:\n{}",
@@ -1231,6 +1236,349 @@ fn jj_rename_preserves_history() {
     assert!(shown.contains("created_at"), "missing created_at: {shown}");
 }
 
+// --- milestone --json, draft location, stale draft cleanup, broken pipes ---
+
+fn drafts_dir(home: &Path, store: &str, project: &str) -> PathBuf {
+    home.join(".runes").join("drafts").join(store).join(project)
+}
+
+fn list_drafts(dir: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .map(|entry| {
+            entry
+                .expect("dir entry")
+                .file_name()
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+fn write_editor_script(home: &Path, name: &str, body: &str) -> PathBuf {
+    let path = home.join(name);
+    fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write editor script");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod editor script");
+    path
+}
+
+/// Run the CLI under a pty, for paths that only open an editor on a terminal.
+fn pty_runes(home: &Path, envs: &[(&str, &str)], args: &[&str]) -> Output {
+    let exe = env!("CARGO_BIN_EXE_runes");
+    let mut cmd = Command::new("script");
+    if cfg!(target_os = "linux") {
+        let script = std::iter::once(exe)
+            .chain(args.iter().copied())
+            .collect::<Vec<_>>()
+            .join(" ");
+        cmd.args(["-q", "-e", "-c", &script, "/dev/null"]);
+    } else {
+        cmd.args(["-q", "/dev/null", exe]).args(args);
+    }
+    cmd.env("HOME", home)
+        .env("RUNES_USER", "Test User <test@runes.dev>")
+        .stdin(Stdio::null());
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+    cmd.output().expect("run runes under pty")
+}
+
+#[test]
+fn milestone_list_json_includes_child_rollup() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let (home, _) = setup_jj_store("jj-milestone-json");
+    let milestone = last_line(&runes_ok(
+        &home,
+        &[
+            "new",
+            "--project",
+            "test:runes",
+            "Dual backend",
+            "--id",
+            "m03",
+            "--kind",
+            "milestone",
+        ],
+    ))
+    .to_string();
+    let child = last_line(&runes_ok(
+        &home,
+        &[
+            "new",
+            "--project",
+            "test:runes",
+            "Wire jj-lib",
+            "--parent",
+            &milestone,
+        ],
+    ))
+    .to_string();
+    runes_ok(
+        &home,
+        &[
+            "new",
+            "--project",
+            "test:runes",
+            "Wire libpijul",
+            "--parent",
+            &milestone,
+        ],
+    );
+    runes_ok(
+        &home,
+        &["edit", &format!("test:{child}"), "--status", "done"],
+    );
+
+    let out = runes_ok(
+        &home,
+        &[
+            "list",
+            "--store",
+            "test",
+            "--project",
+            "runes",
+            "--kind",
+            "milestones",
+            "--json",
+        ],
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(&out).unwrap_or_else(|e| panic!("invalid json: {e}\n{out}"));
+    let rows = parsed.as_array().expect("json array");
+    assert_eq!(rows.len(), 1, "unexpected rows: {out}");
+    let row = &rows[0];
+    assert_eq!(row["kind"].as_str(), Some("milestone"));
+    assert_eq!(row["id"].as_str(), Some(milestone.as_str()));
+    assert_eq!(row["title"].as_str(), Some("Dual backend"));
+    assert_eq!(row["store"].as_str(), Some("test"));
+    assert_eq!(row["project"].as_str(), Some("runes"));
+    assert_eq!(row["status"].as_str(), Some("todo"));
+    assert_eq!(row["archived"].as_bool(), Some(false));
+    assert!(row["labels"].is_array(), "labels not an array: {row}");
+    assert!(
+        row["path"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("_milestone.md"),
+        "unexpected path: {row}"
+    );
+    assert_eq!(row["child_total"].as_u64(), Some(2));
+    assert_eq!(row["child_done"].as_u64(), Some(1));
+    assert_eq!(row["child_in_progress"].as_u64(), Some(0));
+    assert_eq!(row["child_todo"].as_u64(), Some(1));
+    assert_eq!(row["complete_pct"].as_f64(), Some(50.0));
+
+    // Empty listings stay parseable rather than erroring out
+    let empty = runes_ok(
+        &home,
+        &[
+            "list",
+            "--store",
+            "test",
+            "--project",
+            "nomiles",
+            "--kind",
+            "milestones",
+            "--json",
+        ],
+    );
+    assert_eq!(empty.trim(), "[]");
+}
+
+/// A failed editor edit keeps its draft under `~/.runes/drafts/<store>/<project>/`,
+/// `-f` reapplies it, and a successful edit clears that rune's stale drafts.
+#[test]
+fn edit_draft_survives_failure_then_is_pruned_on_recovery() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let (home, store_path) = setup_jj_store("jj-edit-drafts");
+    let id = last_line(&runes_ok(
+        &home,
+        &["new", "--project", "test:proj", "Draft me"],
+    ))
+    .to_string();
+    let target = format!("test:{id}");
+
+    let editor = write_editor_script(
+        &home,
+        "bad-editor.sh",
+        &format!(
+            "cat > \"$1\" <<'EOF'\n---\ntask \"{id}\" {{\n  status \"bogus\"\n}}\n---\n\n# Draft me\n\nrecovered body\nEOF"
+        ),
+    );
+    let output = runes_output_with_env(
+        &home,
+        &[("EDITOR", editor.to_str().expect("editor path"))],
+        &["edit", &target, "-e"],
+    );
+    assert!(
+        !output.status.success(),
+        "invalid status should fail the edit"
+    );
+
+    let drafts = drafts_dir(&home, "test", "proj");
+    let saved = list_drafts(&drafts);
+    assert_eq!(saved.len(), 1, "expected a kept draft, found {saved:?}");
+    let draft = drafts.join(&saved[0]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&draft.display().to_string()),
+        "recovery hint missing draft path: {stderr}"
+    );
+
+    // A leftover from an earlier aborted session should not survive the next edit
+    let stale = drafts.join(format!("{id}--0000000--draft-me.md"));
+    fs::write(&stale, "abandoned").expect("write stale draft");
+
+    let fixed = fs::read_to_string(&draft)
+        .expect("read draft")
+        .replace("\"bogus\"", "\"done\"");
+    fs::write(&draft, fixed).expect("rewrite draft");
+    runes_ok(
+        &home,
+        &["edit", &target, "-f", draft.to_str().expect("draft path")],
+    );
+
+    let doc = fs::read_to_string(find_rune_file(Path::new(&store_path), &id)).expect("read rune");
+    assert!(
+        doc.contains("status \"done\""),
+        "draft status not applied: {doc}"
+    );
+    assert!(
+        doc.contains("recovered body"),
+        "draft body not applied: {doc}"
+    );
+    assert_eq!(
+        doc.matches(&format!("task \"{id}\"")).count(),
+        1,
+        "draft frontmatter was nested into the body: {doc}"
+    );
+    assert!(
+        list_drafts(&drafts).is_empty(),
+        "drafts left behind: {:?}",
+        list_drafts(&drafts)
+    );
+}
+
+#[test]
+fn store_doctor_prunes_aged_drafts() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let (home, _) = setup_jj_store("jj-draft-prune");
+    let drafts = drafts_dir(&home, "test", "proj");
+    fs::create_dir_all(&drafts).expect("create drafts dir");
+    let aged = drafts.join("proj-old--1111111--ancient.md");
+    let recent = drafts.join("proj-new--2222222--recent.md");
+    fs::write(&aged, "abandoned in April").expect("write aged draft");
+    fs::write(&recent, "still useful").expect("write recent draft");
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&aged)
+        .expect("open aged draft")
+        .set_modified(SystemTime::now() - Duration::from_secs(40 * 24 * 60 * 60))
+        .expect("backdate aged draft");
+
+    let out = runes_ok(&home, &["store", "doctor", "test"]);
+    assert!(out.contains("Pruned 1 draft"), "no prune reported: {out}");
+    assert!(!aged.exists(), "aged draft was not pruned");
+    assert!(recent.exists(), "recent draft must stay recoverable");
+}
+
+#[test]
+fn comment_editor_draft_lives_under_runes_drafts() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    if !command_exists("script") {
+        eprintln!("skipping: no script(1) to provide a pty");
+        return;
+    }
+    let (home, _) = setup_jj_store("jj-comment-draft");
+    let id = last_line(&runes_ok(
+        &home,
+        &["new", "--project", "test:proj", "Comment target"],
+    ))
+    .to_string();
+    let target = format!("test:{id}");
+    let recorded = home.join("draft-path.txt");
+    let editor = write_editor_script(
+        &home,
+        "comment-editor.sh",
+        &format!(
+            "echo \"$1\" > {}\necho 'typed in the editor' > \"$1\"",
+            recorded.display()
+        ),
+    );
+    let output = pty_runes(
+        &home,
+        &[("EDITOR", editor.to_str().expect("editor path"))],
+        &["comment", &target],
+    );
+    let used = fs::read_to_string(&recorded).unwrap_or_else(|e| {
+        panic!(
+            "editor never ran: {e}\nstdout:\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    });
+    let drafts = drafts_dir(&home, "test", "proj");
+    assert!(
+        used.trim()
+            .starts_with(drafts.to_str().expect("drafts dir")),
+        "comment draft not under {}: {used}",
+        drafts.display()
+    );
+    assert!(
+        used.contains(&id),
+        "comment draft not named for the rune: {used}"
+    );
+
+    let shown = runes_ok(&home, &["show", &target]);
+    assert!(
+        shown.contains("typed in the editor"),
+        "comment missing: {shown}"
+    );
+    assert!(
+        list_drafts(&drafts).is_empty(),
+        "comment draft left behind: {:?}",
+        list_drafts(&drafts)
+    );
+}
+
+/// `runes show <id> | head -3` must not panic once the reader goes away.
+#[test]
+fn output_to_a_closed_pipe_does_not_panic() {
+    let home = unique_tmp_home("broken-pipe");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_runes"))
+        .arg("quickstart")
+        .env("HOME", &home)
+        .env("RUNES_USER", "Test User <test@runes.dev>")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn runes");
+    // Closing the read end mid-stream is what `| head -3` does
+    drop(child.stdout.take());
+    let output = child.wait_with_output().expect("wait for runes");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("panicked") && !stderr.contains("Broken pipe"),
+        "broken pipe surfaced to the user: {stderr}"
+    );
+}
+
 /// Position of a rune ID in command output, for rank assertions.
 fn rank_of(output: &str, id: &str) -> usize {
     output
@@ -1363,7 +1711,7 @@ fn search_rebuilds_cache_without_index() {
 }
 
 fn find_rune_file(store_path: &Path, rune_id: &str) -> PathBuf {
-    let short = rune_id.split('-').last().unwrap_or(rune_id);
+    let short = rune_id.split('-').next_back().unwrap_or(rune_id);
     let project = rune_id.split('-').next().unwrap_or("proj");
     let project_dir = store_path.join(project);
     for entry in fs::read_dir(&project_dir).expect("read project dir") {
