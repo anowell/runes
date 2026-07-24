@@ -160,7 +160,9 @@ fn parse_block_lines(block_lines: &[String], doc: &mut RuneDoc) {
 fn parse_property_line(doc: &mut RuneDoc, trimmed: &str) -> bool {
     if trimmed.starts_with("status ") {
         if let Some(value) = extract_first_quoted_value(trimmed) {
-            doc.status = value;
+            // Normalized on read, so a store still holding the pre-substate
+            // vocabulary reaches the cache and every consumer as core states.
+            doc.status = crate::state::normalize(&value);
             return true;
         }
     }
@@ -558,7 +560,8 @@ Body
         let doc = parse_doc(&path).expect("parse doc");
         assert_eq!(doc.id, "runes-test");
         assert_eq!(doc.kind, "task");
-        assert_eq!(doc.status, "done");
+        // Legacy `done` on disk parses as the core state.
+        assert_eq!(doc.status, "closed");
         assert_eq!(doc.assignee.as_deref(), Some("tester"));
         assert_eq!(doc.labels, vec!["infra", "cli"]);
         assert_eq!(doc.milestone.as_deref(), Some("runes-m01"));
@@ -588,6 +591,22 @@ Body
         assert_eq!(rendered, contents);
         let reparsed = parse_doc_text(&rendered, Path::new("<test>")).expect("reparse");
         assert_eq!(render_doc(&reparsed), contents);
+    }
+
+    #[test]
+    fn parse_normalizes_legacy_statuses_on_read() {
+        let path = PathBuf::from("legacy.md");
+        for (on_disk, expected) in [
+            ("done", "closed"),
+            ("in-progress", "wip"),
+            ("in-progress:review", "wip:review"),
+            ("wip:design", "wip:design"),
+        ] {
+            let contents =
+                format!("---\ntask \"runes-lgc\" {{\n  status \"{on_disk}\"\n}}\n---\n\n# T\n");
+            let doc = parse_doc_text(&contents, &path).expect("parse doc");
+            assert_eq!(doc.status, expected, "status {on_disk}");
+        }
     }
 
     #[test]

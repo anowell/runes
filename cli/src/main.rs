@@ -12,6 +12,7 @@ use runes_core::model::{
     resolve_issue_path, slugify, RuneDoc,
 };
 use runes_core::schema::{find_kind_template_path, load_kind_template, load_schema};
+use runes_core::state::{self, StateConfig};
 use runes_core::{Error, Result};
 use std::fs;
 use std::io::{self, Read};
@@ -1214,6 +1215,12 @@ fn maybe_commit(
     commit_store_changes(store, &paths, msg, &author_name, &author_email)
 }
 
+/// Accept legacy status names on any input path, then validate.
+fn normalize_status(doc: &mut RuneDoc, states: &StateConfig) -> Result<()> {
+    doc.status = state::normalize(&doc.status);
+    states.validate(&doc.status)
+}
+
 fn warn_if_uncommitted(store: &Store) {
     if let Ok(true) = backend::has_uncommitted_changes(store) {
         eprintln!("hint: store has uncommitted changes. Run `runes commit` to commit them.");
@@ -1594,11 +1601,13 @@ fn run_new(args: NewArgs) -> Result<()> {
     } else {
         kind_value.clone()
     };
-    let status = status_flag
-        .clone()
-        .or_else(|| incoming.as_ref().map(|doc| doc.status.clone()))
-        .or_else(|| creation_defaults.status.clone())
-        .unwrap_or_else(|| "todo".to_string());
+    let status = state::normalize(
+        &status_flag
+            .clone()
+            .or_else(|| incoming.as_ref().map(|doc| doc.status.clone()))
+            .or_else(|| creation_defaults.status.clone())
+            .unwrap_or_else(|| state::TODO.to_string()),
+    );
     let mut combined_labels = creation_defaults.labels.clone();
     combined_labels.extend(labels);
     let assignee_value = assignee
@@ -1626,8 +1635,9 @@ fn run_new(args: NewArgs) -> Result<()> {
 
     // Load schema and validate kind/status
     let schema = load_schema(&store.path, Some(&project_name))?;
+    let states = user_cfg.state_config()?;
     schema.validate_kind(&kind)?;
-    schema.validate_status(&kind, &status)?;
+    states.validate(&status)?;
     if let Some(doc) = &incoming {
         schema.validate_custom_fields(&kind, &doc.frontmatter_extra)?;
     }
@@ -1679,9 +1689,9 @@ fn run_new(args: NewArgs) -> Result<()> {
         let tmp_path = draft_path(&store.name, &identifier, &title, &original_content)?;
         fs::copy(&doc_path, &tmp_path)?;
         open_editor(&tmp_path)?;
-        let edited_doc = parse_doc(&tmp_path)?;
+        let mut edited_doc = parse_doc(&tmp_path)?;
         // Validate after editor changes
-        if let Err(e) = schema.validate_status(&edited_doc.kind, &edited_doc.status) {
+        if let Err(e) = normalize_status(&mut edited_doc, &states) {
             eprintln!("error: {e}");
             eprintln!("Your edits are saved in: {}", tmp_path.display());
             eprintln!(
@@ -1896,12 +1906,18 @@ fn run_list(args: ListArgs) -> Result<()> {
     } else {
         None
     };
+    let states = user_cfg.state_config()?;
+    let status = match status {
+        Some(value) => {
+            let normalized = state::normalize(&value);
+            states.validate(&normalized)?;
+            Some(normalized)
+        }
+        None => None,
+    };
     let mut filters = CacheFilter {
         project: project_proj,
-        statuses: status
-            .as_ref()
-            .map(|value| vec![value.clone()])
-            .unwrap_or_else(Vec::new),
+        statuses: status.map(|value| vec![value]).unwrap_or_default(),
         kind: None,
         assignee: assignee_filter,
         labels,
@@ -1930,7 +1946,11 @@ fn run_list(args: ListArgs) -> Result<()> {
             filters.project = query_cfg.project.clone();
         }
         if !status_flag_present {
-            filters.statuses = query_cfg.statuses.clone();
+            filters.statuses = query_cfg
+                .statuses
+                .iter()
+                .map(|value| state::normalize(value))
+                .collect();
         }
         if !kind_flag_present {
             if let Some(kind_value) = &query_cfg.kind {
@@ -1970,8 +1990,17 @@ fn run_list(args: ListArgs) -> Result<()> {
             .find(|(name, _)| *name == view_name)
             .map(|(name, _)| *name)
     };
-    if builtin_view == Some(VIEW_MINE) && filters.assignee.is_none() {
-        filters.assignee = user_cfg.resolve_user_alias("self");
+    if let Some(view) = builtin_view {
+        if view == VIEW_MINE && filters.assignee.is_none() {
+            filters.assignee = user_cfg.resolve_user_alias("self");
+        }
+        if !status_flag_present {
+            match view {
+                VIEW_OPEN | VIEW_MINE => filters.statuses = open_statuses(),
+                VIEW_CLOSED => filters.statuses = vec![state::CLOSED.to_string()],
+                _ => {}
+            }
+        }
     }
     // Empty project means "any project" (overrides default_project)
     if filters.project.as_deref() == Some("") {
@@ -1996,23 +2025,9 @@ fn run_list(args: ListArgs) -> Result<()> {
         print_uninitialized_notice();
         return Ok(());
     }
-    // Open/closed come from the project's schema, so views resolve after the project does.
-    if let Some(view) = builtin_view {
-        if !status_flag_present {
-            let (open_statuses, closed_statuses) = open_closed_statuses(&store, &filters);
-            match view {
-                VIEW_OPEN | VIEW_MINE => filters.statuses = open_statuses,
-                VIEW_CLOSED => filters.statuses = closed_statuses,
-                _ => {}
-            }
-        }
-    }
     // For --ready, add non-terminal status filter if no explicit statuses set
     if filters.blocked == Some(false) && filters.statuses.is_empty() {
-        let (open_statuses, _) = open_closed_statuses(&store, &filters);
-        if !open_statuses.is_empty() {
-            filters.statuses = open_statuses;
-        }
+        filters.statuses = open_statuses();
     }
     let result = match list_kind {
         ListKind::Issues => {
@@ -2070,21 +2085,9 @@ fn run_list(args: ListArgs) -> Result<()> {
     result
 }
 
-/// Schema statuses for the filtered kind, split into (open, closed).
-/// Both are empty when the schema can't be loaded, which leaves callers unfiltered.
-fn open_closed_statuses(store: &Store, filters: &CacheFilter) -> (Vec<String>, Vec<String>) {
-    let Ok(schema) = load_schema(&store.path, filters.project.as_deref()) else {
-        return (Vec::new(), Vec::new());
-    };
-    let kind_name = filters.kind.as_deref().unwrap_or("task");
-    let closed = schema.terminal_statuses_for_kind(kind_name);
-    let open = schema
-        .statuses_for_kind(kind_name)
-        .iter()
-        .filter(|status| !closed.contains(status))
-        .cloned()
-        .collect();
-    (open, closed)
+/// The non-terminal core states, which match their substates too.
+fn open_statuses() -> Vec<String> {
+    state::OPEN_STATES.iter().map(|s| s.to_string()).collect()
 }
 
 fn uncommitted_rune_ids(
@@ -2170,9 +2173,18 @@ fn run_search(args: SearchArgs) -> Result<()> {
             }
         }
     }
+    let states = user_cfg.state_config()?;
+    let status = match status {
+        Some(value) => {
+            let normalized = state::normalize(&value);
+            states.validate(&normalized)?;
+            Some(normalized)
+        }
+        None => None,
+    };
     let filters = CacheFilter {
         project: project_proj,
-        // No status filter by default: finding closed or done runes is the point.
+        // No status filter by default: finding closed runes is the point.
         statuses: status.map(|value| vec![value]).unwrap_or_default(),
         labels,
         archived: Some(if archived {
@@ -2219,8 +2231,8 @@ struct MilestoneRow {
     labels: Vec<String>,
     archived: bool,
     total: usize,
-    done: usize,
-    in_progress: usize,
+    closed: usize,
+    wip: usize,
     todo: usize,
 }
 
@@ -2229,18 +2241,18 @@ impl MilestoneRow {
         if self.total == 0 {
             100.0
         } else {
-            (self.done as f64 / self.total as f64) * 100.0
+            (self.closed as f64 / self.total as f64) * 100.0
         }
     }
 
     fn to_text(&self) -> String {
         format!(
-            "milestone={} status={} total={} done={} in_progress={} todo={} complete_pct={:.1}{} title={}",
+            "milestone={} status={} total={} closed={} wip={} todo={} complete_pct={:.1}{} title={}",
             self.id,
             self.status,
             self.total,
-            self.done,
-            self.in_progress,
+            self.closed,
+            self.wip,
             self.todo,
             self.complete_pct(),
             if self.archived { " archived=true" } else { "" },
@@ -2261,8 +2273,8 @@ impl MilestoneRow {
             "labels": self.labels,
             "archived": self.archived,
             "child_total": self.total,
-            "child_done": self.done,
-            "child_in_progress": self.in_progress,
+            "child_closed": self.closed,
+            "child_wip": self.wip,
             "child_todo": self.todo,
             "complete_pct": (self.complete_pct() * 10.0).round() / 10.0,
         })
@@ -2316,7 +2328,7 @@ fn list_milestones_in_scope(
         if doc.kind != "milestone" {
             continue;
         }
-        let (total, done, in_progress, todo) = count_milestone_children(&entry.path())?;
+        let (total, closed, wip, todo) = count_milestone_children(&entry.path())?;
         let rel_path = milestone_file
             .strip_prefix(&store.path)
             .unwrap_or(&milestone_file);
@@ -2330,18 +2342,19 @@ fn list_milestones_in_scope(
             labels: doc.labels,
             archived,
             total,
-            done,
-            in_progress,
+            closed,
+            wip,
             todo,
         });
     }
     Ok(rows)
 }
 
+/// Count a milestone's children as (total, closed, wip, todo), keyed by core state.
 fn count_milestone_children(container: &Path) -> Result<(usize, usize, usize, usize)> {
     let mut total = 0;
-    let mut done = 0;
-    let mut in_progress = 0;
+    let mut closed = 0;
+    let mut wip = 0;
     let mut todo = 0;
     for entry in fs::read_dir(container)? {
         let entry = entry?;
@@ -2354,13 +2367,13 @@ fn count_milestone_children(container: &Path) -> Result<(usize, usize, usize, us
         }
         let child = parse_doc(&path)?;
         total += 1;
-        match child.status.as_str() {
-            "done" => done += 1,
-            "in-progress" => in_progress += 1,
+        match state::core_of(&child.status) {
+            state::CLOSED => closed += 1,
+            state::WIP => wip += 1,
             _ => todo += 1,
         }
     }
-    Ok((total, done, in_progress, todo))
+    Ok((total, closed, wip, todo))
 }
 fn format_labels(labels: &[String], max: usize) -> String {
     if labels.is_empty() {
@@ -2618,13 +2631,13 @@ fn run_show(args: ShowArgs) -> Result<()> {
     if doc.kind == "milestone" {
         if let Some(container) = path.parent() {
             if container.exists() {
-                let (total, done, in_progress, todo) = count_milestone_children(container)?;
+                let (total, closed, wip, todo) = count_milestone_children(container)?;
                 let pct = if total == 0 {
                     100.0
                 } else {
-                    (done as f64 / total as f64) * 100.0
+                    (closed as f64 / total as f64) * 100.0
                 };
-                println!("child_total={total} child_done={done} child_in_progress={in_progress} child_todo={todo} complete_pct={pct:.1}");
+                println!("child_total={total} child_closed={closed} child_wip={wip} child_todo={todo} complete_pct={pct:.1}");
                 let children = list_container_children(container)?;
                 if !children.is_empty() {
                     println!("children:");
@@ -3192,13 +3205,14 @@ fn run_edit(args: EditArgs) -> Result<()> {
     // Load schema for validation
     let parsed_id = parse_full_id(&doc.id)?;
     let schema = load_schema(&store.path, Some(&parsed_id.project))?;
+    let states = user_cfg.state_config()?;
 
     // --file first, then field flags on top: explicit flags win over the file's values
     let has_file = file.is_some();
     if let Some(file_path) = file {
         let contents = read_file_input(&file_path)?;
         if has_frontmatter(&contents) {
-            let input_doc = parse_input_doc(&contents, &file_path)?;
+            let mut input_doc = parse_input_doc(&contents, &file_path)?;
             if input_doc.id != doc.id {
                 return Err(Error::new(format!(
                     "Frontmatter id '{}' does not match rune '{}'",
@@ -3206,7 +3220,7 @@ fn run_edit(args: EditArgs) -> Result<()> {
                 )));
             }
             schema.validate_kind(&input_doc.kind)?;
-            schema.validate_status(&input_doc.kind, &input_doc.status)?;
+            normalize_status(&mut input_doc, &states)?;
             schema.validate_custom_fields(&input_doc.kind, &input_doc.frontmatter_extra)?;
             doc = RuneDoc {
                 path: doc.path,
@@ -3222,8 +3236,8 @@ fn run_edit(args: EditArgs) -> Result<()> {
 
     if has_field_edits {
         if let Some(status_value) = status {
-            schema.validate_status(&doc.kind, &status_value)?;
             doc.status = status_value;
+            normalize_status(&mut doc, &states)?;
         }
         if let Some(assignee_value) = assignee {
             if assignee_value.eq_ignore_ascii_case("none") {
@@ -3289,9 +3303,9 @@ fn run_edit(args: EditArgs) -> Result<()> {
         let tmp_path = draft_path(&store.name, &doc.id, &original_title, &original_content)?;
         fs::copy(&path, &tmp_path)?;
         open_editor(&tmp_path)?;
-        let edited_doc = parse_doc(&tmp_path)?;
+        let mut edited_doc = parse_doc(&tmp_path)?;
         // Validate status after editor changes
-        if let Err(e) = schema.validate_status(&edited_doc.kind, &edited_doc.status) {
+        if let Err(e) = normalize_status(&mut edited_doc, &states) {
             eprintln!("error: {e}");
             eprintln!("Your edits are saved in: {}", tmp_path.display());
             eprintln!(
@@ -4395,8 +4409,73 @@ fn store_remove(name: String) -> Result<()> {
     eprintln!("  rm -rf {}", store.path.display());
     Ok(())
 }
+/// Rewrite a legacy status onto its core state, leaving the rest of the file alone.
+/// Returns `None` when nothing needs migrating.
+fn migrate_status_line(text: &str) -> Option<String> {
+    let mut out = String::with_capacity(text.len());
+    let mut delimiters = 0;
+    let mut migrated = false;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            delimiters += 1;
+        }
+        // Only the first status, and only inside the frontmatter block.
+        if !migrated && delimiters == 1 {
+            if let Some(value) = trimmed
+                .strip_prefix("status \"")
+                .and_then(|rest| rest.split('"').next())
+            {
+                let normalized = state::normalize(value);
+                if normalized != value {
+                    out.push_str(
+                        &line.replace(&format!("\"{value}\""), &format!("\"{normalized}\"")),
+                    );
+                    migrated = true;
+                    continue;
+                }
+            }
+        }
+        out.push_str(line);
+    }
+    migrated.then_some(out)
+}
+
+/// Migrate every rune in the store off the pre-substate statuses.
+/// Returns the store-relative paths that changed.
+fn migrate_store_statuses(store: &Store) -> Result<Vec<PathBuf>> {
+    let mut migrated = Vec::new();
+    for project in all_projects(store)? {
+        for path in discover_project_docs(&store.path.join(&project))? {
+            let Some(updated) = migrate_status_line(&fs::read_to_string(&path)?) else {
+                continue;
+            };
+            fs::write(&path, updated)?;
+            let rel = path.strip_prefix(&store.path).unwrap_or(&path);
+            migrated.push(rel.to_path_buf());
+        }
+    }
+    Ok(migrated)
+}
+
 fn store_doctor(store_name: String) -> Result<()> {
     let store = load_store(&store_name)?;
+    let migrated = migrate_store_statuses(&store)?;
+    if !migrated.is_empty() {
+        let (_, user_cfg, _) = load_context()?;
+        let (author_name, author_email) = resolve_commit_author(&user_cfg, None)?;
+        commit_store_changes(
+            &store,
+            &migrated,
+            "Migrate statuses to todo/wip/closed",
+            &author_name,
+            &author_email,
+        )?;
+        println!(
+            "Migrated {} rune(s) to the todo/wip/closed states",
+            migrated.len()
+        );
+    }
     cache::rebuild_cache(&store)?;
     println!("Cache rebuilt for {}", store.name);
     let max_age = std::time::Duration::from_secs(DRAFT_MAX_AGE_DAYS * 24 * 60 * 60);
@@ -4722,7 +4801,7 @@ fn run_quickstart() -> Result<()> {
     println!();
     println!("  runes                         # list open runes (default view)");
     println!("  runes list                    # same as above");
-    println!("  runes list --status todo      # filter by status");
+    println!("  runes list --status wip       # filter by state (matches wip:review too)");
     println!("  runes list --kind bug         # filter by kind");
     println!("  runes show <id>               # show full rune doc");
     println!("  runes search login            # full-text search, any status");
@@ -4745,7 +4824,8 @@ fn run_quickstart() -> Result<()> {
     println!("UPDATING RUNES");
     println!("==============");
     println!();
-    println!("  runes edit <id> --status done             # change status");
+    println!("  runes edit <id> --status wip:review        # change state");
+    println!("  runes edit <id> --status closed            # close it");
     println!("  runes edit <id> --title \"New title\"        # rename (updates the h1 line)");
     println!("  runes edit <id> --assignee alice           # reassign");
     println!("  runes edit <id> --label urgent             # add a label");
@@ -4761,28 +4841,17 @@ fn run_quickstart() -> Result<()> {
         println!("======");
         println!();
 
+        let states = user_cfg.state_config().unwrap_or_default();
+        println!("  States: {}", state::CORE_STATES.join(", "));
+        for core in state::CORE_STATES {
+            println!("    {}", states.allowed_display(core));
+        }
+        println!();
+
         if let Some(ref schema) = schema {
             let kinds = schema.available_kinds();
             if !kinds.is_empty() {
                 println!("  Kinds: {}", kinds.join(", "));
-            }
-            let global_statuses = &schema.statuses;
-            if !global_statuses.is_empty() {
-                println!("  Statuses: {}", global_statuses.join(", "));
-            }
-            // Show kind-specific status overrides
-            for kind in &kinds {
-                if let Some(kind_def) = schema.kinds.get(kind.as_str()) {
-                    if let Some(status_field) = kind_def.fields.get("status") {
-                        if !status_field.values.is_empty() {
-                            println!(
-                                "  Statuses for {}: {}",
-                                kind,
-                                status_field.values.join(", ")
-                            );
-                        }
-                    }
-                }
             }
             // Show custom fields
             if !schema.fields.is_empty() {
@@ -4863,7 +4932,8 @@ fn run_quickstart() -> Result<()> {
 mod tests {
     use super::{
         collect_matching_entries, detect_agent, format_log_entries, match_log_entries,
-        resolve_commit_author_env, strip_show_injections, truncate_to_width, LogEntry, UserConfig,
+        migrate_status_line, resolve_commit_author_env, strip_show_injections, truncate_to_width,
+        LogEntry, UserConfig,
     };
     use unicode_width::UnicodeWidthStr;
 
@@ -4882,6 +4952,22 @@ mod tests {
             identity_email: email.map(str::to_string),
             ..UserConfig::default()
         }
+    }
+
+    #[test]
+    fn migrate_status_line_touches_only_the_frontmatter_status() {
+        let doc = "---\ntask \"proj-abc\" {\n  status \"in-progress\"\n}\n---\n\n# Done and done\n\nstatus \"done\" in the body\n";
+        let migrated = migrate_status_line(doc).expect("migrated");
+        assert_eq!(
+            migrated,
+            "---\ntask \"proj-abc\" {\n  status \"wip\"\n}\n---\n\n# Done and done\n\nstatus \"done\" in the body\n"
+        );
+    }
+
+    #[test]
+    fn migrate_status_line_leaves_core_states_alone() {
+        let doc = "---\ntask \"proj-abc\" {\n  status \"closed:canceled\"\n}\n---\n\n# Title\n";
+        assert_eq!(migrate_status_line(doc), None);
     }
 
     #[test]

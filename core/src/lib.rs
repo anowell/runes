@@ -4,6 +4,7 @@ pub mod cache;
 pub mod config;
 pub mod model;
 pub mod schema;
+pub mod state;
 
 use std::fmt::{Display, Formatter};
 use std::io;

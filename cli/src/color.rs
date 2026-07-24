@@ -1,4 +1,5 @@
 use atty::Stream;
+use runes_core::state;
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
@@ -91,14 +92,11 @@ pub fn red(s: &str) -> String {
 pub fn gray(s: &str) -> String {
     wrap(BRIGHT_BLACK, s)
 }
-pub fn bright_black(s: &str) -> String {
-    wrap(BRIGHT_BLACK, s)
-}
 
 pub fn status_color(status: &str) -> String {
-    match status {
-        "done" => bright_black(status),
-        "in-progress" => green(status),
+    match state::core_of(status) {
+        state::CLOSED => gray(status),
+        state::WIP => green(status),
         _ => status.to_string(),
     }
 }

@@ -7,7 +7,7 @@ A rune is just a file in a repo: `myapp/a3x--add-soft-deletes-to-billing.md`
 ```markdown
 ---
 task "myapp-a3x" {
-  status "in-progress"
+  status "wip"
   assignee "anthony"
   labels "api" "billing"
   dep "myapp-q7m"
@@ -86,13 +86,13 @@ runes new "Fix the login bug"
 runes new "Design the API" -e
 
 # Create with metadata
-runes new "Refactor auth" --status in-progress --label backend --assignee self
+runes new "Refactor auth" --status wip --label backend --assignee self
 
 # Create a milestone
 runes new "v1 Release" --kind milestone
 
 # Edit metadata
-runes edit myproject-a3x --status done
+runes edit myproject-a3x --status closed
 runes edit myproject-a3x --label urgent --assignee alice
 
 # Edit body in $EDITOR
@@ -110,7 +110,7 @@ runes show myproject-a3x > doc.md
 runes edit myproject-a3x -f doc.md
 
 # Field flags combine with -f and override whatever the file says
-runes edit myproject-a3x -f doc.md --status done
+runes edit myproject-a3x -f doc.md --status closed
 ```
 
 ### Browsing and filtering
@@ -119,8 +119,9 @@ runes edit myproject-a3x -f doc.md --status done
 # List open runes (the default view)
 runes list
 
-# Filter by status, assignee, kind
-runes list --status todo --assignee self
+# Filter by state, assignee, kind
+runes list --status wip --assignee self       # matches wip:review too
+runes list --status closed:canceled           # or an exact substate
 runes list --kind milestones
 
 # Built-in views: open, mine, all, closed
@@ -128,7 +129,7 @@ runes list mine
 runes list closed
 runes list --all      # same as `runes list all`
 
-# Full-text search titles and bodies (all statuses, including done/closed)
+# Full-text search titles and bodies (all states, including closed)
 runes search login
 runes search "auth flow" --project '' --with-archived
 
@@ -138,6 +139,29 @@ runes show myproject-a3x
 # View change history
 runes log myproject-a3x
 ```
+
+### States
+
+Every rune is in one of three core states, optionally refined by a substate
+written as `state:substate`:
+
+| State | Meaning |
+|-------|---------|
+| `todo` | ready work |
+| `wip` | in progress — `wip:design`, `wip:impl`, `wip:review` |
+| `closed` | terminal; bare `closed` means completed, `closed:canceled` and `closed:duplicate` are the exceptions |
+
+Filtering by a core state includes its substates (`--status closed` matches
+`closed:canceled`); filtering by `state:substate` is exact. Core states are
+fixed; the allowed substates are configurable:
+
+```bash
+runes config set state.wip.substate "design,impl,review,qa"
+```
+
+`done` and `in-progress` are still accepted wherever a status is taken, and are
+rewritten to `closed` and `wip`. `runes store doctor <store>` migrates a store
+written with the old vocabulary.
 
 ### Other operations
 
@@ -183,7 +207,7 @@ runes store list
 # Add a new store
 runes store init mystore --backend jj
 
-# Rebuild the query cache
+# Rebuild the query cache and migrate legacy statuses
 runes store doctor mystore
 ```
 

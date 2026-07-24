@@ -23,26 +23,13 @@ pub struct KindDef {
     pub fields: HashMap<String, FieldDef>,
 }
 
-/// Per-kind terminal status declarations.
-#[derive(Clone, Debug, Default)]
-pub struct KindTerminals {
-    /// Statuses considered terminal/finished. Empty means use schema-level terminals.
-    pub terminal: Vec<String>,
-}
-
 /// The store/project schema loaded from `.kinds/schema.kdl`.
 #[derive(Clone, Debug)]
 pub struct StoreSchema {
-    /// Global allowed statuses. Empty means any status is valid.
-    pub statuses: Vec<String>,
-    /// Global terminal statuses. If empty, defaults to last status in list.
-    pub terminal: Vec<String>,
     /// Global custom field definitions (keyed by field name).
     pub fields: HashMap<String, FieldDef>,
     /// Per-kind overrides.
     pub kinds: HashMap<String, KindDef>,
-    /// Per-kind terminal status declarations.
-    pub kind_terminals: HashMap<String, KindTerminals>,
     /// The directory from which the schema was loaded (for resolving templates).
     pub kinds_dir: PathBuf,
 }
@@ -57,66 +44,6 @@ impl Default for StoreSchema {
 }
 
 impl StoreSchema {
-    /// Get the allowed statuses for a given kind. Returns kind-specific overrides
-    /// if present, otherwise the global statuses.
-    pub fn statuses_for_kind(&self, kind: &str) -> &[String] {
-        if let Some(kind_def) = self.kinds.get(kind) {
-            if let Some(status_field) = kind_def.fields.get("status") {
-                if !status_field.values.is_empty() {
-                    return &status_field.values;
-                }
-            }
-        }
-        &self.statuses
-    }
-
-    /// Get the terminal statuses for a given kind. Returns kind-specific terminals
-    /// if declared, otherwise the global terminals. If no terminals are declared
-    /// anywhere, defaults to the last status in the applicable status list.
-    pub fn terminal_statuses_for_kind(&self, kind: &str) -> Vec<String> {
-        // Check kind-specific terminals first
-        if let Some(kt) = self.kind_terminals.get(kind) {
-            if !kt.terminal.is_empty() {
-                return kt.terminal.clone();
-            }
-        }
-        // Fall back to global terminals
-        if !self.terminal.is_empty() {
-            return self.terminal.clone();
-        }
-        // Default to last status in the applicable list
-        let statuses = self.statuses_for_kind(kind);
-        if let Some(last) = statuses.last() {
-            vec![last.clone()]
-        } else {
-            Vec::new()
-        }
-    }
-
-    /// Check if a status is terminal for a given kind.
-    pub fn is_terminal(&self, kind: &str, status: &str) -> bool {
-        let terminals = self.terminal_statuses_for_kind(kind);
-        terminals.iter().any(|t| t == status)
-    }
-
-    /// Validate a status value for a given kind.
-    pub fn validate_status(&self, kind: &str, status: &str) -> Result<()> {
-        let allowed = self.statuses_for_kind(kind);
-        if allowed.is_empty() {
-            return Ok(());
-        }
-        if allowed.iter().any(|s| s == status) {
-            Ok(())
-        } else {
-            Err(Error::new(format!(
-                "Invalid status '{}' for kind '{}'. Allowed: {}",
-                status,
-                kind,
-                allowed.join(", ")
-            )))
-        }
-    }
-
     /// Validate a kind value against known kinds.
     /// Kinds are known if they appear in the schema or have template files.
     pub fn validate_kind(&self, kind: &str) -> Result<()> {
@@ -322,11 +249,8 @@ fn parse_schema_file(path: &Path) -> Result<StoreSchema> {
 
 fn parse_schema_text(text: &str, kinds_dir: PathBuf) -> Result<StoreSchema> {
     let mut schema = StoreSchema {
-        statuses: Vec::new(),
-        terminal: Vec::new(),
         fields: HashMap::new(),
         kinds: HashMap::new(),
-        kind_terminals: HashMap::new(),
         kinds_dir,
     };
 
@@ -342,25 +266,12 @@ fn parse_schema_text(text: &str, kinds_dir: PathBuf) -> Result<StoreSchema> {
             continue;
         }
 
-        if trimmed.starts_with("status ") {
-            schema.statuses = extract_quoted_values(trimmed);
-            i += 1;
-            continue;
-        }
-
-        if trimmed.starts_with("terminal ") {
-            schema.terminal = extract_quoted_values(trimmed);
-            i += 1;
-            continue;
-        }
-
         if trimmed.starts_with("kind ") {
             let kind_name = extract_first_quoted_value(trimmed);
             if let Some(name) = kind_name {
                 if trimmed.contains('{') {
                     // Parse kind block
                     let mut kind_def = KindDef::default();
-                    let mut kind_terminal = KindTerminals::default();
                     i += 1;
                     while i < lines.len() {
                         let inner = lines[i].trim();
@@ -368,16 +279,11 @@ fn parse_schema_text(text: &str, kinds_dir: PathBuf) -> Result<StoreSchema> {
                             break;
                         }
                         if !inner.is_empty() && !inner.starts_with("//") {
-                            if inner.starts_with("terminal ") {
-                                kind_terminal.terminal = extract_quoted_values(inner);
-                            } else if let Some(field) = parse_field_line(inner, true) {
+                            if let Some(field) = parse_field_line(inner) {
                                 kind_def.fields.insert(field.name.clone(), field);
                             }
                         }
                         i += 1;
-                    }
-                    if !kind_terminal.terminal.is_empty() {
-                        schema.kind_terminals.insert(name.clone(), kind_terminal);
                     }
                     schema.kinds.insert(name, kind_def);
                 } else {
@@ -390,7 +296,7 @@ fn parse_schema_text(text: &str, kinds_dir: PathBuf) -> Result<StoreSchema> {
         }
 
         // Any other top-level line is a global field definition
-        if let Some(field) = parse_field_line(trimmed, false) {
+        if let Some(field) = parse_field_line(trimmed) {
             schema.fields.insert(field.name.clone(), field);
         }
 
@@ -401,9 +307,7 @@ fn parse_schema_text(text: &str, kinds_dir: PathBuf) -> Result<StoreSchema> {
 }
 
 /// Parse a field definition line. Used for both global fields and kind-block fields.
-/// `inside_kind` indicates whether this is inside a `kind` block (where `status` is
-/// a valid field override) or at the top level (where `status` is handled separately).
-fn parse_field_line(line: &str, inside_kind: bool) -> Option<FieldDef> {
+fn parse_field_line(line: &str) -> Option<FieldDef> {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.starts_with("//") {
         return None;
@@ -412,13 +316,9 @@ fn parse_field_line(line: &str, inside_kind: bool) -> Option<FieldDef> {
     let mut parts = trimmed.split_whitespace();
     let name = parts.next()?;
 
-    // `kind` and `terminal` are never field definitions
-    if name == "kind" || name == "terminal" {
-        return None;
-    }
-
-    // `status` is only a field def inside kind blocks (where it overrides the global statuses)
-    if name == "status" && !inside_kind {
+    // `kind` declares a kind; `status`/`terminal` are leftovers from the days of
+    // configurable statuses, ignored now that the core states are fixed.
+    if matches!(name, "kind" | "status" | "terminal") {
         return None;
     }
 
@@ -482,62 +382,53 @@ mod tests {
     #[test]
     fn parse_default_schema() {
         let schema = StoreSchema::default();
-        assert_eq!(schema.statuses, vec!["todo", "in-progress", "done"]);
         assert!(schema.fields.is_empty());
         // Default schema declares task, bug, milestone kinds
         assert!(schema.kinds.contains_key("task"));
         assert!(schema.kinds.contains_key("bug"));
         assert!(schema.kinds.contains_key("milestone"));
-        // All use global statuses by default
-        assert_eq!(
-            schema.statuses_for_kind("task"),
-            &["todo", "in-progress", "done"]
-        );
-        assert_eq!(
-            schema.statuses_for_kind("milestone"),
-            &["todo", "in-progress", "done"]
-        );
-    }
-
-    #[test]
-    fn parse_schema_with_statuses() {
-        let text = r#"status "open" "closed""#;
-        let schema = parse_schema_text(text, PathBuf::new()).unwrap();
-        assert_eq!(schema.statuses, vec!["open", "closed"]);
     }
 
     #[test]
     fn parse_schema_with_kinds() {
         let text = r#"
-status "todo" "in-progress" "done"
-
 kind "task"
 
 kind "bug" {
-    status "open" "investigating" "resolved" "closed"
     severity "low" "medium" "high" optional=#true
 }
 "#;
         let schema = parse_schema_text(text, PathBuf::new()).unwrap();
-        assert_eq!(schema.statuses, vec!["todo", "in-progress", "done"]);
         assert!(schema.kinds.contains_key("task"));
         assert!(schema.kinds.contains_key("bug"));
 
-        let bug = &schema.kinds["bug"];
-        let bug_statuses = &bug.fields["status"];
-        assert_eq!(
-            bug_statuses.values,
-            vec!["open", "investigating", "resolved", "closed"]
-        );
-        let severity = &bug.fields["severity"];
+        let severity = &schema.kinds["bug"].fields["severity"];
         assert_eq!(severity.values, vec!["low", "medium", "high"]);
         assert!(severity.optional);
+    }
+
+    /// Statuses left over from when they were configurable are ignored, not
+    /// mistaken for a custom field named "status".
+    #[test]
+    fn legacy_status_declarations_are_ignored() {
+        let text = r#"
+status "open" "closed"
+terminal "closed"
+
+kind "bug" {
+    status "open" "investigating" "resolved"
+    terminal "resolved"
+}
+"#;
+        let schema = parse_schema_text(text, PathBuf::new()).unwrap();
+        assert!(schema.fields.is_empty());
+        assert!(schema.kinds["bug"].fields.is_empty());
+        assert!(schema.validate_custom_fields("bug", &[]).is_ok());
     }
 
     #[test]
     fn parse_schema_with_global_fields() {
         let text = r#"
-status "todo" "done"
 component
 priority "low" "medium" "high" optional
 "#;
@@ -549,37 +440,6 @@ priority "low" "medium" "high" optional
         let priority = &schema.fields["priority"];
         assert!(priority.optional);
         assert_eq!(priority.values, vec!["low", "medium", "high"]);
-    }
-
-    #[test]
-    fn validate_status_global() {
-        let schema = StoreSchema::default();
-        assert!(schema.validate_status("task", "todo").is_ok());
-        assert!(schema.validate_status("task", "invalid").is_err());
-    }
-
-    #[test]
-    fn validate_status_kind_override() {
-        let text = r#"
-status "todo" "done"
-kind "bug" {
-    status "open" "closed"
-}
-"#;
-        let schema = parse_schema_text(text, PathBuf::new()).unwrap();
-        // bug uses its own statuses
-        assert!(schema.validate_status("bug", "open").is_ok());
-        assert!(schema.validate_status("bug", "todo").is_err());
-        // task uses global statuses
-        assert!(schema.validate_status("task", "todo").is_ok());
-        assert!(schema.validate_status("task", "open").is_err());
-    }
-
-    #[test]
-    fn statuses_for_unknown_kind_uses_global() {
-        let schema = StoreSchema::default();
-        let statuses = schema.statuses_for_kind("unknown");
-        assert_eq!(statuses, &["todo", "in-progress", "done"]);
     }
 
     #[test]
@@ -673,65 +533,5 @@ priority "low" "medium" "high" optional
         assert!(!is_optional(r#"component"#));
         // "optional" inside quotes should not trigger
         assert!(!is_optional(r#"field "optional" "required""#));
-    }
-
-    #[test]
-    fn terminal_defaults_to_last_status() {
-        let text = r#"status "todo" "in-progress" "done""#;
-        let schema = parse_schema_text(text, PathBuf::new()).unwrap();
-        assert_eq!(schema.terminal_statuses_for_kind("task"), vec!["done"]);
-        assert!(schema.is_terminal("task", "done"));
-        assert!(!schema.is_terminal("task", "todo"));
-    }
-
-    #[test]
-    fn terminal_explicit_global() {
-        let text = r#"
-status "todo" "in-progress" "done"
-terminal "done"
-"#;
-        let schema = parse_schema_text(text, PathBuf::new()).unwrap();
-        assert_eq!(schema.terminal_statuses_for_kind("task"), vec!["done"]);
-        assert!(schema.is_terminal("task", "done"));
-    }
-
-    #[test]
-    fn terminal_per_kind() {
-        let text = r#"
-status "todo" "in-progress" "done"
-terminal "done"
-
-kind "bug" {
-    status "open" "investigating" "resolved" "closed"
-    terminal "resolved" "closed"
-}
-"#;
-        let schema = parse_schema_text(text, PathBuf::new()).unwrap();
-        // Bug uses kind-specific terminals
-        assert_eq!(
-            schema.terminal_statuses_for_kind("bug"),
-            vec!["resolved", "closed"]
-        );
-        assert!(schema.is_terminal("bug", "resolved"));
-        assert!(schema.is_terminal("bug", "closed"));
-        assert!(!schema.is_terminal("bug", "open"));
-        // Task falls back to global terminal
-        assert_eq!(schema.terminal_statuses_for_kind("task"), vec!["done"]);
-    }
-
-    #[test]
-    fn terminal_omitted_defaults_to_last_kind_status() {
-        let text = r#"
-status "todo" "done"
-
-kind "bug" {
-    status "open" "investigating" "resolved" "closed"
-}
-"#;
-        let schema = parse_schema_text(text, PathBuf::new()).unwrap();
-        // Bug has no terminal declared, no global terminal, defaults to last in its status list
-        assert_eq!(schema.terminal_statuses_for_kind("bug"), vec!["closed"]);
-        // Task defaults to last in global list
-        assert_eq!(schema.terminal_statuses_for_kind("task"), vec!["done"]);
     }
 }

@@ -102,7 +102,7 @@ Inside the block:
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `status` | yes | Current status (e.g. `"todo"`, `"in-progress"`, `"done"`) |
+| `status` | yes | Current state, `state` or `state:substate` (e.g. `"todo"`, `"wip:review"`, `"closed:canceled"`) |
 | `assignee` | no | Assigned user |
 | `labels` | no | Space-separated quoted strings |
 | `milestone` | no | Parent milestone ID |
@@ -119,6 +119,22 @@ The default body template for all kinds is:
 
 Custom kind templates can be placed at `<store>/<project>/.kinds/<kind>.md`
 or `<store>/.kinds/<kind>.md` to override the default.
+
+### States
+
+A status is one of three fixed core states with an optional substate:
+
+| State | Terminal | Default substates |
+|-------|----------|-------------------|
+| `todo` | no | any |
+| `wip` | no | `design`, `impl`, `review` |
+| `closed` | yes | `canceled`, `duplicate` (bare `closed` means completed) |
+
+Core states are not configurable and are not part of `.kinds/schema.kdl` — a
+`status` or `terminal` declaration there is ignored. Allowed substates come from
+`runes.kdl` (see [configuration.md](configuration.md)). `done` and `in-progress`
+are accepted on input and rewritten to `closed` and `wip`; `runes store doctor`
+migrates stores written with the old vocabulary.
 
 ## Hierarchy
 

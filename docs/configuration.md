@@ -106,6 +106,26 @@ Creation defaults applied during `runes new`:
 - `new.task.labels` — default labels
 - `new.milestone.status` — default status for milestones
 
+### `state "<core>"`
+
+Allowed substates for a core state. The core states (`todo`, `wip`, `closed`) are
+fixed; only their substates are configurable, and configuring one replaces the
+defaults for that state:
+
+```kdl
+state "wip" {
+    substate "design" "impl" "review"
+}
+```
+
+Set from the CLI with a comma-separated list:
+
+```bash
+runes config set state.closed.substate "canceled,duplicate,wontfix"
+```
+
+A core state with no `state` node accepts any substate (the default for `todo`).
+
 ### `query "<name>"` (deprecated)
 
 Custom views are deprecated while the built-in views stabilize. `runes list` ships
@@ -119,7 +139,7 @@ Saved filter sets for `runes list`. Use with `runes list <name>` or `runes list 
 Supported filters:
 
 - `project` — restrict to a project
-- `status` — one or more statuses (multiple values are OR'd)
+- `status` — one or more statuses (multiple values are OR'd); a core state also matches its substates
 - `kind` — doc type (`task`, `milestone`)
 - `assignee` — assignee (use `"self"` to match your configured email)
 - `archived` — boolean, include archived docs

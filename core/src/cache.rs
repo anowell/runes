@@ -1,7 +1,7 @@
 use crate::backend;
 use crate::config::Store;
 use crate::model::{discover_project_docs, parse_doc};
-use crate::schema::load_schema;
+use crate::state;
 use crate::{Error, Result};
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
@@ -172,39 +172,25 @@ pub fn rebuild_cache(store: &Store) -> Result<()> {
         }
     }
 
-    // Compute blocked status: a rune is blocked if any of its deps has a non-terminal status
-    // Build a map of id -> (kind, status) for all runes
-    let mut status_map: HashMap<String, (String, String)> = HashMap::new();
+    // Compute blocked status: a rune is blocked if any of its deps is not closed
+    let mut status_map: HashMap<String, String> = HashMap::new();
     {
-        let mut stmt = conn.prepare("SELECT id, kind, status FROM runes")?;
+        let mut stmt = conn.prepare("SELECT id, status FROM runes")?;
         let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
         for row in rows {
-            let (id, kind, status) = row?;
-            status_map.insert(id, (kind, status));
+            let (id, status) = row?;
+            status_map.insert(id, status);
         }
     }
-
-    // Load schemas per project (cache them)
-    let mut schema_cache: HashMap<String, crate::schema::StoreSchema> = HashMap::new();
 
     let mut update_stmt = conn.prepare("UPDATE runes SET blocked = 1 WHERE id = ?1")?;
     for doc_info in &all_docs {
         let mut is_blocked = false;
         for dep_id in &doc_info.deps {
-            if let Some((dep_kind, dep_status)) = status_map.get(dep_id) {
-                let dep_project = dep_id.split('-').next().unwrap_or("");
-                let schema = schema_cache
-                    .entry(dep_project.to_string())
-                    .or_insert_with(|| {
-                        load_schema(&store.path, Some(dep_project)).unwrap_or_default()
-                    });
-                if !schema.is_terminal(dep_kind, dep_status) {
+            if let Some(dep_status) = status_map.get(dep_id) {
+                if !state::is_terminal(dep_status) {
                     is_blocked = true;
                     break;
                 }
@@ -244,6 +230,14 @@ struct FilterSql {
     params: Vec<Box<dyn rusqlite::types::ToSql>>,
 }
 
+/// Escape LIKE wildcards so a filter value matches literally (`ESCAPE '\'`).
+fn escape_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 fn filter_sql(filter: &CacheFilter) -> FilterSql {
     let mut conditions = Vec::new();
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -255,15 +249,21 @@ fn filter_sql(filter: &CacheFilter) -> FilterSql {
     }
 
     if !filter.statuses.is_empty() {
-        let placeholders: Vec<&str> = filter
+        // A bare core state also matches its substates: `closed` covers `closed:canceled`.
+        let clauses: Vec<String> = filter
             .statuses
             .iter()
-            .map(|s| {
-                param_values.push(Box::new(s.clone()));
-                "?"
+            .map(|status| {
+                param_values.push(Box::new(status.clone()));
+                if status.contains(':') {
+                    "runes.status = ?".to_string()
+                } else {
+                    param_values.push(Box::new(format!("{}:%", escape_like(status))));
+                    "(runes.status = ? OR runes.status LIKE ? ESCAPE '\\')".to_string()
+                }
             })
             .collect();
-        conditions.push(format!("runes.status IN ({})", placeholders.join(",")));
+        conditions.push(format!("({})", clauses.join(" OR ")));
     }
 
     if let Some(ref kind) = filter.kind {
@@ -279,11 +279,7 @@ fn filter_sql(filter: &CacheFilter) -> FilterSql {
     // Label matching: comma-separated field, check exact or boundary matches
     for label in &filter.labels {
         conditions.push("(',' || runes.labels || ',') LIKE ? ESCAPE '\\'".to_string());
-        let escaped_label = label
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
-        param_values.push(Box::new(format!("%,{},%", escaped_label)));
+        param_values.push(Box::new(format!("%,{},%", escape_like(label))));
     }
 
     match filter.archived {
@@ -401,8 +397,7 @@ fn fts_match_expr(term: &str) -> Option<String> {
 }
 
 /// Full-text search over rune titles and bodies, ranked with title matches first.
-/// Every status is searched — done and closed runes match unless the caller
-/// narrows `filter`.
+/// Every status is searched — closed runes match unless the caller narrows `filter`.
 pub fn search_cache(store: &Store, term: &str, filter: &CacheFilter) -> Result<Vec<CacheRow>> {
     let Some(match_expr) = fts_match_expr(term) else {
         return Ok(Vec::new());
@@ -467,6 +462,24 @@ pub fn lookup_status(store: &Store, id: &str) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_filter_matches_substates_of_a_core_state() {
+        let filter = CacheFilter {
+            statuses: vec!["closed".to_string(), "wip:review".to_string()],
+            ..CacheFilter::default()
+        };
+        let parts = filter_sql(&filter);
+        assert_eq!(
+            parts.conditions,
+            vec![
+                "((runes.status = ? OR runes.status LIKE ? ESCAPE '\\') OR runes.status = ?)"
+                    .to_string()
+            ]
+        );
+        // `closed` binds both the exact value and the `closed:%` prefix
+        assert_eq!(parts.params.len(), 3);
+    }
 
     #[test]
     fn fts_expr_quotes_and_ands_tokens() {

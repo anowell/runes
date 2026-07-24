@@ -1,5 +1,6 @@
 use crate::{Error, Result};
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
+use runes_core::state::StateConfig;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -19,6 +20,8 @@ pub struct UserConfig {
     pub(crate) path_entries: Vec<PathEntry>,
     pub(crate) queries: HashMap<String, QueryDefinition>,
     pub(crate) stores: Vec<StoreDefinition>,
+    /// Allowed substates, keyed by core state.
+    pub(crate) substates: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -119,6 +122,12 @@ impl UserConfig {
                         config.queries.insert(name, query);
                     }
                 }
+                "state" => {
+                    if let Some(core) = first_value(node) {
+                        let substates = split_values(collect_property_values(node, "substate"));
+                        config.substates.insert(core, substates);
+                    }
+                }
                 "store" => {
                     if let Some(name) = first_value(node) {
                         let backend = value_string(node, "backend").unwrap_or_default();
@@ -198,6 +207,7 @@ impl UserConfig {
             path_entries,
             queries,
             stores,
+            substates,
         } = other;
         if let Some(detect) = attribution_detect {
             self.attribution_detect = Some(detect);
@@ -245,6 +255,9 @@ impl UserConfig {
         for (name, query) in queries {
             self.queries.insert(name, query);
         }
+        for (core, values) in substates {
+            self.substates.insert(core, values);
+        }
         // Stores: later ones override by name
         for store in stores {
             if let Some(existing) = self.stores.iter_mut().find(|s| s.name == store.name) {
@@ -279,6 +292,15 @@ impl UserConfig {
 
     pub fn query(&self, name: &str) -> Option<&QueryDefinition> {
         self.queries.get(name)
+    }
+
+    /// Core states with the substates this config allows.
+    pub fn state_config(&self) -> Result<StateConfig> {
+        let mut states = StateConfig::default();
+        for (core, substates) in &self.substates {
+            states.set_substates(core, substates.clone())?;
+        }
+        Ok(states)
     }
 
     /// Backward-compat: returns the "default" creation defaults
@@ -403,6 +425,14 @@ pub fn config_list(path: &Path) -> Result<Vec<(String, String)>> {
                     }
                     if let Some(v) = value_string(node, "blocked-by") {
                         pairs.push((format!("{prefix}.blocked-by"), v));
+                    }
+                }
+            }
+            "state" => {
+                if let Some(core) = first_value(node) {
+                    let substates = split_values(collect_property_values(node, "substate"));
+                    if !substates.is_empty() {
+                        pairs.push((format!("state.{core}.substate"), substates.join(",")));
                     }
                 }
             }
@@ -684,6 +714,17 @@ fn first_value(node: &KdlNode) -> Option<String> {
         }
     }
     None
+}
+
+/// Split comma-separated values, which is how `runes config set` writes lists.
+fn split_values(values: Vec<String>) -> Vec<String> {
+    values
+        .iter()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(String::from)
+        .collect()
 }
 
 fn collect_property_values(node: &KdlNode, name: &str) -> Vec<String> {

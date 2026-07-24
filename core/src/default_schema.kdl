@@ -1,7 +1,7 @@
 // Default runes schema
 // Override by placing .kinds/schema.kdl in your store or project directory.
-
-status "todo" "in-progress" "done"
+// Statuses are not part of the schema: every rune uses the core states
+// todo/wip/closed, and substates are configured in runes.kdl.
 
 kind "task"
 kind "bug"

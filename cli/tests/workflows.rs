@@ -210,10 +210,8 @@ fn jj_issue_lifecycle_and_cache_query() {
     );
 
     let shown = runes_ok(&home, &["show", &format!("test:{issue_id}")]);
-    assert!(
-        shown.contains("status \"in-progress\""),
-        "status not updated"
-    );
+    // `in-progress` is input sugar for `wip`, and is never written back out.
+    assert!(shown.contains("status \"wip\""), "status not updated");
     assert!(shown.contains("labels \"schema\""), "label not added");
     assert!(
         shown.contains("# Lock Runes v1 schema and workflow"),
@@ -389,12 +387,18 @@ fn jj_milestone_hierarchy_and_progress() {
 
     runes_ok(
         &home,
-        &["edit", &format!("test:{child1}"), "--status", "done"],
+        &[
+            "edit",
+            &format!("test:{child1}"),
+            "--status",
+            "closed:duplicate",
+        ],
     );
 
+    // Rollups count by core state, so a substate still counts as closed.
     let progress = runes_ok(&home, &["show", &format!("test:{milestone}")]);
     assert!(progress.contains("child_total=2"));
-    assert!(progress.contains("child_done=1"));
+    assert!(progress.contains("child_closed=1"));
     assert!(progress.contains("child_todo=1"));
 }
 
@@ -1371,8 +1375,8 @@ fn milestone_list_json_includes_child_rollup() {
         "unexpected path: {row}"
     );
     assert_eq!(row["child_total"].as_u64(), Some(2));
-    assert_eq!(row["child_done"].as_u64(), Some(1));
-    assert_eq!(row["child_in_progress"].as_u64(), Some(0));
+    assert_eq!(row["child_closed"].as_u64(), Some(1));
+    assert_eq!(row["child_wip"].as_u64(), Some(0));
     assert_eq!(row["child_todo"].as_u64(), Some(1));
     assert_eq!(row["complete_pct"].as_f64(), Some(50.0));
 
@@ -1442,7 +1446,7 @@ fn edit_draft_survives_failure_then_is_pruned_on_recovery() {
 
     let fixed = fs::read_to_string(&draft)
         .expect("read draft")
-        .replace("\"bogus\"", "\"done\"");
+        .replace("\"bogus\"", "\"closed:canceled\"");
     fs::write(&draft, fixed).expect("rewrite draft");
     runes_ok(
         &home,
@@ -1451,7 +1455,7 @@ fn edit_draft_survives_failure_then_is_pruned_on_recovery() {
 
     let doc = fs::read_to_string(find_rune_file(Path::new(&store_path), &id)).expect("read rune");
     assert!(
-        doc.contains("status \"done\""),
+        doc.contains("status \"closed:canceled\""),
         "draft status not applied: {doc}"
     );
     assert!(
@@ -1610,10 +1614,10 @@ fn search_matches_body_and_closed_runes() {
             "users cannot login after a redirect",
         ],
     );
-    // A done rune must still be findable — that is the point of search.
+    // A closed rune must still be findable — that is the point of search.
     runes_ok(
         &home,
-        &["edit", &format!("test:{body_match}"), "--status", "done"],
+        &["edit", &format!("test:{body_match}"), "--status", "closed"],
     );
     let title_match = last_line(&runes_ok(
         &home,
@@ -1659,7 +1663,7 @@ fn search_matches_body_and_closed_runes() {
         vec![title_match.as_str(), body_match.as_str()],
         "json rows should mirror ranked list output: {json}"
     );
-    assert_eq!(parsed[1]["status"].as_str(), Some("done"));
+    assert_eq!(parsed[1]["status"].as_str(), Some("closed"));
 
     // Archived runes are excluded by default and opt-in via --with-archived.
     runes_ok(&home, &["archive", &format!("test:{title_match}")]);
@@ -1755,8 +1759,27 @@ fn builtin_views_need_no_config_and_custom_views_warn() {
     .to_string();
     runes_ok(
         &home,
-        &["edit", &format!("test:{closed}"), "--status", "done"],
+        &[
+            "edit",
+            &format!("test:{closed}"),
+            "--status",
+            "closed:canceled",
+        ],
     );
+    let reviewing = last_line(&runes_ok(
+        &home,
+        &[
+            "new",
+            "--project",
+            "test:proj",
+            "Under review",
+            "--status",
+            "wip:review",
+            "--assignee",
+            "test@runes.dev",
+        ],
+    ))
+    .to_string();
 
     let scope = ["--store", "test", "--project", "proj"];
     let list_view = |view: &[&str]| {
@@ -1776,12 +1799,16 @@ fn builtin_views_need_no_config_and_custom_views_warn() {
         )
     };
 
-    // Default view is `open`: closed runes stay out of the way.
+    // Default view is `open`: todo and wip (with substates), never closed.
     let (default_view, default_stderr) = list_view(&[]);
     assert!(default_view.contains(&mine), "default view: {default_view}");
     assert!(
         default_view.contains(&theirs),
         "default view: {default_view}"
+    );
+    assert!(
+        default_view.contains(&reviewing),
+        "default view should include wip substates: {default_view}"
     );
     assert!(
         !default_view.contains(&closed),
@@ -1797,7 +1824,7 @@ fn builtin_views_need_no_config_and_custom_views_warn() {
 
     for all_form in [vec!["all"], vec!["--all"]] {
         let (all_view, _) = list_view(&all_form);
-        for id in [&mine, &theirs, &closed] {
+        for id in [&mine, &theirs, &closed, &reviewing] {
             assert!(
                 all_view.contains(id),
                 "`list {}` missing {id}: {all_view}",
@@ -1806,10 +1833,11 @@ fn builtin_views_need_no_config_and_custom_views_warn() {
         }
     }
 
+    // `closed` covers every closed substate.
     let (closed_view, _) = list_view(&["closed"]);
     assert!(
         closed_view.contains(&closed),
-        "`list closed` missing the done rune: {closed_view}"
+        "`list closed` missing the closed:canceled rune: {closed_view}"
     );
     assert!(
         !closed_view.contains(&mine) && !closed_view.contains(&theirs),
@@ -1818,8 +1846,8 @@ fn builtin_views_need_no_config_and_custom_views_warn() {
 
     let (mine_view, _) = list_view(&["mine"]);
     assert!(
-        mine_view.contains(&mine),
-        "`list mine` missing my rune: {mine_view}"
+        mine_view.contains(&mine) && mine_view.contains(&reviewing),
+        "`list mine` missing my runes: {mine_view}"
     );
     assert!(
         !mine_view.contains(&theirs) && !mine_view.contains(&closed),
@@ -1829,9 +1857,9 @@ fn builtin_views_need_no_config_and_custom_views_warn() {
     // A config-defined view still applies, but says it is on the way out.
     runes_ok(
         &home,
-        &["config", "set", "query.wip.status", "done", "--global"],
+        &["config", "set", "query.finished.status", "done", "--global"],
     );
-    let (custom_view, custom_stderr) = list_view(&["wip"]);
+    let (custom_view, custom_stderr) = list_view(&["finished"]);
     assert!(
         custom_view.contains(&closed) && !custom_view.contains(&mine),
         "custom view should still filter: {custom_view}"
@@ -2014,8 +2042,9 @@ fn jj_edit_file_accepts_full_doc() {
         2,
         "duplicated frontmatter: {stored}"
     );
+    // The full doc's legacy `in-progress` normalizes on the way in, like any other input.
     assert!(
-        stored.contains("status \"in-progress\"") && stored.contains("labels \"roundtrip\""),
+        stored.contains("status \"wip\"") && stored.contains("labels \"roundtrip\""),
         "metadata changes not applied: {stored}"
     );
     assert!(
@@ -2038,12 +2067,25 @@ fn jj_edit_file_accepts_full_doc() {
     runes_ok(&home, &["edit", &target, "-f", &input_s]);
     let body_only = fs::read_to_string(find_rune_file(&store_path, &id)).expect("read rune doc");
     assert!(
-        body_only.contains("status \"in-progress\"") && body_only.contains("labels \"roundtrip\""),
+        body_only.contains("status \"wip\"") && body_only.contains("labels \"roundtrip\""),
         "body-only input dropped metadata: {body_only}"
     );
     assert!(
         body_only.contains("Body only.") && !body_only.contains("Edited in place."),
         "body-only input did not replace the body: {body_only}"
+    );
+
+    // A full doc carrying the pre-substate vocabulary lands as the core state
+    fs::write(
+        &input,
+        body_only.replace("status \"wip\"", "status \"done\""),
+    )
+    .expect("write full doc");
+    runes_ok(&home, &["edit", &target, "-f", &input_s]);
+    let closed = fs::read_to_string(find_rune_file(&store_path, &id)).expect("read rune doc");
+    assert!(
+        closed.contains("status \"closed\"") && !closed.contains("\"done\""),
+        "legacy status in a full doc was not normalized: {closed}"
     );
 }
 
@@ -2072,7 +2114,12 @@ fn jj_edit_file_full_doc_validation() {
         ),
         (
             shown.replace("status \"todo\"", "status \"bogus\""),
-            vec!["Invalid status", "bogus"],
+            vec!["Invalid status", "bogus", "todo, wip, closed"],
+        ),
+        // Substates go through the same allowlist as `--status`
+        (
+            shown.replace("status \"todo\"", "status \"wip:qa\""),
+            vec!["Invalid status", "wip, wip:design, wip:impl, wip:review"],
         ),
         (
             shown.replace("task \"", "epic \""),
@@ -2115,7 +2162,7 @@ fn jj_new_file_accepts_full_doc() {
             "--kind",
             "bug",
             "--status",
-            "in-progress",
+            "wip:review",
             "--label",
             "copied",
         ],
@@ -2138,7 +2185,7 @@ fn jj_new_file_accepts_full_doc() {
         "kind or id not applied: {copy}"
     );
     assert!(
-        copy.contains("status \"in-progress\"") && copy.contains("labels \"copied\""),
+        copy.contains("status \"wip:review\"") && copy.contains("labels \"copied\""),
         "frontmatter fields not applied: {copy}"
     );
     assert_eq!(
@@ -2165,8 +2212,9 @@ fn jj_new_file_accepts_full_doc() {
     ))
     .to_string();
     let flagged = fs::read_to_string(find_rune_file(&store_path, &flagged_id)).expect("read copy");
+    // `done` is input sugar for `closed`, and still beats the frontmatter
     assert!(
-        flagged.contains("status \"done\""),
+        flagged.contains("status \"closed\""),
         "--status did not override frontmatter: {flagged}"
     );
     assert!(
@@ -2179,7 +2227,7 @@ fn jj_new_file_accepts_full_doc() {
         &input,
         fs::read_to_string(&input)
             .expect("read input")
-            .replace("status \"in-progress\"", "status \"bogus\""),
+            .replace("status \"wip:review\"", "status \"bogus\""),
     )
     .expect("write full doc");
     let output = runes_output(
@@ -2291,8 +2339,9 @@ fn jj_edit_file_with_field_flags() {
         ],
     );
     let stored = fs::read_to_string(find_rune_file(&store_path, &id)).expect("read rune doc");
+    // `done` normalizes to `closed` on the way in, like any other status input
     assert!(
-        stored.contains("status \"done\""),
+        stored.contains("status \"closed\""),
         "--status did not override the file: {stored}"
     );
     assert!(
@@ -2305,15 +2354,18 @@ fn jj_edit_file_with_field_flags() {
     );
 
     // The frontmatter still loses even when it carries an explicit conflicting value
-    fs::write(&input, stored.replace("status \"done\"", "status \"todo\""))
-        .expect("write full doc");
+    fs::write(
+        &input,
+        stored.replace("status \"closed\"", "status \"todo\""),
+    )
+    .expect("write full doc");
     runes_ok(
         &home,
-        &["edit", &target, "-f", &input_s, "--status", "in-progress"],
+        &["edit", &target, "-f", &input_s, "--status", "wip:impl"],
     );
     let stored = fs::read_to_string(find_rune_file(&store_path, &id)).expect("read rune doc");
     assert!(
-        stored.contains("status \"in-progress\""),
+        stored.contains("status \"wip:impl\""),
         "frontmatter beat the explicit flag: {stored}"
     );
 
@@ -2328,6 +2380,405 @@ fn jj_edit_file_with_field_flags() {
         stored.contains("status \"todo\"") && stored.contains("Body only."),
         "body-only input plus flags did not apply: {stored}"
     );
+}
+
+/// Test: core states take substates, invalid ones are rejected with the allowed
+/// list, the substate allowlist is configurable, and legacy names are input sugar.
+#[test]
+fn states_accept_configured_substates_and_legacy_aliases() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let (home, store_path) = setup_jj_store("state-substates");
+    let store = Path::new(&store_path);
+
+    let reviewing = last_line(&runes_ok(
+        &home,
+        &[
+            "new",
+            "--project",
+            "test:proj",
+            "Ship the parser",
+            "--status",
+            "wip:review",
+        ],
+    ))
+    .to_string();
+    let doc = fs::read_to_string(find_rune_file(store, &reviewing)).expect("read rune");
+    assert!(doc.contains("status \"wip:review\""), "{doc}");
+
+    let bad_substate = runes_output(
+        &home,
+        &[
+            "new",
+            "--project",
+            "test:proj",
+            "Nope",
+            "--status",
+            "wip:qa",
+        ],
+    );
+    assert!(!bad_substate.status.success(), "wip:qa should be rejected");
+    let stderr = String::from_utf8_lossy(&bad_substate.stderr);
+    assert!(
+        stderr.contains("wip, wip:design, wip:impl, wip:review"),
+        "error should list the allowed substates: {stderr}"
+    );
+
+    let bad_state = runes_output(
+        &home,
+        &["new", "--project", "test:proj", "Nope", "--status", "doing"],
+    );
+    assert!(!bad_state.status.success(), "`doing` should be rejected");
+    let stderr = String::from_utf8_lossy(&bad_state.stderr);
+    assert!(
+        stderr.contains("todo, wip, closed"),
+        "error should list the core states: {stderr}"
+    );
+
+    // Legacy names are accepted on input and rewritten to core states on the way in.
+    runes_ok(
+        &home,
+        &["edit", &format!("test:{reviewing}"), "--status", "done"],
+    );
+    let doc = fs::read_to_string(find_rune_file(store, &reviewing)).expect("read rune");
+    assert!(doc.contains("status \"closed\""), "{doc}");
+    assert!(!doc.contains("done"), "legacy status was emitted: {doc}");
+
+    // Substates are configurable; core states are not.
+    runes_ok(
+        &home,
+        &[
+            "config",
+            "set",
+            "state.wip.substate",
+            "qa,review",
+            "--global",
+        ],
+    );
+    runes_ok(
+        &home,
+        &["edit", &format!("test:{reviewing}"), "--status", "wip:qa"],
+    );
+    let now_invalid = runes_output(
+        &home,
+        &[
+            "edit",
+            &format!("test:{reviewing}"),
+            "--status",
+            "wip:design",
+        ],
+    );
+    assert!(
+        !now_invalid.status.success(),
+        "config should replace the default substates"
+    );
+}
+
+/// Test: `closed` is terminal for dep resolution and matches every closed substate,
+/// while an exact `state:substate` filter stays exact.
+#[test]
+fn closed_substates_are_terminal_and_filterable() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let (home, _) = setup_jj_store("closed-substates");
+    let blocker = last_line(&runes_ok(
+        &home,
+        &["new", "--project", "test:proj", "Blocking work"],
+    ))
+    .to_string();
+    let blocked = last_line(&runes_ok(
+        &home,
+        &[
+            "new",
+            "--project",
+            "test:proj",
+            "Waiting on the blocker",
+            "--dep",
+            &blocker,
+        ],
+    ))
+    .to_string();
+
+    let scope = ["--store", "test", "--project", "proj"];
+    let list = |extra: &[&str]| {
+        let mut args = vec!["list"];
+        args.extend_from_slice(extra);
+        args.extend_from_slice(&scope);
+        runes_ok(&home, &args)
+    };
+
+    assert!(
+        list(&["--blocked"]).contains(&blocked),
+        "dep on an open rune should block"
+    );
+    assert!(
+        !list(&["--ready"]).contains(&blocked),
+        "blocked rune should not be ready"
+    );
+
+    runes_ok(
+        &home,
+        &[
+            "edit",
+            &format!("test:{blocker}"),
+            "--status",
+            "closed:canceled",
+        ],
+    );
+
+    let ready = list(&["--ready"]);
+    assert!(
+        ready.contains(&blocked),
+        "closed:canceled dep should unblock: {ready}"
+    );
+    assert!(
+        !list(&["--blocked"]).contains(&blocked),
+        "closed:canceled dep should unblock"
+    );
+
+    let closed_filter = list(&["--status", "closed"]);
+    assert!(
+        closed_filter.contains(&blocker),
+        "`--status closed` should match closed:canceled: {closed_filter}"
+    );
+    let exact = list(&["--status", "closed:canceled"]);
+    assert!(exact.contains(&blocker), "exact substate filter: {exact}");
+    let other = list(&["--status", "closed:duplicate"]);
+    assert!(
+        !other.contains(&blocker),
+        "exact substate filter should not match another substate: {other}"
+    );
+}
+
+/// Test: `store doctor` migrates runes written with the old status vocabulary
+/// and commits the rewrite.
+#[test]
+fn store_doctor_migrates_legacy_statuses() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let (home, store_path) = setup_jj_store("doctor-migrate");
+    let store = Path::new(&store_path);
+    let legacy = last_line(&runes_ok(
+        &home,
+        &["new", "--project", "test:proj", "Written by an older runes"],
+    ))
+    .to_string();
+
+    // Rewrite the frontmatter the way a pre-substate store had it.
+    let path = find_rune_file(store, &legacy);
+    let original = fs::read_to_string(&path).expect("read rune");
+    fs::write(
+        &path,
+        original.replace("status \"todo\"", "status \"done\""),
+    )
+    .expect("write rune");
+
+    let doctored = runes_ok(&home, &["store", "doctor", "test"]);
+    assert!(
+        doctored.contains("Migrated 1 rune(s)"),
+        "doctor should report the migration: {doctored}"
+    );
+    let migrated = fs::read_to_string(&path).expect("read rune");
+    assert!(migrated.contains("status \"closed\""), "{migrated}");
+    assert!(
+        migrated.contains("# Written by an older runes"),
+        "migration should leave the body alone: {migrated}"
+    );
+
+    let log = runes_ok(&home, &["log", &format!("test:{legacy}"), "--limit", "5"]);
+    assert!(
+        log.contains("Migrate statuses to todo/wip/closed"),
+        "migration should be committed: {log}"
+    );
+
+    // The rebuilt cache sees the migrated state.
+    let closed = runes_ok(
+        &home,
+        &["list", "closed", "--store", "test", "--project", "proj"],
+    );
+    assert!(closed.contains(&legacy), "migrated rune missing: {closed}");
+
+    // A second run has nothing left to migrate.
+    let again = runes_ok(&home, &["store", "doctor", "test"]);
+    assert!(
+        !again.contains("Migrated"),
+        "doctor should be idempotent: {again}"
+    );
+}
+
+/// Test: `store doctor` migrates archived runes too, not just live ones.
+#[test]
+fn store_doctor_migrates_archived_runes() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let (home, store_path) = setup_jj_store("doctor-migrate-archived");
+    let store = Path::new(&store_path);
+    let legacy = last_line(&runes_ok(
+        &home,
+        &["new", "--project", "test:proj", "Old and put away"],
+    ))
+    .to_string();
+
+    let path = find_rune_file(store, &legacy);
+    let file_name = path.file_name().expect("file name").to_os_string();
+    set_status_on_disk(store, &legacy, "done");
+    runes_ok(&home, &["archive", &format!("test:{legacy}")]);
+
+    let archived_path = store.join("proj").join("_archive").join(&file_name);
+    assert!(
+        archived_path.exists(),
+        "rune not archived: {}",
+        archived_path.display()
+    );
+
+    let doctored = runes_ok(&home, &["store", "doctor", "test"]);
+    assert!(
+        doctored.contains("Migrated 1 rune(s)"),
+        "doctor should migrate the archived rune: {doctored}"
+    );
+    let migrated = fs::read_to_string(&archived_path).expect("read archived rune");
+    assert!(
+        migrated.contains("status \"closed\""),
+        "archived rune not migrated: {migrated}"
+    );
+
+    let again = runes_ok(&home, &["store", "doctor", "test"]);
+    assert!(
+        !again.contains("Migrated"),
+        "doctor should be idempotent: {again}"
+    );
+}
+
+/// Test: a store that still holds the pre-substate vocabulary reads correctly
+/// with no `store doctor` run — statuses normalize on the read path, so listing,
+/// dep resolution and coloring all see core states.
+#[test]
+fn legacy_statuses_on_disk_read_as_core_states_without_doctor() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let (home, store_path) = setup_jj_store("legacy-read-path");
+    let store = Path::new(&store_path);
+
+    let started = last_line(&runes_ok(
+        &home,
+        &["new", "--project", "test:proj", "Still going"],
+    ))
+    .to_string();
+    let finished = last_line(&runes_ok(
+        &home,
+        &["new", "--project", "test:proj", "Long since landed"],
+    ))
+    .to_string();
+    let dependent = last_line(&runes_ok(
+        &home,
+        &[
+            "new",
+            "--project",
+            "test:proj",
+            "Waits on the one that landed",
+            "--dep",
+            &finished,
+        ],
+    ))
+    .to_string();
+
+    // Leave the store exactly as an older runes would have: legacy statuses on
+    // disk, and a cache that has never seen `store doctor`.
+    set_status_on_disk(store, &started, "in-progress");
+    set_status_on_disk(store, &finished, "done");
+    remove_cache(&home, "test");
+
+    let scope = ["--store", "test", "--project", "proj"];
+    let list = |extra: &[&str]| {
+        let mut args = vec!["list"];
+        args.extend_from_slice(extra);
+        args.extend_from_slice(&scope);
+        runes_ok(&home, &args)
+    };
+
+    let default_view = list(&[]);
+    assert!(
+        default_view.contains(&started) && default_view.contains(&dependent),
+        "default view lost the open runes: {default_view}"
+    );
+    assert!(
+        !default_view.contains(&finished),
+        "default view should hide the legacy done rune: {default_view}"
+    );
+    assert!(
+        !default_view.contains("in-progress"),
+        "legacy status leaked into the listing: {default_view}"
+    );
+    assert!(
+        default_view.contains("wip"),
+        "legacy in-progress should read as wip: {default_view}"
+    );
+
+    let closed_view = list(&["closed"]);
+    assert!(
+        closed_view.contains(&finished),
+        "`list closed` should show the legacy done rune: {closed_view}"
+    );
+    assert!(
+        !closed_view.contains(&started),
+        "`list closed` leaked an open rune: {closed_view}"
+    );
+
+    // A legacy `done` dep is terminal, so its dependent is ready, not blocked.
+    let ready = list(&["--ready"]);
+    assert!(
+        ready.contains(&dependent),
+        "legacy done dep should resolve: {ready}"
+    );
+    let blocked = list(&["--blocked"]);
+    assert!(
+        !blocked.contains(&dependent),
+        "legacy done dep should not block: {blocked}"
+    );
+    assert!(
+        !default_view.contains("[blocked]"),
+        "legacy done dep marked its dependent blocked: {default_view}"
+    );
+
+    // Statuses colorize off the core state, so legacy values still render.
+    let mut colored_args = vec!["list", "all"];
+    colored_args.extend_from_slice(&scope);
+    let colored = runes_with_env(&home, &[("FORCE_COLOR", "1")], &colored_args);
+    assert!(
+        colored.contains("\x1b[32mwip\x1b[0m"),
+        "wip should be green: {colored:?}"
+    );
+    assert!(
+        colored.contains("\x1b[90mclosed\x1b[0m"),
+        "closed should be gray: {colored:?}"
+    );
+}
+
+/// Rewrite a rune's on-disk status, bypassing the CLI's input normalization.
+fn set_status_on_disk(store_path: &Path, rune_id: &str, status: &str) {
+    let path = find_rune_file(store_path, rune_id);
+    let text = fs::read_to_string(&path).expect("read rune");
+    let updated = text.replace("status \"todo\"", &format!("status \"{status}\""));
+    assert_ne!(text, updated, "no todo status in {}", path.display());
+    fs::write(&path, updated).expect("write rune");
+}
+
+/// Drop a store's cache so the next command rebuilds it from disk.
+fn remove_cache(home: &Path, store_name: &str) {
+    let cache_dir = home.join(".runes").join("cache");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = fs::remove_file(cache_dir.join(format!("{store_name}.sqlite{suffix}")));
+    }
 }
 
 fn find_rune_file(store_path: &Path, rune_id: &str) -> PathBuf {
