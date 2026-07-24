@@ -7,8 +7,9 @@ use runes_core::backend::{self, LogEntry};
 use runes_core::cache;
 use runes_core::config::{discover_stores, ensure_dir, get_store, BackendKind, Store};
 use runes_core::model::{
-    discover_project_docs, ensure_title, new_milestone_doc, new_rune_doc, next_short_id, parse_doc,
-    parse_doc_text, parse_full_id, render_doc, replace_title, resolve_issue_path, slugify, RuneDoc,
+    discover_project_docs, ensure_title, has_frontmatter, new_milestone_doc, new_rune_doc,
+    next_short_id, parse_doc, parse_doc_text, parse_full_id, render_doc, replace_title,
+    resolve_issue_path, slugify, RuneDoc,
 };
 use runes_core::schema::{find_kind_template_path, load_kind_template, load_schema};
 use runes_core::{Error, Result};
@@ -190,7 +191,7 @@ struct NewArgs {
     /// Add a dependency (repeatable)
     #[arg(long = "dep")]
     deps: Vec<String>,
-    /// Replace body from file (use - for stdin)
+    /// Body, or full doc whose frontmatter seeds metadata (use - for stdin)
     #[arg(short = 'f', long = "file")]
     file: Option<PathBuf>,
     /// Open editor after creation
@@ -351,7 +352,7 @@ struct EditArgs {
     /// Remove a dependency (repeatable)
     #[arg(long = "remove-dep")]
     remove_deps: Vec<String>,
-    /// Replace body from file (use - for stdin)
+    /// Replace body, or full doc with frontmatter (use - for stdin)
     #[arg(short = 'f', long = "file")]
     file: Option<PathBuf>,
     /// Open editor
@@ -1249,6 +1250,222 @@ fn read_from_stdin() -> Result<String> {
     Ok(buffer)
 }
 
+/// Fields `runes show` injects for display; they are never stored, so full-doc
+/// input must not carry them back in.
+const DERIVED_FRONTMATTER_FIELDS: [&str; 5] = [
+    "created_by",
+    "created_at",
+    "updated_by",
+    "updated_at",
+    "pending_changes",
+];
+
+/// Read `--file` input, where `-` means stdin.
+fn read_file_input(path: &Path) -> Result<String> {
+    if path == Path::new("-") {
+        read_from_stdin()
+    } else {
+        Ok(fs::read_to_string(path)?)
+    }
+}
+
+/// Label for `--file` input in error messages.
+fn input_source(path: &Path) -> &Path {
+    if path == Path::new("-") {
+        Path::new("<stdin>")
+    } else {
+        path
+    }
+}
+
+/// Parse `--file` input that carries a leading frontmatter fence as a full doc.
+fn parse_input_doc(contents: &str, path: &Path) -> Result<RuneDoc> {
+    let mut doc = parse_doc_text(contents, input_source(path))?;
+    doc.frontmatter_extra.retain(|line| {
+        let field = line.split_whitespace().next().unwrap_or("");
+        !DERIVED_FRONTMATTER_FIELDS.contains(&field)
+    });
+    doc.body = strip_show_injections(&doc.body);
+    Ok(doc)
+}
+
+/// `runes show` decorates the body as well as the frontmatter: annotation lines under
+/// headings, attributions above comments, and a trailing block of resolved deps and
+/// milestone counts. Full-doc input is usually a copy of that output, so the
+/// decorations are stripped back out before they get stored and re-accumulate on the
+/// next round-trip. Matching is by exact shape and position, so body text that merely
+/// resembles a decoration survives.
+fn strip_show_injections(body: &str) -> String {
+    let mut lines: Vec<&str> = body.lines().collect();
+    truncate_show_trailers(&mut lines);
+
+    let mut kept: Vec<&str> = Vec::with_capacity(lines.len());
+    let mut in_code_fence = false;
+    let mut in_comments = false;
+    let mut after_heading = false;
+    let mut at_comment_start = false;
+    for (idx, line) in lines.iter().enumerate() {
+        let is_fence = line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~");
+        if !in_code_fence && !is_fence {
+            if after_heading && is_heading_annotation(line) {
+                after_heading = false;
+                continue;
+            }
+            // The blank line below an attribution is `show`'s too, but the stored
+            // comment already starts with one, so only the attribution goes.
+            if at_comment_start
+                && is_comment_attribution(line)
+                && lines
+                    .get(idx + 1)
+                    .is_some_and(|next| next.trim().is_empty())
+            {
+                at_comment_start = false;
+                continue;
+            }
+            // `show` trims the blank line each comment ends with; put it back so the
+            // section matches the shape `runes comment` writes.
+            if in_comments
+                && line.trim() == "---"
+                && kept.last().is_some_and(|prev| !prev.trim().is_empty())
+            {
+                kept.push("");
+            }
+        }
+        kept.push(line);
+        if is_fence {
+            in_code_fence = !in_code_fence;
+        }
+        (after_heading, at_comment_start) = if in_code_fence || is_fence {
+            (false, false)
+        } else if let Some(heading) = line.strip_prefix('#') {
+            in_comments = heading.trim_start_matches('#').trim() == "Comments";
+            (true, in_comments)
+        } else {
+            // Comments are separated by a `---` rule, so each one starts a new block
+            (false, in_comments && line.trim() == "---")
+        };
+    }
+
+    let mut out = kept.join("\n");
+    if body.ends_with('\n') && !out.is_empty() {
+        out.push('\n');
+    }
+    out
+}
+
+/// Drop the resolved-deps and milestone-progress blocks `show` appends after the body.
+/// Only a trailing run of them is removed, so a body that ends in similar-looking text
+/// is left alone.
+fn truncate_show_trailers(lines: &mut Vec<&str>) {
+    loop {
+        let Some(end) = lines.iter().rposition(|line| !line.trim().is_empty()) else {
+            return;
+        };
+        let end = end + 1;
+        let start = if is_milestone_counts_line(lines[end - 1]) {
+            end - 1
+        } else {
+            // A `deps:`/`children:` header followed by nothing but its entries
+            let mut idx = end;
+            while idx > 0 && is_dep_list_entry(lines[idx - 1]) {
+                idx -= 1;
+            }
+            if idx == end || idx == 0 || !matches!(lines[idx - 1], "deps:" | "children:") {
+                return;
+            }
+            idx - 1
+        };
+        lines.truncate(start);
+    }
+}
+
+/// `Jul 24 at 3:40pm` — the timestamp shape `show` renders (`%b %-d at %-I:%M%P`).
+fn is_show_timestamp(tokens: &[&str]) -> bool {
+    let [month, day, "at", time] = tokens else {
+        return false;
+    };
+    let digits =
+        |s: &str, max: usize| (1..=max).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit());
+    let clock = time
+        .strip_suffix("am")
+        .or_else(|| time.strip_suffix("pm"))
+        .and_then(|clock| clock.split_once(':'));
+    month.len() == 3
+        && month.bytes().all(|b| b.is_ascii_alphabetic())
+        && digits(day, 2)
+        && clock.is_some_and(|(hour, min)| digits(hour, 2) && min.len() == 2 && digits(min, 2))
+}
+
+/// `Edited by <who> on <ts>`, `Edited on <ts>`, or the uncommitted marker — what `show`
+/// prints directly under an edited heading.
+fn is_heading_annotation(line: &str) -> bool {
+    if line == "pending uncommitted changes" {
+        return true;
+    }
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    if tokens.len() < 6 || !is_show_timestamp(&tokens[tokens.len() - 4..]) {
+        return false;
+    }
+    matches!(
+        &tokens[..tokens.len() - 4],
+        ["Edited", "on"] | ["Edited", "by", .., "on"]
+    )
+}
+
+/// `On <ts> by <author>`, `On <ts>`, or the uncommitted marker — what `show` prints
+/// above each comment.
+fn is_comment_attribution(line: &str) -> bool {
+    if line == "<not committed>" {
+        return true;
+    }
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    if tokens.len() < 5 || tokens[0] != "On" || !is_show_timestamp(&tokens[1..5]) {
+        return false;
+    }
+    tokens.len() == 5 || (tokens.len() > 6 && tokens[5] == "by")
+}
+
+/// `  proj-abc (todo)` — one entry of a `deps:` or `children:` list.
+fn is_dep_list_entry(line: &str) -> bool {
+    let Some((id, status)) = line
+        .strip_prefix("  ")
+        .and_then(|rest| rest.split_once(" ("))
+        .and_then(|(id, status)| Some((id, status.strip_suffix(')')?)))
+    else {
+        return false;
+    };
+    !id.is_empty()
+        && !status.is_empty()
+        && [id, status]
+            .iter()
+            .all(|s| !s.contains(|c: char| c.is_whitespace() || c == '(' || c == ')'))
+}
+
+/// `child_total=3 child_done=1 child_in_progress=1 child_todo=1 complete_pct=33.3`
+fn is_milestone_counts_line(line: &str) -> bool {
+    const FIELDS: [&str; 5] = [
+        "child_total=",
+        "child_done=",
+        "child_in_progress=",
+        "child_todo=",
+        "complete_pct=",
+    ];
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    tokens.len() == FIELDS.len()
+        && tokens
+            .iter()
+            .zip(FIELDS)
+            .all(|(token, field)| token.strip_prefix(field).is_some_and(|v| !v.is_empty()))
+}
+
+fn extend_unique<T: PartialEq>(dst: &mut Vec<T>, items: impl IntoIterator<Item = T>) {
+    for item in items {
+        if !dst.contains(&item) {
+            dst.push(item);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn create_rune(
     store: &Store,
@@ -1339,11 +1556,11 @@ fn run_new(args: NewArgs) -> Result<()> {
         status: status_flag,
         assignee,
         parent,
-        milestone,
+        mut milestone,
         id_override,
         labels,
         relations,
-        deps,
+        mut deps,
         file,
         edit,
         no_commit,
@@ -1351,9 +1568,21 @@ fn run_new(args: NewArgs) -> Result<()> {
     } = args;
     let relation_inputs = relations;
     let (cfg, user_cfg, cwd) = load_context()?;
+    if file.is_some() && edit {
+        return Err(Error::new("Cannot use both --file and --edit"));
+    }
+    // A full-doc --file seeds metadata: explicit flags win, and the id stays ours
+    let file_input = file.as_deref().map(read_file_input).transpose()?;
+    let incoming = match (&file_input, file.as_deref()) {
+        (Some(contents), Some(path)) if has_frontmatter(contents) => {
+            Some(parse_input_doc(contents, path)?)
+        }
+        _ => None,
+    };
     let creation_defaults = user_cfg.creation_defaults();
     let kind_value = command_kind
         .clone()
+        .or_else(|| incoming.as_ref().map(|doc| doc.kind.clone()))
         .or_else(|| creation_defaults.kind.clone())
         .unwrap_or_else(|| "issue".to_string());
     let is_milestone = kind_value.eq_ignore_ascii_case("milestone");
@@ -1367,6 +1596,7 @@ fn run_new(args: NewArgs) -> Result<()> {
     };
     let status = status_flag
         .clone()
+        .or_else(|| incoming.as_ref().map(|doc| doc.status.clone()))
         .or_else(|| creation_defaults.status.clone())
         .unwrap_or_else(|| "todo".to_string());
     let mut combined_labels = creation_defaults.labels.clone();
@@ -1374,6 +1604,7 @@ fn run_new(args: NewArgs) -> Result<()> {
     let assignee_value = assignee
         .as_deref()
         .map(|s| s.to_string())
+        .or_else(|| incoming.as_ref().and_then(|doc| doc.assignee.clone()))
         .or_else(|| creation_defaults.assignee.clone());
     let resolved_assignee = assignee_value
         .as_deref()
@@ -1385,15 +1616,21 @@ fn run_new(args: NewArgs) -> Result<()> {
         store_hint.as_deref(),
         project_arg.as_ref(),
     )?;
-    let relations = parse_relations(&relation_inputs)?;
-    if file.is_some() && edit {
-        return Err(Error::new("Cannot use both --file and --edit"));
+    let mut relations = parse_relations(&relation_inputs)?;
+    if let Some(doc) = &incoming {
+        extend_unique(&mut combined_labels, doc.labels.iter().cloned());
+        extend_unique(&mut deps, doc.deps.iter().cloned());
+        extend_unique(&mut relations, doc.relations.iter().cloned());
+        milestone = milestone.or_else(|| doc.milestone.clone());
     }
 
     // Load schema and validate kind/status
     let schema = load_schema(&store.path, Some(&project_name))?;
     schema.validate_kind(&kind)?;
     schema.validate_status(&kind, &status)?;
+    if let Some(doc) = &incoming {
+        schema.validate_custom_fields(&kind, &doc.frontmatter_extra)?;
+    }
 
     let (identifier, doc_path) = if kind == "milestone" {
         create_milestone(
@@ -1423,14 +1660,15 @@ fn run_new(args: NewArgs) -> Result<()> {
             id_override.as_deref(),
         )?
     };
-    if let Some(file_path) = file {
-        let contents = if file_path == Path::new("-") {
-            read_from_stdin()?
-        } else {
-            fs::read_to_string(&file_path)?
-        };
+    if let Some(contents) = file_input {
         let mut doc = parse_doc(&doc_path)?;
-        doc.body = contents;
+        match incoming {
+            Some(input_doc) => {
+                doc.body = input_doc.body;
+                doc.frontmatter_extra = input_doc.frontmatter_extra;
+            }
+            None => doc.body = contents,
+        }
         let (body, effective_title) = ensure_title(&doc.body, &title);
         doc.body = body;
         doc.title = effective_title;
@@ -2948,12 +3186,39 @@ fn run_edit(args: EditArgs) -> Result<()> {
     if file.is_some() && edit {
         return Err(Error::new("Cannot use both --file and --edit"));
     }
-    if (file.is_some() || edit) && has_field_edits {
-        return Err(Error::new("Cannot mix field edits with --file or --edit"));
+    if edit && has_field_edits {
+        return Err(Error::new("Cannot mix field edits with --edit"));
     }
     // Load schema for validation
     let parsed_id = parse_full_id(&doc.id)?;
     let schema = load_schema(&store.path, Some(&parsed_id.project))?;
+
+    // --file first, then field flags on top: explicit flags win over the file's values
+    let has_file = file.is_some();
+    if let Some(file_path) = file {
+        let contents = read_file_input(&file_path)?;
+        if has_frontmatter(&contents) {
+            let input_doc = parse_input_doc(&contents, &file_path)?;
+            if input_doc.id != doc.id {
+                return Err(Error::new(format!(
+                    "Frontmatter id '{}' does not match rune '{}'",
+                    input_doc.id, doc.id
+                )));
+            }
+            schema.validate_kind(&input_doc.kind)?;
+            schema.validate_status(&input_doc.kind, &input_doc.status)?;
+            schema.validate_custom_fields(&input_doc.kind, &input_doc.frontmatter_extra)?;
+            doc = RuneDoc {
+                path: doc.path,
+                ..input_doc
+            };
+        } else {
+            doc.body = contents;
+        }
+        let (body, effective_title) = ensure_title(&doc.body, &original_title);
+        doc.body = body;
+        doc.title = effective_title;
+    }
 
     if has_field_edits {
         if let Some(status_value) = status {
@@ -3014,27 +3279,9 @@ fn run_edit(args: EditArgs) -> Result<()> {
                 doc.body = replace_title(&doc.body, title_value);
             }
         }
-        fs::write(&path, render_doc(&doc))?;
-    } else if let Some(file_path) = file {
-        let contents = if file_path == Path::new("-") {
-            read_from_stdin()?
-        } else {
-            fs::read_to_string(&file_path)?
-        };
-        // A draft kept after a failed editor edit is a whole rune doc, and reapplying one
-        // is the advertised recovery path, so apply its frontmatter rather than nesting
-        // it in the body. Anything else is a plain body.
-        match parse_doc_text(&contents, &path) {
-            Ok(edited) if edited.id == doc.id => {
-                schema.validate_status(&edited.kind, &edited.status)?;
-                schema.validate_custom_fields(&edited.kind, &edited.frontmatter_extra)?;
-                doc = edited;
-            }
-            _ => doc.body = contents,
-        }
-        let (body, effective_title) = ensure_title(&doc.body, &original_title);
-        doc.body = body;
-        doc.title = effective_title;
+    }
+
+    if has_field_edits || has_file {
         fs::write(&path, render_doc(&doc))?;
     } else if edit || editor_available() {
         // Use a draft file for editor-based edits so we can validate before writing
@@ -4616,7 +4863,7 @@ fn run_quickstart() -> Result<()> {
 mod tests {
     use super::{
         collect_matching_entries, detect_agent, format_log_entries, match_log_entries,
-        resolve_commit_author_env, truncate_to_width, LogEntry, UserConfig,
+        resolve_commit_author_env, strip_show_injections, truncate_to_width, LogEntry, UserConfig,
     };
     use unicode_width::UnicodeWidthStr;
 
@@ -5008,5 +5255,61 @@ mod tests {
         let out = truncate_to_width("日本語のタイトルです", 10);
         assert!(out.ends_with("..."));
         assert!(out.width() <= 10);
+    }
+
+    #[test]
+    fn strip_show_injections_removes_decorations() {
+        let shown = concat!(
+            "# Rune\n\n",
+            "## Description\n",
+            "Edited by Test User on Jul 24 at 3:40pm\n\n",
+            "Body.\n\n",
+            "## Notes\n",
+            "pending uncommitted changes\n\n",
+            "## Comments\n",
+            "On Jul 24 at 3:40pm by Test User\n\n",
+            "first\n",
+            "---\n",
+            "<not committed>\n\n",
+            "second\n",
+            "deps:\n",
+            "  proj-abc (todo)\n",
+            "child_total=1 child_done=0 child_in_progress=0 child_todo=1 complete_pct=0.0\n",
+            "children:\n",
+            "  proj-abc (todo)\n",
+        );
+        assert_eq!(
+            strip_show_injections(shown),
+            concat!(
+                "# Rune\n\n",
+                "## Description\n\n",
+                "Body.\n\n",
+                "## Notes\n\n",
+                "## Comments\n\n",
+                "first\n\n",
+                "---\n\n",
+                "second\n",
+            )
+        );
+    }
+
+    #[test]
+    fn strip_show_injections_keeps_lookalike_body_text() {
+        // Same words, wrong shape or wrong position — all of it is real body text
+        let body = concat!(
+            "# Rune\n\n",
+            "## Description\n\n",
+            "Edited by Test User on Tuesday\n",
+            "Edited by Test User on Jul 24 at 3:40pm\n\n",
+            "On Jul 24 at 3:40pm by Test User\n\n",
+            "```\n",
+            "## Fenced\n",
+            "Edited by Test User on Jul 24 at 3:40pm\n",
+            "```\n\n",
+            "deps:\n",
+            "  proj-abc (todo)\n\n",
+            "Trailing prose keeps the deps list in the body.\n",
+        );
+        assert_eq!(strip_show_injections(body), body);
     }
 }

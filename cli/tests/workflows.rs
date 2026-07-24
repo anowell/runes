@@ -1978,6 +1978,358 @@ fn jj_commit_is_scoped_to_requested_paths() {
     );
 }
 
+/// Test: `edit -f` with a full doc (as printed by `show`) replaces metadata and
+/// body without duplicating frontmatter, and stays stable across round-trips
+#[test]
+fn jj_edit_file_accepts_full_doc() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let (home, store_path) = setup_jj_store("jj-edit-full-doc");
+    let store_path = PathBuf::from(store_path);
+    let id = last_line(&runes_ok(
+        &home,
+        &["new", "--project", "test:proj", "Round trip me"],
+    ))
+    .to_string();
+    let target = format!("test:{id}");
+    let input = home.join("full-doc.md");
+    let input_s = input.to_string_lossy().to_string();
+
+    // Copy the whole doc, edit metadata and body, feed it back
+    let shown = runes_ok(&home, &["show", &target]);
+    let edited = shown
+        .replace(
+            "status \"todo\"",
+            "status \"in-progress\"\n  labels \"roundtrip\"",
+        )
+        .replace("## Description", "## Description\n\nEdited in place.");
+    fs::write(&input, &edited).expect("write full doc");
+    runes_ok(&home, &["edit", &target, "-f", &input_s]);
+
+    let stored = fs::read_to_string(find_rune_file(&store_path, &id)).expect("read rune doc");
+    assert_eq!(
+        stored.lines().filter(|line| line.trim() == "---").count(),
+        2,
+        "duplicated frontmatter: {stored}"
+    );
+    assert!(
+        stored.contains("status \"in-progress\"") && stored.contains("labels \"roundtrip\""),
+        "metadata changes not applied: {stored}"
+    );
+    assert!(
+        stored.contains("Edited in place."),
+        "body changes not applied: {stored}"
+    );
+    assert!(
+        !stored.contains("created_by") && !stored.contains("created_at"),
+        "show-only metadata leaked into the doc: {stored}"
+    );
+
+    // Feeding the stored doc back unchanged is a no-op (no whitespace drift)
+    fs::write(&input, &stored).expect("write full doc");
+    runes_ok(&home, &["edit", &target, "-f", &input_s]);
+    let restored = fs::read_to_string(find_rune_file(&store_path, &id)).expect("read rune doc");
+    assert_eq!(stored, restored, "round-trip is not stable");
+
+    // Body-only input still replaces just the body
+    fs::write(&input, "# Round trip me\n\nBody only.\n").expect("write body");
+    runes_ok(&home, &["edit", &target, "-f", &input_s]);
+    let body_only = fs::read_to_string(find_rune_file(&store_path, &id)).expect("read rune doc");
+    assert!(
+        body_only.contains("status \"in-progress\"") && body_only.contains("labels \"roundtrip\""),
+        "body-only input dropped metadata: {body_only}"
+    );
+    assert!(
+        body_only.contains("Body only.") && !body_only.contains("Edited in place."),
+        "body-only input did not replace the body: {body_only}"
+    );
+}
+
+/// Test: `edit -f` full-doc input is validated against the target and the schema
+#[test]
+fn jj_edit_file_full_doc_validation() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let (home, _) = setup_jj_store("jj-edit-full-doc-invalid");
+    let id = last_line(&runes_ok(
+        &home,
+        &["new", "--project", "test:proj", "Validate me"],
+    ))
+    .to_string();
+    let target = format!("test:{id}");
+    let shown = runes_ok(&home, &["show", &target]);
+    let input = home.join("full-doc.md");
+    let input_s = input.to_string_lossy().to_string();
+
+    let cases = [
+        (
+            shown.replace(&id, "proj-zzz"),
+            vec![id.as_str(), "proj-zzz"],
+        ),
+        (
+            shown.replace("status \"todo\"", "status \"bogus\""),
+            vec!["Invalid status", "bogus"],
+        ),
+        (
+            shown.replace("task \"", "epic \""),
+            vec!["Invalid kind", "epic"],
+        ),
+    ];
+    for (contents, expected) in cases {
+        fs::write(&input, &contents).expect("write full doc");
+        let output = runes_output(&home, &["edit", &target, "-f", &input_s]);
+        assert!(
+            !output.status.success(),
+            "expected failure for input:\n{contents}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        for needle in expected {
+            assert!(
+                stderr.contains(needle),
+                "missing {needle} in stderr: {stderr}"
+            );
+        }
+    }
+}
+
+/// Test: `new -f` with a full doc adopts its fields under a fresh id
+#[test]
+fn jj_new_file_accepts_full_doc() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let (home, store_path) = setup_jj_store("jj-new-full-doc");
+    let store_path = PathBuf::from(store_path);
+    let id = last_line(&runes_ok(
+        &home,
+        &[
+            "new",
+            "--project",
+            "test:proj",
+            "Template rune",
+            "--kind",
+            "bug",
+            "--status",
+            "in-progress",
+            "--label",
+            "copied",
+        ],
+    ))
+    .to_string();
+    let input = home.join("full-doc.md");
+    let input_s = input.to_string_lossy().to_string();
+    fs::write(&input, runes_ok(&home, &["show", &format!("test:{id}")])).expect("write full doc");
+
+    // Frontmatter fields are defaults, and the CLI still owns the id
+    let copy_id = last_line(&runes_ok(
+        &home,
+        &["new", "--project", "test:proj", "Copy", "-f", &input_s],
+    ))
+    .to_string();
+    assert_ne!(copy_id, id, "id from input frontmatter was reused");
+    let copy = fs::read_to_string(find_rune_file(&store_path, &copy_id)).expect("read copy");
+    assert!(
+        copy.contains(&format!("bug \"{copy_id}\"")),
+        "kind or id not applied: {copy}"
+    );
+    assert!(
+        copy.contains("status \"in-progress\"") && copy.contains("labels \"copied\""),
+        "frontmatter fields not applied: {copy}"
+    );
+    assert_eq!(
+        copy.lines().filter(|line| line.trim() == "---").count(),
+        2,
+        "duplicated frontmatter: {copy}"
+    );
+
+    // Explicit flags win over the input frontmatter
+    let flagged_id = last_line(&runes_ok(
+        &home,
+        &[
+            "new",
+            "--project",
+            "test:proj",
+            "Copy",
+            "-f",
+            &input_s,
+            "--status",
+            "done",
+            "--label",
+            "extra",
+        ],
+    ))
+    .to_string();
+    let flagged = fs::read_to_string(find_rune_file(&store_path, &flagged_id)).expect("read copy");
+    assert!(
+        flagged.contains("status \"done\""),
+        "--status did not override frontmatter: {flagged}"
+    );
+    assert!(
+        flagged.contains("labels \"extra\" \"copied\""),
+        "labels not merged: {flagged}"
+    );
+
+    // Schema validation still applies to the supplied frontmatter
+    fs::write(
+        &input,
+        fs::read_to_string(&input)
+            .expect("read input")
+            .replace("status \"in-progress\"", "status \"bogus\""),
+    )
+    .expect("write full doc");
+    let output = runes_output(
+        &home,
+        &["new", "--project", "test:proj", "Copy", "-f", &input_s],
+    );
+    assert!(!output.status.success(), "invalid status was accepted");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Invalid status") && stderr.contains("bogus"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+/// Test: `show` decorates the body with a dep list, per-heading edit annotations and
+/// comment attributions; feeding that back through `edit -f` leaves the stored doc
+/// byte-identical, twice over, so nothing accumulates
+#[test]
+fn jj_edit_file_full_doc_round_trip_is_byte_stable() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let (home, store_path) = setup_jj_store("jj-edit-full-doc-stable");
+    let store_path = PathBuf::from(store_path);
+    let dep = last_line(&runes_ok(
+        &home,
+        &["new", "--project", "test:proj", "Dependency"],
+    ))
+    .to_string();
+    let id = last_line(&runes_ok(
+        &home,
+        &[
+            "new",
+            "--project",
+            "test:proj",
+            "Round trip me",
+            "--dep",
+            &dep,
+        ],
+    ))
+    .to_string();
+    let target = format!("test:{id}");
+    // A second revision is what makes `show` annotate the edited headings
+    runes_ok(&home, &["edit", &target, "--status", "in-progress"]);
+    runes_ok(&home, &["comment", &target, "-m", "a comment"]);
+
+    let shown = runes_ok(&home, &["show", &target]);
+    assert!(
+        shown.contains("deps:") && shown.contains(&format!("  {dep} (")),
+        "expected a deps block to strip: {shown}"
+    );
+    assert!(
+        shown.contains("Edited by "),
+        "expected an edit annotation to strip: {shown}"
+    );
+    assert!(
+        shown.contains(" by Test User"),
+        "expected a comment attribution to strip: {shown}"
+    );
+
+    let original = fs::read_to_string(find_rune_file(&store_path, &id)).expect("read rune doc");
+    let input = home.join("full-doc.md");
+    let input_s = input.to_string_lossy().to_string();
+    for pass in 1..=2 {
+        fs::write(&input, runes_ok(&home, &["show", &target])).expect("write full doc");
+        runes_ok(&home, &["edit", &target, "-f", &input_s]);
+        let stored = fs::read_to_string(find_rune_file(&store_path, &id)).expect("read rune doc");
+        assert_eq!(original, stored, "round-trip {pass} changed the stored doc");
+    }
+}
+
+/// Test: `edit -f` composes with field flags, and the flags win over the input
+#[test]
+fn jj_edit_file_with_field_flags() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let (home, store_path) = setup_jj_store("jj-edit-file-flags");
+    let store_path = PathBuf::from(store_path);
+    let id = last_line(&runes_ok(
+        &home,
+        &[
+            "new",
+            "--project",
+            "test:proj",
+            "Flag me",
+            "--label",
+            "keep",
+        ],
+    ))
+    .to_string();
+    let target = format!("test:{id}");
+    let input = home.join("full-doc.md");
+    let input_s = input.to_string_lossy().to_string();
+
+    // Full doc plus flags: the file supplies the body, the flags win on fields
+    fs::write(
+        &input,
+        runes_ok(&home, &["show", &target])
+            .replace("## Description", "## Description\n\nFrom the file."),
+    )
+    .expect("write full doc");
+    runes_ok(
+        &home,
+        &[
+            "edit", &target, "-f", &input_s, "--status", "done", "--label", "urgent",
+        ],
+    );
+    let stored = fs::read_to_string(find_rune_file(&store_path, &id)).expect("read rune doc");
+    assert!(
+        stored.contains("status \"done\""),
+        "--status did not override the file: {stored}"
+    );
+    assert!(
+        stored.contains("\"keep\"") && stored.contains("\"urgent\""),
+        "labels not merged: {stored}"
+    );
+    assert!(
+        stored.contains("From the file."),
+        "body from the file was dropped: {stored}"
+    );
+
+    // The frontmatter still loses even when it carries an explicit conflicting value
+    fs::write(&input, stored.replace("status \"done\"", "status \"todo\""))
+        .expect("write full doc");
+    runes_ok(
+        &home,
+        &["edit", &target, "-f", &input_s, "--status", "in-progress"],
+    );
+    let stored = fs::read_to_string(find_rune_file(&store_path, &id)).expect("read rune doc");
+    assert!(
+        stored.contains("status \"in-progress\""),
+        "frontmatter beat the explicit flag: {stored}"
+    );
+
+    // Body-only input composes with flags the same way
+    fs::write(&input, "# Flag me\n\nBody only.\n").expect("write body");
+    runes_ok(
+        &home,
+        &["edit", &target, "-f", &input_s, "--status", "todo"],
+    );
+    let stored = fs::read_to_string(find_rune_file(&store_path, &id)).expect("read rune doc");
+    assert!(
+        stored.contains("status \"todo\"") && stored.contains("Body only."),
+        "body-only input plus flags did not apply: {stored}"
+    );
+}
+
 fn find_rune_file(store_path: &Path, rune_id: &str) -> PathBuf {
     let short = rune_id.split('-').next_back().unwrap_or(rune_id);
     let project = rune_id.split('-').next().unwrap_or("proj");

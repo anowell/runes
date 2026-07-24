@@ -212,9 +212,15 @@ pub fn parse_doc(path: &Path) -> Result<RuneDoc> {
     parse_doc_text(&text, path)
 }
 
-/// Parse rune doc text that is not (yet) the canonical file at `path`, e.g. a draft
-/// held aside after a failed editor edit. `path` is only used for error messages and
-/// the resulting doc's path.
+/// True when `text` opens with a `---` frontmatter fence, i.e. it is a full rune
+/// doc rather than a bare body.
+pub fn has_frontmatter(text: &str) -> bool {
+    text.lines().next().map(|line| line.trim()) == Some("---")
+}
+
+/// Parse rune doc text that is not (yet) the canonical file at `path`, e.g. a doc
+/// supplied to `--file` or a draft held aside after a failed editor edit. `path` is
+/// only used for error messages and the resulting doc's path.
 pub fn parse_doc_text(text: &str, path: &Path) -> Result<RuneDoc> {
     let mut lines = text.lines();
     let first = lines
@@ -323,8 +329,10 @@ pub fn render_doc(doc: &RuneDoc) -> String {
     }
     out.push_str("}\n");
     out.push_str("---\n\n");
-    out.push_str(&doc.body);
-    if !doc.body.ends_with('\n') {
+    // Trimmed so repeated parse/render cycles don't accumulate blank lines
+    let body = doc.body.trim_start_matches('\n');
+    out.push_str(body);
+    if !body.ends_with('\n') {
         out.push('\n');
     }
     out
@@ -560,6 +568,26 @@ Body
         let expected_deps = vec!["runes-rf1".to_string(), "runes-tnv".to_string()];
         assert_eq!(doc.deps, expected_deps);
         fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn has_frontmatter_detects_full_docs() {
+        assert!(has_frontmatter(
+            "---\ntask \"runes-tfc\" {\n}\n---\n\n# T\n"
+        ));
+        assert!(!has_frontmatter("# Body only\n\nno frontmatter\n"));
+        assert!(!has_frontmatter("\n---\ntask \"runes-tfc\" {\n}\n---\n"));
+        assert!(!has_frontmatter(""));
+    }
+
+    #[test]
+    fn render_of_parsed_doc_is_stable() {
+        let contents = "---\ntask \"runes-tfc\" {\n  status \"todo\"\n}\n---\n\n# Title\n\nBody\n";
+        let doc = parse_doc_text(contents, Path::new("<test>")).expect("parse");
+        let rendered = render_doc(&doc);
+        assert_eq!(rendered, contents);
+        let reparsed = parse_doc_text(&rendered, Path::new("<test>")).expect("reparse");
+        assert_eq!(render_doc(&reparsed), contents);
     }
 
     #[test]

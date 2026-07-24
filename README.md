@@ -101,6 +101,16 @@ runes edit myproject-a3x -e
 # Replace body from file or stdin
 runes edit myproject-a3x -f notes.md
 cat updated.md | runes edit myproject-a3x -f -
+
+# Edit a whole doc: input starting with a `---` frontmatter block replaces both
+# metadata and body (the id must match; `runes new -f` gets a fresh id instead).
+# `show` output round-trips as-is — the fields, dep statuses, edit annotations and
+# comment attributions it adds for display are dropped on the way back in.
+runes show myproject-a3x > doc.md
+runes edit myproject-a3x -f doc.md
+
+# Field flags combine with -f and override whatever the file says
+runes edit myproject-a3x -f doc.md --status done
 ```
 
 ### Browsing and filtering
