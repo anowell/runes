@@ -3402,96 +3402,151 @@ fn description_line_for_id<'a>(description: &'a str, id: &str) -> &'a str {
     description.lines().next().unwrap_or("").trim()
 }
 
-fn print_log_entries_json(
+/// A commit that passed the log filters, plus every rune it touched.
+/// `--limit` counts these commits, so text and JSON agree even when one commit
+/// expands into several rune rows.
+struct MatchedEntry {
+    revision: String,
+    timestamp: i64,
+    author: String,
+    description: String,
+    rune_ids: Vec<String>,
+}
+
+/// Filters `entries` and stops at the newest `limit` matching commits.
+fn match_log_entries(
     entries: &[LogEntry],
     rune_filter: Option<&str>,
     project_filter: Option<&str>,
     author_filter: Option<&str>,
-) {
-    let mut json_entries = Vec::new();
+    limit: usize,
+) -> Vec<MatchedEntry> {
+    let project_prefix = project_filter.map(|p| format!("{p}-"));
+    let mut matched = Vec::new();
     for entry in entries {
+        if matched.len() >= limit {
+            break;
+        }
         if let Some(author) = author_filter {
             if !entry.author.eq_ignore_ascii_case(author) {
                 continue;
             }
         }
-        let rune_ids: Vec<String> = entry
+        // Derive rune IDs from changed files; sorted so rows are stable across runs.
+        let mut rune_ids: Vec<String> = entry
             .changed_files
             .iter()
             .filter_map(|f| rune_id_from_path(f))
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .collect();
-        if let Some(filter_id) = rune_filter {
-            if !rune_ids.iter().any(|rid| rid == filter_id) {
-                continue;
-            }
-        } else if let Some(proj) = project_filter {
-            let prefix = format!("{proj}-");
-            if !rune_ids.iter().any(|rid| rid.starts_with(&prefix)) {
+        rune_ids.sort();
+
+        let scoped = rune_filter.is_some() || project_prefix.is_some();
+        if scoped {
+            let hit = rune_ids.iter().any(|rid| match rune_filter {
+                Some(filter_id) => rid == filter_id,
+                None => rid.starts_with(project_prefix.as_deref().unwrap_or_default()),
+            });
+            if !hit {
                 continue;
             }
         }
-        let comment = entry.description.lines().next().unwrap_or("").trim();
-        json_entries.push(serde_json::json!({
-            "revision": entry.revision,
-            "committed_at": entry.timestamp,
-            "runes": rune_ids,
-            "comment": comment,
-        }));
+        matched.push(MatchedEntry {
+            revision: entry.revision.clone(),
+            timestamp: entry.timestamp,
+            author: entry.author.clone(),
+            description: entry.description.clone(),
+            rune_ids,
+        });
     }
+    matched
+}
+
+/// Walks history in batches that double until `limit` commits match or the walk
+/// hits the root, so a filtered log never materializes all of history up front.
+fn collect_matching_entries<F>(
+    mut walk: F,
+    rune_filter: Option<&str>,
+    project_filter: Option<&str>,
+    author_filter: Option<&str>,
+    limit: usize,
+) -> Result<Vec<MatchedEntry>>
+where
+    F: FnMut(usize) -> Result<Vec<LogEntry>>,
+{
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut walk_limit = limit;
+    loop {
+        let entries = walk(walk_limit)?;
+        // A short batch means the walk hit the root: growing it further finds nothing.
+        let exhausted = entries.len() < walk_limit;
+        let matched =
+            match_log_entries(&entries, rune_filter, project_filter, author_filter, limit);
+        if exhausted || matched.len() >= limit {
+            return Ok(matched);
+        }
+        walk_limit = walk_limit.saturating_mul(2);
+    }
+}
+
+fn collect_log_entries(
+    store: &Store,
+    rune_filter: Option<&str>,
+    project_filter: Option<&str>,
+    author_filter: Option<&str>,
+    limit: usize,
+) -> Result<Vec<MatchedEntry>> {
+    collect_matching_entries(
+        |walk_limit| backend::rich_log(store, walk_limit),
+        rune_filter,
+        project_filter,
+        author_filter,
+        limit,
+    )
+}
+
+fn print_log_entries_json(entries: &[MatchedEntry]) {
+    let json_entries: Vec<_> = entries
+        .iter()
+        .map(|entry| {
+            let comment = entry.description.lines().next().unwrap_or("").trim();
+            serde_json::json!({
+                "revision": entry.revision,
+                "committed_at": entry.timestamp,
+                "runes": entry.rune_ids,
+                "comment": comment,
+            })
+        })
+        .collect();
     println!("{}", serde_json::to_string_pretty(&json_entries).unwrap());
 }
 
 fn format_log_entries(
-    entries: &[LogEntry],
+    entries: &[MatchedEntry],
     rune_filter: Option<&str>,
     project_filter: Option<&str>,
-    author_filter: Option<&str>,
 ) -> String {
     use std::fmt::Write;
     let mut out = String::new();
     let project_prefix = project_filter.map(|p| format!("{p}-"));
     for entry in entries {
-        if let Some(author) = author_filter {
-            if !entry.author.eq_ignore_ascii_case(author) {
-                continue;
-            }
-        }
         let short_rev = &entry.revision[..entry.revision.len().min(12)];
         let ts = format_log_timestamp(entry.timestamp);
         let rev_colored = color::gray(short_rev);
         let ts_colored = color::teal(&ts);
         let author_colored = color::yellow(&entry.author);
 
-        // Derive rune IDs from changed files, falling back to description parsing
-        let rune_ids: Vec<String> = entry
-            .changed_files
-            .iter()
-            .filter_map(|f| rune_id_from_path(f))
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect();
-
-        if rune_ids.is_empty() {
-            if rune_filter.is_some() || project_prefix.is_some() {
-                continue;
-            }
+        if entry.rune_ids.is_empty() {
             let desc = entry.description.lines().next().unwrap_or("").trim();
             let _ = writeln!(out, "{rev_colored}  {ts_colored}  {author_colored}  {desc}");
             continue;
         }
 
-        if let Some(filter_id) = rune_filter {
-            if !rune_ids.iter().any(|rid| rid == filter_id) {
-                continue;
-            }
-        } else if let Some(ref prefix) = project_prefix {
-            if !rune_ids.iter().any(|rid| rid.starts_with(prefix.as_str())) {
-                continue;
-            }
-        }
-        for rune_id in &rune_ids {
+        // Every matching rune of a counted commit gets a row.
+        for rune_id in &entry.rune_ids {
             if let Some(filter_id) = rune_filter {
                 if rune_id != filter_id {
                     continue;
@@ -3607,22 +3662,25 @@ fn run_log(args: LogArgs) -> Result<()> {
 
     // Rich log: filtered by project, rune, or all
     let store = resolve_store_with_context(&cfg, &user_cfg, &cwd, None)?;
-    let entries = backend::rich_log(&store, limit)?;
+    // Filter, then limit: capping the walk at `limit` raw commits would hide runes
+    // whose changes are older than that, so the walk grows until `limit` commits match.
+    let entries = collect_log_entries(
+        &store,
+        rune_filter.as_deref(),
+        project_filter.as_deref(),
+        changed_by.as_deref(),
+        limit,
+    )?;
     if json {
-        print_log_entries_json(
-            &entries,
-            rune_filter.as_deref(),
-            project_filter.as_deref(),
-            changed_by.as_deref(),
-        );
+        print_log_entries_json(&entries);
     } else {
-        let output = format_log_entries(
-            &entries,
-            rune_filter.as_deref(),
-            project_filter.as_deref(),
-            changed_by.as_deref(),
-        );
-        color::print_with_pager(&output, no_pager);
+        let output =
+            format_log_entries(&entries, rune_filter.as_deref(), project_filter.as_deref());
+        if output.is_empty() {
+            println!("No matching changes found.");
+        } else {
+            color::print_with_pager(&output, no_pager);
+        }
     }
     Ok(())
 }
@@ -4372,7 +4430,10 @@ fn run_quickstart() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{detect_agent, resolve_commit_author_env, truncate_to_width, UserConfig};
+    use super::{
+        collect_matching_entries, detect_agent, format_log_entries, match_log_entries,
+        resolve_commit_author_env, truncate_to_width, LogEntry, UserConfig,
+    };
     use unicode_width::UnicodeWidthStr;
 
     /// Env lookup over a fixed list, returning values verbatim — detection has
@@ -4592,6 +4653,154 @@ mod tests {
         assert!(
             err.to_string().contains("No author configured"),
             "unexpected error: {err}"
+        );
+    }
+
+    fn log_entry(revision: &str, files: &[&str]) -> LogEntry {
+        LogEntry {
+            revision: revision.to_string(),
+            timestamp: 1_700_000_000,
+            author: "test@runes.dev".to_string(),
+            description: "some change".to_string(),
+            changed_files: files.iter().map(|f| f.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn log_limit_counts_commits_not_rows() {
+        // One commit touching 3 runes counts once against --limit, and still
+        // prints all 3 rows - the same commit JSON would emit as one entry.
+        let entries = vec![
+            log_entry(
+                "aaa",
+                &["proj/aa--one.md", "proj/bb--two.md", "proj/cc--three.md"],
+            ),
+            log_entry("bbb", &["proj/dd--four.md"]),
+        ];
+        let matched = match_log_entries(&entries, None, Some("proj"), None, 2);
+        assert_eq!(matched.len(), 2, "expected 2 commits");
+        assert_eq!(matched[0].rune_ids.len(), 3, "expected 3 runes on commit 1");
+        let out = format_log_entries(&matched, None, Some("proj"));
+        assert_eq!(out.lines().count(), 4, "expected 4 rows: {out}");
+    }
+
+    #[test]
+    fn log_limit_truncates_at_commit_boundary() {
+        let entries = vec![
+            log_entry("aaa", &["proj/aa--one.md", "proj/bb--two.md"]),
+            log_entry("bbb", &["proj/cc--three.md"]),
+        ];
+        let matched = match_log_entries(&entries, None, Some("proj"), None, 1);
+        assert_eq!(matched.len(), 1, "limit 1 keeps only the newest commit");
+        let out = format_log_entries(&matched, None, Some("proj"));
+        assert_eq!(out.lines().count(), 2, "both rune rows survive: {out}");
+        assert!(!out.contains("proj-cc"), "second commit leaked: {out}");
+    }
+
+    #[test]
+    fn log_filter_reaches_entries_beyond_limit() {
+        let mut entries: Vec<LogEntry> = (0..10)
+            .map(|i| log_entry(&format!("rev{i}"), &["other/zz--noise.md"]))
+            .collect();
+        entries.push(log_entry("target", &["proj/aa--one.md"]));
+        let matched = match_log_entries(&entries, Some("proj-aa"), None, None, 5);
+        let out = format_log_entries(&matched, Some("proj-aa"), None);
+        assert_eq!(out.lines().count(), 1, "expected 1 row: {out}");
+        assert!(out.contains("proj-aa"), "missing matched rune: {out}");
+    }
+
+    #[test]
+    fn log_rune_filter_hides_sibling_rune_rows() {
+        // A commit touching two runes shows only the filtered one in text mode.
+        let entries = vec![log_entry("aaa", &["proj/aa--one.md", "proj/bb--two.md"])];
+        let matched = match_log_entries(&entries, Some("proj-aa"), None, None, 5);
+        assert_eq!(matched.len(), 1);
+        let out = format_log_entries(&matched, Some("proj-aa"), None);
+        assert_eq!(out.lines().count(), 1, "expected 1 row: {out}");
+        assert!(!out.contains("proj-bb"), "sibling rune leaked: {out}");
+    }
+
+    /// Fake history: `total` commits, every `nth` of them touching proj-aa.
+    fn fake_history(total: usize, nth: usize) -> Vec<LogEntry> {
+        (0..total)
+            .map(|i| {
+                let files: &[&str] = if i % nth == 0 {
+                    &["proj/aa--one.md"]
+                } else {
+                    &["other/zz--noise.md"]
+                };
+                log_entry(&format!("rev{i}"), files)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn walk_stops_early_when_matches_are_dense() {
+        let history = fake_history(10_000, 1);
+        let mut walked = Vec::new();
+        let matched = collect_matching_entries(
+            |n| {
+                walked.push(n);
+                Ok(history.iter().take(n).cloned().collect())
+            },
+            Some("proj-aa"),
+            None,
+            None,
+            5,
+        )
+        .expect("collect");
+        assert_eq!(matched.len(), 5);
+        assert_eq!(walked, vec![5], "should not walk past the first batch");
+    }
+
+    #[test]
+    fn walk_grows_until_enough_matches() {
+        // Only every 10th commit matches, so 5 matches need ~50 commits walked.
+        let history = fake_history(10_000, 10);
+        let mut walked = Vec::new();
+        let matched = collect_matching_entries(
+            |n| {
+                walked.push(n);
+                Ok(history.iter().take(n).cloned().collect())
+            },
+            Some("proj-aa"),
+            None,
+            None,
+            5,
+        )
+        .expect("collect");
+        assert_eq!(matched.len(), 5);
+        let deepest = *walked.last().expect("at least one walk");
+        assert!(
+            deepest >= 41,
+            "walk too shallow to find 5 matches: {walked:?}"
+        );
+        assert!(
+            deepest < 10_000,
+            "walk should stop well short of full history: {walked:?}"
+        );
+    }
+
+    #[test]
+    fn walk_stops_at_history_root_when_matches_are_scarce() {
+        // Nothing matches: the walk must terminate at the root, not loop forever.
+        let history = fake_history(100, 1000);
+        let mut walked = Vec::new();
+        let matched = collect_matching_entries(
+            |n| {
+                walked.push(n);
+                Ok(history.iter().take(n).cloned().collect())
+            },
+            Some("proj-nope"),
+            None,
+            None,
+            5,
+        )
+        .expect("collect");
+        assert!(matched.is_empty(), "nothing should match");
+        assert!(
+            *walked.last().expect("at least one walk") >= 100,
+            "should have reached the root: {walked:?}"
         );
     }
 

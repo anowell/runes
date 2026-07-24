@@ -1000,6 +1000,172 @@ fn jj_log_uses_changed_files_not_description() {
     );
 }
 
+/// Shared assertions: the rune/project filter must be applied before `--limit`
+/// truncates the history, and an empty result must say so.
+fn assert_log_filters_before_limit(home: &Path) {
+    let old = last_line(&runes_ok(
+        home,
+        &["new", "--project", "test:proj", "Oldest rune"],
+    ))
+    .to_string();
+    // Bury the old rune's only commit well past the default limit of 50
+    for i in 0..55 {
+        runes_ok(
+            home,
+            &["new", "--project", "test:proj", &format!("Filler {i}")],
+        );
+    }
+
+    let log = runes_ok(home, &["log", &format!("test:{old}"), "--no-pager"]);
+    assert!(
+        log.contains(&old),
+        "log for {old} missing its commit: {log}"
+    );
+    let log_json = runes_ok(home, &["log", &format!("test:{old}"), "--json"]);
+    let parsed: Vec<serde_json::Value> = serde_json::from_str(&log_json).expect("parse json");
+    assert_eq!(parsed.len(), 1, "expected one entry: {log_json}");
+
+    // Project log limits *matching* commits, not raw commits walked
+    let project_log = runes_ok(
+        home,
+        &["log", "--project", "proj", "--limit", "3", "--no-pager"],
+    );
+    assert_eq!(
+        project_log.lines().count(),
+        3,
+        "project log should emit exactly 3 rows: {project_log}"
+    );
+
+    let empty = runes_ok(
+        home,
+        &["log", "--changed-by", "nobody@example.com", "--no-pager"],
+    );
+    assert!(
+        empty.contains("No matching changes"),
+        "empty log should say so: {empty}"
+    );
+    let empty_json = runes_ok(
+        home,
+        &["log", "--changed-by", "nobody@example.com", "--json"],
+    );
+    assert_eq!(empty_json.trim(), "[]", "empty json log: {empty_json}");
+}
+
+/// Test: jj - rune older than the default limit still shows its history
+#[test]
+fn jj_log_filters_before_limit() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let (home, _) = setup_jj_store("jj-log-filter-limit");
+    assert_log_filters_before_limit(&home);
+}
+
+/// Test: pijul - rune older than the default limit still shows its history
+#[test]
+fn pijul_log_filters_before_limit() {
+    let (home, _) = match setup_pijul_store("pijul-log-filter-limit") {
+        Some(v) => v,
+        None => return,
+    };
+    assert_log_filters_before_limit(&home);
+}
+
+/// Shared assertions: `--limit` counts matching *commits* in both output modes,
+/// so a commit touching several runes emits all its rows but is counted once.
+fn assert_log_limit_counts_commits(home: &Path) {
+    let solo = last_line(&runes_ok(
+        home,
+        &["new", "--project", "test:proj", "Solo rune"],
+    ))
+    .to_string();
+    let mut bulk_ids = Vec::new();
+    for i in 0..3 {
+        bulk_ids.push(
+            last_line(&runes_ok(
+                home,
+                &[
+                    "new",
+                    "--project",
+                    "test:proj",
+                    &format!("Bulk rune {i}"),
+                    "--no-commit",
+                ],
+            ))
+            .to_string(),
+        );
+    }
+    runes_ok(
+        home,
+        &["commit", "--project", "proj", "-m", "Touch three runes"],
+    );
+
+    // Text mode: the newest commit spends 1 of the limit but prints all 3 rows
+    let text = runes_ok(
+        home,
+        &["log", "--project", "proj", "--limit", "1", "--no-pager"],
+    );
+    assert_eq!(
+        text.lines().count(),
+        3,
+        "one commit touching 3 runes should print 3 rows: {text}"
+    );
+    for id in &bulk_ids {
+        assert!(text.contains(id.as_str()), "missing {id}: {text}");
+    }
+    assert!(!text.contains(&solo), "limit 1 leaked older commit: {text}");
+
+    // JSON mode: same limit, one entry listing all 3 runes
+    let json = runes_ok(
+        home,
+        &["log", "--project", "proj", "--limit", "1", "--json"],
+    );
+    let parsed: Vec<serde_json::Value> = serde_json::from_str(&json).expect("parse json");
+    assert_eq!(parsed.len(), 1, "expected one commit: {json}");
+    let runes = parsed[0]["runes"].as_array().expect("runes array");
+    assert_eq!(runes.len(), 3, "expected 3 runes on the commit: {json}");
+
+    // Both modes advance the limit at the same rate: 2 commits = 3 + 1 rows
+    let text2 = runes_ok(
+        home,
+        &["log", "--project", "proj", "--limit", "2", "--no-pager"],
+    );
+    assert_eq!(
+        text2.lines().count(),
+        4,
+        "2 commits (3 runes + 1 rune) should print 4 rows: {text2}"
+    );
+    let json2 = runes_ok(
+        home,
+        &["log", "--project", "proj", "--limit", "2", "--json"],
+    );
+    let parsed2: Vec<serde_json::Value> = serde_json::from_str(&json2).expect("parse json");
+    assert_eq!(parsed2.len(), 2, "expected two commits: {json2}");
+    assert!(text2.contains(&solo), "older commit missing: {text2}");
+}
+
+/// Test: jj - --limit counts commits, not rune rows
+#[test]
+fn jj_log_limit_counts_commits() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let (home, _) = setup_jj_store("jj-log-limit-commits");
+    assert_log_limit_counts_commits(&home);
+}
+
+/// Test: pijul - --limit counts commits, not rune rows
+#[test]
+fn pijul_log_limit_counts_commits() {
+    let (home, _) = match setup_pijul_store("pijul-log-limit-commits") {
+        Some(v) => v,
+        None => return,
+    };
+    assert_log_limit_counts_commits(&home);
+}
+
 /// Test: pijul - new rune show has created metadata
 #[test]
 fn pijul_show_new_rune_has_created_metadata() {
