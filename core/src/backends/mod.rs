@@ -11,14 +11,15 @@ mod pijul;
 use jujutsu::{
     jj_sdk_commit_paths, jj_sdk_file_at_revision, jj_sdk_file_before_revision,
     jj_sdk_file_change_ids, jj_sdk_file_log, jj_sdk_file_rich_log, jj_sdk_has_uncommitted_changes,
-    jj_sdk_log, jj_sdk_rich_log, jj_sdk_show_change, jj_sdk_status, jj_sdk_sync,
+    jj_sdk_log, jj_sdk_remotes, jj_sdk_rich_log, jj_sdk_show_change, jj_sdk_status, jj_sdk_sync,
     jj_sdk_uncommitted_rune_paths, probe_jj_workspace,
 };
 use pijul::{
     pijul_sdk_commit_paths, pijul_sdk_file_at_revision, pijul_sdk_file_before_revision,
     pijul_sdk_file_change_ids, pijul_sdk_file_log, pijul_sdk_file_rich_log,
-    pijul_sdk_has_uncommitted_changes, pijul_sdk_log, pijul_sdk_remove_path, pijul_sdk_rich_log,
-    pijul_sdk_show_change, pijul_sdk_status, pijul_sdk_sync, pijul_sdk_uncommitted_rune_paths,
+    pijul_sdk_has_uncommitted_changes, pijul_sdk_log, pijul_sdk_remotes, pijul_sdk_remove_path,
+    pijul_sdk_rich_log, pijul_sdk_show_change, pijul_sdk_status, pijul_sdk_sync,
+    pijul_sdk_uncommitted_rune_paths,
 };
 
 /// A structured log entry from the backend.
@@ -46,6 +47,8 @@ pub trait BackendAdapter {
     fn has_uncommitted_changes(&self, store: &Store) -> Result<bool>;
     fn uncommitted_rune_paths(&self, store: &Store) -> Result<Vec<PathBuf>>;
     fn status(&self, store: &Store) -> Result<String>;
+    /// Configured remote names, empty when the store only lives locally.
+    fn remotes(&self, store: &Store) -> Result<Vec<String>>;
     fn log(&self, store: &Store, limit: usize) -> Result<String>;
     fn rich_log(&self, store: &Store, limit: usize) -> Result<Vec<LogEntry>>;
     fn file_log(&self, store: &Store, rel_path: &Path, limit: usize) -> Result<String>;
@@ -160,6 +163,13 @@ impl BackendAdapter for CliBackend {
         match self.kind {
             BackendKind::Jj => jj_sdk_status(store),
             BackendKind::Pijul => pijul_sdk_status(store),
+        }
+    }
+
+    fn remotes(&self, store: &Store) -> Result<Vec<String>> {
+        match self.kind {
+            BackendKind::Jj => jj_sdk_remotes(store),
+            BackendKind::Pijul => pijul_sdk_remotes(store),
         }
     }
 
@@ -292,6 +302,10 @@ pub fn remove_path(store: &Store, path: &Path) -> Result<()> {
 
 pub fn status(store: &Store) -> Result<String> {
     adapter_for(store).status(store)
+}
+
+pub fn remotes(store: &Store) -> Result<Vec<String>> {
+    adapter_for(store).remotes(store)
 }
 
 pub fn log(store: &Store, limit: usize) -> Result<String> {

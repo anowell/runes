@@ -116,21 +116,29 @@ pub(super) fn pijul_sdk_status(store: &Store) -> Result<String> {
     } else {
         lines.push("patches=0".to_string());
     }
-    // Collect remote names
-    let mut remote_names = Vec::new();
-    if let Some(default_remote) = &repo.config.default_remote {
-        remote_names.push(default_remote.clone());
-    }
-    for rc in &repo.config.remotes {
-        let name = rc.name().to_string();
-        if !remote_names.contains(&name) {
-            remote_names.push(name);
-        }
-    }
-    for remote in &remote_names {
+    for remote in pijul_repo_remotes(&repo) {
         lines.push(format!("remote \"{remote}\""));
     }
     Ok(lines.join("\n") + "\n")
+}
+
+pub(super) fn pijul_sdk_remotes(store: &Store) -> Result<Vec<String>> {
+    Ok(pijul_repo_remotes(&open_pijul_repo(store)?))
+}
+
+/// The default remote first, then the named ones, without repeating it.
+fn pijul_repo_remotes(repo: &PijulRepository) -> Vec<String> {
+    let mut names = Vec::new();
+    if let Some(default_remote) = &repo.config.default_remote {
+        names.push(default_remote.clone());
+    }
+    for rc in &repo.config.remotes {
+        let name = rc.name().to_string();
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
 }
 
 pub(super) fn pijul_sdk_log(store: &Store, limit: usize) -> Result<String> {

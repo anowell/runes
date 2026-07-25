@@ -14,11 +14,19 @@ fn unique_tmp_home(test_name: &str) -> PathBuf {
     dir
 }
 
+fn runes_cmd(home: &Path) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_runes"));
+    cmd.env("HOME", home)
+        .env("RUNES_USER", "Test User <test@runes.dev>");
+    for var in AGENT_ENV_VARS {
+        cmd.env_remove(var);
+    }
+    cmd
+}
+
 fn runes_output(home: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_runes"))
+    runes_cmd(home)
         .args(args)
-        .env("HOME", home)
-        .env("RUNES_USER", "Test User <test@runes.dev>")
         .output()
         .expect("run runes command")
 }
@@ -42,10 +50,8 @@ fn stderr_of(output: &Output) -> String {
 }
 
 fn runes_output_with_env(home: &Path, envs: &[(&str, &str)], args: &[&str]) -> Output {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_runes"));
-    cmd.args(args)
-        .env("HOME", home)
-        .env("RUNES_USER", "Test User <test@runes.dev>");
+    let mut cmd = runes_cmd(home);
+    cmd.args(args);
     for (key, value) in envs {
         cmd.env(key, value);
     }
@@ -108,11 +114,9 @@ fn copy_dir_recursive(from: &Path, to: &Path) {
 }
 
 fn runes_in_output(home: &Path, cwd: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_runes"))
+    runes_cmd(home)
         .args(args)
         .current_dir(cwd)
-        .env("HOME", home)
-        .env("RUNES_USER", "Test User <test@runes.dev>")
         .output()
         .expect("run runes command")
 }
@@ -182,6 +186,21 @@ fn init_installs_skill_generated_from_quickstart() {
                 "{relative} is missing `{expected}`"
             );
         }
+
+        for expected in [
+            "# edit the file at the path `runes new` printed",
+            "Never create the doc file yourself",
+            "runes show <id> --json",
+        ] {
+            assert!(
+                body.contains(expected),
+                "{relative} is not the agent variant: missing `{expected}`"
+            );
+        }
+        assert!(
+            !body.contains("$EDITOR"),
+            "{relative} should not send an agent to an interactive editor"
+        );
         bodies.push(body.to_string());
     }
     assert_eq!(bodies[0], bodies[1], "skill locations disagree");
@@ -218,14 +237,10 @@ fn installed_skill_describes_no_particular_machine() {
     runes_in(&home, &work, &["init", "--project", "demo"]);
 
     // The live guide really is machine-specific here...
-    let quickstart = runes_in(&home, &work, &["quickstart"]);
+    let quickstart = runes_in(&home, &work, &["quickstart", "--agent"]);
     assert!(
-        quickstart.contains("PATHS"),
-        "no PATHS section: {quickstart}"
-    );
-    assert!(
-        quickstart.contains("Default project: demo"),
-        "no default project line: {quickstart}"
+        quickstart.contains("store \"proj\""),
+        "no store line: {quickstart}"
     );
     assert!(
         quickstart.contains(&store_path.display().to_string()),
@@ -240,7 +255,7 @@ fn installed_skill_describes_no_particular_machine() {
             !skill.contains(&home_str),
             "{relative} leaks an absolute path under {home_str}:\n{skill}"
         );
-        for leak in ["Default project:", "PATHS", "already initialized"] {
+        for leak in ["store \"proj\"", "initialized globally", "local:"] {
             assert!(
                 !skill.contains(leak),
                 "{relative} contains `{leak}`:\n{skill}"
@@ -252,7 +267,7 @@ fn installed_skill_describes_no_particular_machine() {
         assert_eq!(absolute, None, "{relative} contains an absolute path");
         // It says how to find the paths instead of baking them in.
         assert!(
-            skill.contains("runes store list") && skill.contains("runes show <id> --json"),
+            skill.contains("runes show <id> --json"),
             "{relative} does not explain how to find rune docs:\n{skill}"
         );
     }
@@ -2268,10 +2283,8 @@ fn comment_editor_draft_lives_under_runes_drafts() {
 #[test]
 fn output_to_a_closed_pipe_does_not_panic() {
     let home = unique_tmp_home("broken-pipe");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_runes"))
+    let mut child = runes_cmd(&home)
         .arg("quickstart")
-        .env("HOME", &home)
-        .env("RUNES_USER", "Test User <test@runes.dev>")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -2607,23 +2620,171 @@ fn builtin_views_are_documented_in_help_and_quickstart() {
     );
 }
 
-/// Test: quickstart teaches new -> edit the printed file -> commit <id>.
+/// Test: the agent guide teaches new -> patch the printed path -> commit <id>,
+/// and carries the machine-readable contracts (doc shape, stdout, --json).
 #[test]
-fn quickstart_documents_the_canonical_flow() {
-    let home = unique_tmp_home("quickstart-flow");
-    let quickstart = runes_ok(&home, &["quickstart"]);
+fn quickstart_agent_variant_documents_the_canonical_flow() {
+    let home = unique_tmp_home("quickstart-agent-flow");
+    let quickstart = runes_ok(&home, &["quickstart", "--agent"]);
     for expected in [
-        "new -> edit the printed file -> commit <id>",
+        "# edit the file at the path `runes new` printed",
         "runes commit <id>",
+        "runes archive <id>",
         "runes delete <id>",
         "--commit",
         "--no-commit",
+        "{id, path, committed}",
+        "Never create the doc file yourself",
+        "runes show <id> --json",
+        "runes list --blocked-by <id>",
+        "runes search login",
     ] {
         assert!(
             quickstart.contains(expected),
-            "quickstart missing {expected}: {quickstart}"
+            "agent quickstart missing {expected}: {quickstart}"
         );
     }
+    for unwanted in [
+        "$EDITOR",
+        "runes edit <id> -e",
+        // The doc layout is not the agent's business: it goes through `runes new`.
+        "<short>--<slug>.md",
+        "KDL frontmatter",
+    ] {
+        assert!(
+            !quickstart.contains(unwanted),
+            "agent quickstart should not mention {unwanted}: {quickstart}"
+        );
+    }
+}
+
+/// Test: the human guide leads with the editor, not with file paths, and keeps
+/// to getting going - create, edit, show, list, delete, and the schema.
+#[test]
+fn quickstart_human_variant_leads_with_the_editor() {
+    let home = unique_tmp_home("quickstart-human-flow");
+    let quickstart = runes_ok(&home, &["quickstart", "--human"]);
+    for expected in [
+        "runes new \"Add auth\" -e",
+        "runes edit <id>                            # open the rune in $EDITOR",
+        "runes edit <id> --status wip:review",
+        "runes comment <id>",
+        "runes show <id>",
+        "runes search login",
+        "runes list --ready",
+        "runes list --blocked",
+        "runes archive <id>",
+        "runes delete <id>",
+        "Status:",
+        "Rune templates:",
+    ] {
+        assert!(
+            quickstart.contains(expected),
+            "human quickstart missing {expected}: {quickstart}"
+        );
+    }
+    for unwanted in [
+        "# edit the file at the path `runes new` printed",
+        "Never create the doc file yourself",
+        "PATHS",
+        "OTHER COMMANDS",
+        "runes diff",
+        "runes --help",
+        "--commit",
+        "<substate>",
+        "## Acceptance",
+    ] {
+        assert!(
+            !quickstart.contains(unwanted),
+            "human quickstart should not mention {unwanted}: {quickstart}"
+        );
+    }
+}
+
+/// Test: the human guide opens with what is set up and what is not - global
+/// config, then the store this repo writes to, local and remote.
+#[test]
+fn quickstart_human_variant_opens_with_the_init_status() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+
+    let (home, work) = initable_home("quickstart-human-status");
+    let store_path = home.join(".runes").join("stores").join("proj");
+    runes_ok(
+        &home,
+        &[
+            "store",
+            "init",
+            "proj",
+            "--backend",
+            "jj",
+            "--path",
+            &store_path.to_string_lossy(),
+            "--default",
+        ],
+    );
+
+    // No local runes.kdl yet: globally set up, repo is not.
+    let before = runes_in(&home, &work, &["quickstart", "--human"]);
+    assert!(
+        before.contains("\u{2713} runes is initialized globally")
+            && before.contains("\u{2717} repo is not configured"),
+        "status before init: {before}"
+    );
+
+    runes_in(&home, &work, &["init", "--project", "demo"]);
+    let after = runes_in(&home, &work, &["quickstart", "--human"]);
+    for expected in [
+        "\u{2713} runes is initialized globally".to_string(),
+        "\u{2713} repo is configured to use store \"proj\" (backend: jj)".to_string(),
+        format!("\u{2713} local:  {}", store_path.display()),
+        "\u{2717} remote: not configured".to_string(),
+    ] {
+        assert!(
+            after.contains(&expected),
+            "status after init missing {expected}: {after}"
+        );
+    }
+}
+
+/// Test: bare `runes quickstart` picks the variant from the environment - an
+/// agent marker means the agent guide, anything else means the human one.
+#[test]
+fn quickstart_variant_defaults_to_the_detected_audience() {
+    let home = unique_tmp_home("quickstart-audience");
+
+    let default = runes_ok(&home, &["quickstart"]);
+    assert!(
+        !default.contains("Never create the doc file yourself"),
+        "no agent in the env should mean the human guide: {default}"
+    );
+
+    for (var, value) in [("CLAUDECODE", "1"), ("RUNES_AGENT", "scribe")] {
+        let detected = runes_with_env(&home, &[(var, value)], &["quickstart"]);
+        assert!(
+            detected.contains("Never create the doc file yourself"),
+            "{var} should select the agent guide: {detected}"
+        );
+        let overridden = runes_with_env(&home, &[(var, value)], &["quickstart", "--human"]);
+        assert!(
+            !overridden.contains("Never create the doc file yourself"),
+            "--human should beat {var}: {overridden}"
+        );
+    }
+}
+
+/// Test: `--agent` and `--human` are mutually exclusive.
+#[test]
+fn quickstart_rejects_both_audience_flags() {
+    let home = unique_tmp_home("quickstart-both-flags");
+    let output = runes_output(&home, &["quickstart", "--agent", "--human"]);
+    assert!(
+        !output.status.success(),
+        "expected a usage error: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 }
 
 /// Test: committing one rune leaves another dirty rune uncommitted

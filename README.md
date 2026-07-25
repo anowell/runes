@@ -48,38 +48,38 @@ runes init --stealth
 
 The `--stealth` flag keeps `runes.kdl` out of your repo's tracked files by adding it to `.git/info/exclude`.
 
-Create your first rune:
-
-```bash
-runes new "My first issue"
-```
-
-You get back an ID like `myproject-a3x` and the absolute path of the markdown file
-that was created. It is not committed yet: edit the file, then record it.
-
-```bash
-$EDITOR /path/from/the/output.md
-runes diff myproject-a3x     # what is pending
-runes commit myproject-a3x   # record just this rune
-```
-
-That is the canonical flow: `new` → edit the printed file → `commit <id>`. A rune
-you never committed is only a file, so `runes delete <id>` discards it outright —
-no `--force`, no trace in the log. Skip the editing step with
-`runes new "My first issue" --commit`.
-
-Want to write a description right away? Open it in your editor (this commits, since
-the content is already there):
+Create your first rune, writing the description in your editor:
 
 ```bash
 runes new "My first issue" -e
 ```
 
-Or pipe content in:
+You get back an ID like `myproject-a3x`, and saving records the rune. Or pipe the
+content in:
 
 ```bash
 echo "Some details" | runes new "My first issue" -f -
 ```
+
+Without `-e`/`-f`/`--commit`, `runes new` prints the ID and the absolute path of
+the markdown file it created and leaves it a draft — the flow AI agents use, since
+they can write the file directly:
+
+```bash
+runes new "My first issue"
+$EDITOR /path/from/the/output.md
+runes diff myproject-a3x     # what is pending
+runes commit myproject-a3x   # record just this rune
+```
+
+A rune you never committed is only a file, so `runes delete <id>` discards it
+outright — no `--force`, no trace in the log.
+
+`runes quickstart` prints a guide to everything below, generated from the build
+you have and describing this machine's stores and schema. It comes in a human
+variant and an agent variant (`--human` / `--agent`; an agent in the environment
+selects the agent one) — `runes init` installs the agent variant as a skill for
+Claude Code and friends.
 
 Scripts can skip the text output entirely — `runes new "..." --json` prints
 `{"id": ..., "path": <absolute>, "committed": <bool>}`.

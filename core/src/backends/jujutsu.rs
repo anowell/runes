@@ -158,12 +158,30 @@ pub(super) fn jj_sdk_status(store: &Store) -> Result<String> {
     }
 
     // List remotes
-    let remotes = get_all_remote_names(repo.store()).unwrap_or_default();
-    for remote in &remotes {
-        let name: &str = remote.as_ref();
+    for name in jj_sdk_remotes(store)? {
         lines.push(format!("remote \"{name}\""));
     }
     Ok(lines.join("\n") + "\n")
+}
+
+pub(super) fn jj_sdk_remotes(store: &Store) -> Result<Vec<String>> {
+    let config = StackedConfig::with_defaults();
+    let settings = UserSettings::from_config(config).map_err(|e| Error::new(e.to_string()))?;
+    let store_factories = StoreFactories::default();
+    let wc_factories = default_working_copy_factories();
+    let repo = Workspace::load(&settings, &store.path, &store_factories, &wc_factories)
+        .map_err(|e| Error::new(format!("jj-lib workspace load failed: {e}")))?
+        .repo_loader()
+        .load_at_head()
+        .map_err(|e| Error::new(format!("jj-lib repo load failed: {e}")))?;
+    Ok(get_all_remote_names(repo.store())
+        .unwrap_or_default()
+        .iter()
+        .map(|remote| {
+            let name: &str = remote.as_ref();
+            name.to_string()
+        })
+        .collect())
 }
 
 pub(super) fn jj_sdk_log(store: &Store, limit: usize) -> Result<String> {

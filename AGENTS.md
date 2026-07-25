@@ -7,7 +7,10 @@ This repo *is* the `runes` CLI. It also tracks its own work with runes, in the
 
 Run `runes quickstart` — it is generated from the live build, so it always
 describes the current commands, states, and views, plus this machine's stores
-and paths. `runes init` installs the same guide as an agent skill
+and paths. It comes in two variants: the agent guide (path + `commit <id>`
+flow, `--json` contracts) and the human guide (`$EDITOR`-driven). A detected
+agent gets the agent one, so you will; `--human` / `--agent` force it either
+way. `runes init` installs the agent guide as a skill
 (`~/.claude/skills/runes/SKILL.md`, `~/.agents/skills/runes/SKILL.md`), minus
 anything machine-specific: those files are global, so their text depends only
 on the binary. Every `runes init` refreshes them; a hand-edited skill is left
@@ -23,8 +26,10 @@ record just that rune.
   `cargo clippy --fix` then `cargo fmt`.
 - `cli/src/main.rs` holds the commands; `core/` holds the model, schema, cache,
   and the `jj` and `pijul` backends.
-- Quickstart text is the installed skill, so keep it accurate and terse, and
-  keep environment-dependent lines behind `QuickstartMode::Live`.
+- Quickstart text is the installed skill, so keep it accurate and terse. Keep
+  environment-dependent lines behind `QuickstartMode.live`, and audience-
+  specific ones behind its `audience` (editor-driven advice is human-only,
+  `--json` and doc paths lead in the agent variant).
 
 ## Docs
 

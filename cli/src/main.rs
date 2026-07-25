@@ -71,7 +71,17 @@ enum CliCommand {
     /// Add a comment to a rune doc
     Comment(CommentArgs),
     /// Show a quickstart guide for using runes
-    Quickstart,
+    Quickstart(QuickstartArgs),
+}
+
+#[derive(Debug, Parser)]
+struct QuickstartArgs {
+    /// Write the guide for an AI agent (the default when one is detected)
+    #[arg(long)]
+    agent: bool,
+    /// Write the guide for a person at a terminal (the default otherwise)
+    #[arg(long, conflicts_with = "agent")]
+    human: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -565,7 +575,7 @@ fn handle_command(command: CliCommand) -> Result<()> {
         CliCommand::Config(config_cmd) => run_config(config_cmd),
         CliCommand::Init(args) => run_init(args),
         CliCommand::Comment(args) => run_comment(args),
-        CliCommand::Quickstart => run_quickstart(),
+        CliCommand::Quickstart(args) => run_quickstart(args),
     }
 }
 fn home_dir() -> Result<PathBuf> {
@@ -4858,7 +4868,13 @@ const SKILL_DESCRIPTION: &str = "Track tasks and issues as VCS-backed markdown d
 
 fn skill_document() -> Result<String> {
     let mut body = Vec::new();
-    write_quickstart(&mut body, QuickstartMode::Neutral)?;
+    write_quickstart(
+        &mut body,
+        QuickstartMode {
+            audience: Audience::Agent,
+            live: false,
+        },
+    )?;
     let body = String::from_utf8(body).map_err(|e| Error::new(e.to_string()))?;
     Ok(format!(
         "---\nname: \"Runes task tracking\"\ndescription: \"{SKILL_DESCRIPTION}\"\n---\n\n{body}"
@@ -4911,27 +4927,107 @@ fn write_skill(path: &Path, document: &str, force: bool) -> Result<()> {
     Ok(())
 }
 
-/// Which flavor of the guide to render.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum QuickstartMode {
-    /// `runes quickstart`: describes this machine - its store, paths and schema.
-    Live,
-    /// The installed agent skill. It lives in one machine-global file shared by
-    /// every repo, so it must depend on nothing but the binary: no paths, no
-    /// config, no "already initialized". That also keeps the leave-a-differing-
-    /// skill-alone check meaningful - it only fires on real hand edits.
-    Neutral,
+/// Who the guide is for: humans work through `$EDITOR`, agents patch the doc
+/// file they were given and commit it by id.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Audience {
+    Human,
+    Agent,
 }
 
-fn run_quickstart() -> Result<()> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct QuickstartMode {
+    audience: Audience,
+    /// Live text may describe this machine. The installed skill is one
+    /// machine-global file, so it must depend on nothing but the binary -
+    /// otherwise a later init reports a hand edit that never happened.
+    live: bool,
+}
+
+fn run_quickstart(args: QuickstartArgs) -> Result<()> {
     let stdout = io::stdout();
-    write_quickstart(&mut stdout.lock(), QuickstartMode::Live)
+    let mode = QuickstartMode {
+        audience: quickstart_audience(&args, &system_env),
+        live: true,
+    };
+    write_quickstart(&mut stdout.lock(), mode)
+}
+
+/// Flag, then a detected agent, then human. Deliberately not isatty: agents
+/// often run under a PTY and a human piping to a pager has none, so it
+/// misclassifies both ways.
+fn quickstart_audience(args: &QuickstartArgs, env: EnvLookup) -> Audience {
+    if args.agent {
+        return Audience::Agent;
+    }
+    if args.human {
+        return Audience::Human;
+    }
+    if detect_agent(env).is_some() {
+        Audience::Agent
+    } else {
+        Audience::Human
+    }
+}
+
+fn backend_label(kind: &BackendKind) -> &'static str {
+    match kind {
+        BackendKind::Pijul => "pijul",
+        BackendKind::Jj => "jj",
+    }
+}
+
+/// The human guide opens with what is set up and what is not, rather than a
+/// wall of paths: global config, then the store this repo writes to.
+fn write_init_status(
+    out: &mut impl io::Write,
+    has_local: bool,
+    active_store: Option<&Store>,
+) -> Result<()> {
+    const OK: &str = "\u{2713}";
+    const NO: &str = "\u{2717}";
+
+    writeln!(out, "  {OK} runes is initialized globally")?;
+    match (has_local, active_store) {
+        (true, Some(store)) => {
+            writeln!(
+                out,
+                "  {OK} repo is configured to use store \"{}\" (backend: {})",
+                store.name,
+                backend_label(&store.backend)
+            )?;
+            writeln!(out, "      {OK} local:  {}", store.path.display())?;
+            // Remote listing is best-effort: a store that cannot be opened is
+            // still worth reporting as "no remote" rather than failing the guide.
+            let remotes = backend::remotes(store).unwrap_or_default();
+            if remotes.is_empty() {
+                writeln!(out, "      {NO} remote: not configured")?;
+            } else {
+                writeln!(out, "      {OK} remote: {}", remotes.join(", "))?;
+            }
+        }
+        (true, None) => {
+            writeln!(
+                out,
+                "  {NO} repo names a store that is not set up - run `runes init` here"
+            )?;
+        }
+        (false, _) => {
+            writeln!(
+                out,
+                "  {NO} repo is not configured - run `runes init` here to create a local runes.kdl"
+            )?;
+        }
+    }
+    writeln!(out)?;
+    Ok(())
 }
 
 /// Shared by `runes quickstart` and the skill `runes init` installs, so the
 /// installed skill cannot drift from the live guide.
 fn write_quickstart(out: &mut impl io::Write, mode: QuickstartMode) -> Result<()> {
-    let live = mode == QuickstartMode::Live;
+    let live = mode.live;
+    let for_agent = mode.audience == Audience::Agent;
 
     let (all_stores, user_cfg) = if live {
         load_context()
@@ -4987,92 +5083,26 @@ fn write_quickstart(out: &mut impl io::Write, mode: QuickstartMode) -> Result<()
                 "    runes init --project myapp     # non-interactive with project prefix"
             )?;
             writeln!(out)?;
-        } else if !has_local {
-            writeln!(
-                out,
-                "runes is initialized globally. Run `runes init` in a repo to create a"
-            )?;
-            writeln!(out, "local runes.kdl config for project-specific settings.")?;
-            writeln!(out)?;
         } else {
-            writeln!(out, "runes is already initialized.")?;
-            writeln!(out)?;
+            write_init_status(out, has_local, active_store)?;
         }
     }
 
-    // -- Paths --
-    if let Some(store) = active_store {
-        writeln!(out, "PATHS")?;
-        writeln!(out, "=====")?;
-        writeln!(out)?;
-        writeln!(
-            out,
-            "  Store \"{}\" (backend: {})",
-            store.name,
-            match store.backend {
-                BackendKind::Pijul => "pijul",
-                BackendKind::Jj => "jj",
-            }
-        )?;
-        writeln!(out, "    {}", store.path.display())?;
-        if let Some(proj) = default_project {
-            writeln!(out)?;
-            writeln!(out, "  Default project: {}", proj)?;
-            writeln!(out, "    {}", store.path.join(proj).display())?;
-        }
-        writeln!(out)?;
-        writeln!(
-            out,
-            "  Rune docs are plain markdown files with KDL frontmatter. You can edit"
-        )?;
-        writeln!(
-            out,
-            "  them directly in your editor or file manager. Direct edits are tracked"
-        )?;
-        writeln!(out, "  as uncommitted changes until you run:")?;
-        writeln!(out)?;
-        writeln!(out, "    runes commit <id>        # just that rune")?;
-        writeln!(out, "    runes commit [-m <msg>]  # everything pending")?;
-        writeln!(out)?;
-    } else if !live {
-        // Same ground, minus this machine: say how to look the paths up.
+    // -- Rune docs -- (neutral only: with a live config the status above already
+    // names the store, and the commands below never need a path spelled out.)
+    if !live {
         writeln!(out, "RUNE DOCS")?;
         writeln!(out, "=========")?;
         writeln!(out)?;
         writeln!(
             out,
-            "  Rune docs are plain markdown files with KDL frontmatter, kept in a store"
-        )?;
-        writeln!(out, "  outside the repo. To find them:")?;
-        writeln!(out)?;
-        writeln!(
-            out,
-            "    runes store list            # configured stores and where they live"
+            "  Rune docs are markdown files kept in a store outside the repo."
         )?;
         writeln!(
             out,
-            "    runes show <id> --json      # store name + the doc path within it"
+            "  `runes quickstart` reports this machine's store and schema, and"
         )?;
-        writeln!(
-            out,
-            "    runes new <title>           # prints the absolute path of the new doc"
-        )?;
-        writeln!(
-            out,
-            "    runes quickstart            # this machine's stores, paths and schema"
-        )?;
-        writeln!(out)?;
-        writeln!(
-            out,
-            "  You can edit those files directly in your editor or file manager. Direct"
-        )?;
-        writeln!(
-            out,
-            "  edits are tracked as uncommitted changes until you run:"
-        )?;
-        writeln!(out)?;
-        writeln!(out, "    runes commit <id>        # just that rune")?;
-        writeln!(out, "    runes commit [-m <msg>]  # everything pending")?;
+        writeln!(out, "  `runes show <id> --json` gives the path to one doc.")?;
         writeln!(out)?;
     }
 
@@ -5080,59 +5110,65 @@ fn write_quickstart(out: &mut impl io::Write, mode: QuickstartMode) -> Result<()
     writeln!(out, "CREATING RUNES")?;
     writeln!(out, "==============")?;
     writeln!(out)?;
-    writeln!(
-        out,
-        "  The canonical flow is: new -> edit the printed file -> commit <id>."
-    )?;
-    writeln!(
-        out,
-        "  `runes new` prints the id and the absolute path of the doc it created,"
-    )?;
-    writeln!(
-        out,
-        "  and leaves it uncommitted so you can fill it in before recording it:"
-    )?;
-    writeln!(out)?;
-    writeln!(
-        out,
-        "    runes new \"Fix login bug\"       # prints id + path, nothing committed yet"
-    )?;
-    writeln!(
-        out,
-        "    $EDITOR <the printed path>     # write the description"
-    )?;
-    writeln!(
-        out,
-        "    runes diff <id>                # review what is pending"
-    )?;
-    writeln!(out, "    runes commit <id>              # record it")?;
-    writeln!(
-        out,
-        "    runes delete <id>              # discard it (no --force until committed)"
-    )?;
-    writeln!(out)?;
-    writeln!(
-        out,
-        "  Providing the content up front commits it right away instead:"
-    )?;
-    writeln!(out)?;
-    writeln!(
-        out,
-        "    runes new \"Add auth\" --kind bug --commit       # skip the editing step"
-    )?;
-    writeln!(
-        out,
-        "    runes new \"Write tests\" -e                    # open in editor, then commit"
-    )?;
-    writeln!(
-        out,
-        "    runes new \"Fix flake\" -f notes.md             # body (or full doc) from a file"
-    )?;
-    writeln!(
-        out,
-        "    runes new \"Fix flake\" -f notes.md --no-commit # ...but leave it uncommitted"
-    )?;
-    writeln!(out, "    runes new \"v2.0 release\" --kind milestone")?;
+    if for_agent {
+        writeln!(
+            out,
+            "  Use `runes new` - it allocates the id and applies the project's current"
+        )?;
+        writeln!(out, "  template. Never create the doc file yourself.")?;
+        writeln!(out)?;
+        writeln!(out, "  1) Create a draft, fill it in, commit it:")?;
+        writeln!(out)?;
+        writeln!(out, "       runes new \"Fix login bug\" --kind bug")?;
+        writeln!(
+            out,
+            "       # edit the file at the path `runes new` printed"
+        )?;
+        writeln!(out, "       runes commit <id>")?;
+        writeln!(out)?;
+        writeln!(out, "  2) Create and commit a rune with no description:")?;
+        writeln!(out)?;
+        writeln!(
+            out,
+            "       runes new \"v2.0 release\" --kind milestone --commit"
+        )?;
+        writeln!(out)?;
+        writeln!(
+            out,
+            "  3) Create a rune from an existing markdown file (auto-commits):"
+        )?;
+        writeln!(out)?;
+        writeln!(
+            out,
+            "       runes new \"Fix flake\" -f notes.md   # --no-commit leaves it uncommitted"
+        )?;
+        writeln!(out)?;
+        writeln!(
+            out,
+            "  Also takes --status, --assignee, --label, --dep, --milestone, --parent."
+        )?;
+        writeln!(out)?;
+        writeln!(
+            out,
+            "  stdout carries the id and the absolute path; `--json` gives them as"
+        )?;
+        writeln!(out, "  {{id, path, committed}}.")?;
+    } else {
+        writeln!(
+            out,
+            "  runes new \"Add auth\"                       # create an empty rune"
+        )?;
+        writeln!(
+            out,
+            "  runes new \"Add auth\" -e                    # draft it in $EDITOR"
+        )?;
+        writeln!(out, "  runes new \"Fix login bug\" --kind bug")?;
+        writeln!(out, "  runes new \"v2.0 release\" --kind milestone")?;
+        writeln!(
+            out,
+            "  runes new \"Fix flake\" -f notes.md          # create it from another markdown file"
+        )?;
+    }
     writeln!(out)?;
 
     // -- Viewing runes --
@@ -5146,7 +5182,7 @@ fn write_quickstart(out: &mut impl io::Write, mode: QuickstartMode) -> Result<()
     writeln!(out, "  runes list                    # same as above")?;
     writeln!(
         out,
-        "  runes list --status wip       # filter by state (matches wip:review too)"
+        "  runes list --status wip       # filter by status (matches wip:review too)"
     )?;
     writeln!(out, "  runes list --kind bug         # filter by kind")?;
     writeln!(out, "  runes show <id>               # show full rune doc")?;
@@ -5174,14 +5210,34 @@ fn write_quickstart(out: &mut impl io::Write, mode: QuickstartMode) -> Result<()
         out,
         "    runes list --blocked          # waiting on an unresolved dep"
     )?;
-    writeln!(
-        out,
-        "    runes list --blocked-by <id>  # runes waiting on <id>"
-    )?;
-    writeln!(
-        out,
-        "    runes list --blocks <id>      # runes <id> is waiting on"
-    )?;
+    if for_agent {
+        writeln!(
+            out,
+            "    runes list --blocked-by <id>  # runes waiting on <id>"
+        )?;
+        writeln!(
+            out,
+            "    runes list --blocks <id>      # runes <id> is waiting on"
+        )?;
+        writeln!(out)?;
+        writeln!(out, "  Parse the output with --json:")?;
+        writeln!(
+            out,
+            "    runes list --json             # array of rune summaries"
+        )?;
+        writeln!(
+            out,
+            "    runes search <term> --json    # array of matching runes"
+        )?;
+        writeln!(
+            out,
+            "    runes show <id> --json        # full rune, incl. store and doc path"
+        )?;
+        writeln!(
+            out,
+            "    runes log --json              # array of log entries"
+        )?;
+    }
     if !user_cfg.queries.is_empty() {
         let mut query_names: Vec<&str> = user_cfg.queries.keys().map(String::as_str).collect();
         query_names.sort();
@@ -5202,9 +5258,22 @@ fn write_quickstart(out: &mut impl io::Write, mode: QuickstartMode) -> Result<()
     writeln!(out, "UPDATING RUNES")?;
     writeln!(out, "==============")?;
     writeln!(out)?;
+    if !for_agent {
+        writeln!(
+            out,
+            "  runes edit <id>                            # open the rune in $EDITOR"
+        )?;
+        writeln!(
+            out,
+            "  runes comment <id>                         # write a comment in $EDITOR"
+        )?;
+        writeln!(out)?;
+        writeln!(out, "  Or change one field without leaving the shell:")?;
+        writeln!(out)?;
+    }
     writeln!(
         out,
-        "  runes edit <id> --status wip:review        # change state"
+        "  runes edit <id> --status wip:review        # change status"
     )?;
     writeln!(
         out,
@@ -5238,21 +5307,57 @@ fn write_quickstart(out: &mut impl io::Write, mode: QuickstartMode) -> Result<()
         out,
         "  runes edit <id> --remove-dep <id2>         # drop that dependency"
     )?;
-    writeln!(
-        out,
-        "  runes edit <id> -e                         # open in editor"
-    )?;
-    writeln!(
-        out,
-        "  runes comment <id> -m \"Looks good\"         # add a comment"
-    )?;
+    if for_agent {
+        writeln!(
+            out,
+            "  runes comment <id> -m \"Looks good\"         # append under ## Comments"
+        )?;
+        writeln!(
+            out,
+            "  runes edit <id> -f doc.md                  # body (or full doc) from a file"
+        )?;
+        writeln!(out)?;
+        writeln!(
+            out,
+            "  Each of these commits on its own; --no-commit defers to `runes commit <id>`."
+        )?;
+        writeln!(
+            out,
+            "  Patching the file directly is equivalent: `runes diff <id>` to review,"
+        )?;
+        writeln!(out, "  `runes commit <id>` to record just that rune.")?;
+    } else {
+        writeln!(
+            out,
+            "  runes comment <id> -m \"Looks good\"         # comment without the editor"
+        )?;
+        writeln!(out)?;
+        writeln!(
+            out,
+            "  Each of these records the change as you go. If you edit a rune in the"
+        )?;
+        writeln!(
+            out,
+            "  store outside of runes, run `runes commit <id>` to record that change."
+        )?;
+    }
     writeln!(out)?;
-    writeln!(
-        out,
-        "  Or edit the markdown file directly, then `runes diff <id>` to review"
-    )?;
-    writeln!(out, "  and `runes commit <id>` to record just that rune.")?;
-    writeln!(out)?;
+
+    // -- Retiring runes -- (the agent guide covers both under OTHER COMMANDS)
+    if !for_agent {
+        writeln!(out, "DELETE / ARCHIVE")?;
+        writeln!(out, "================")?;
+        writeln!(out)?;
+        writeln!(
+            out,
+            "  runes archive <id>                         # keep it, out of the way"
+        )?;
+        writeln!(
+            out,
+            "  runes delete <id>                          # remove it"
+        )?;
+        writeln!(out)?;
+    }
 
     // -- Schema info --
     {
@@ -5262,7 +5367,7 @@ fn write_quickstart(out: &mut impl io::Write, mode: QuickstartMode) -> Result<()
 
         // Neutral mode has no config to read, so this is the built-in default.
         let states = user_cfg.state_config().unwrap_or_default();
-        writeln!(out, "  States: {}", state::CORE_STATES.join(", "))?;
+        writeln!(out, "  Status:")?;
         for core in state::CORE_STATES {
             writeln!(out, "    {}", states.allowed_display(core))?;
         }
@@ -5271,7 +5376,7 @@ fn write_quickstart(out: &mut impl io::Write, mode: QuickstartMode) -> Result<()
         if !live {
             writeln!(
                 out,
-                "  Substates, kinds and custom fields are per-project: run `runes quickstart`"
+                "  Statuses, kinds and custom fields are per-project: run `runes quickstart`"
             )?;
             writeln!(out, "  for the schema in effect here.")?;
             writeln!(out)?;
@@ -5324,68 +5429,64 @@ fn write_quickstart(out: &mut impl io::Write, mode: QuickstartMode) -> Result<()
             }
         }
 
-        writeln!(out, "  Default rune template is markdown with \"## Description\" and \"## Acceptance\" sections.")?;
+        // Where to change what a new rune starts out as, rather than what the
+        // built-in template happens to contain today.
+        match active_store {
+            Some(store) => {
+                let kinds_dir = match default_project {
+                    Some(proj) => store.path.join(proj).join(".kinds"),
+                    None => store.path.join(".kinds"),
+                };
+                writeln!(out, "  Rune templates: {}/<kind>.md", kinds_dir.display())?;
+            }
+            None => {
+                writeln!(
+                    out,
+                    "  Rune templates: <project>/.kinds/<kind>.md in the store"
+                )?;
+            }
+        }
         writeln!(out)?;
     }
 
-    // -- Other commands --
-    writeln!(out, "OTHER COMMANDS")?;
-    writeln!(out, "==============")?;
-    writeln!(out)?;
-    writeln!(
-        out,
-        "  runes log                     # change history for the project"
-    )?;
-    writeln!(
-        out,
-        "  runes log <id>                # change history for a specific rune"
-    )?;
-    writeln!(
-        out,
-        "  runes diff <id>               # show uncommitted changes to a rune"
-    )?;
-    writeln!(out, "  runes archive <id>            # archive a rune")?;
-    writeln!(out, "  runes delete <id>             # delete a rune")?;
-    writeln!(
-        out,
-        "  runes move <id> --project p   # move rune to another project"
-    )?;
-    writeln!(
-        out,
-        "  runes restore <id> --revision r  # restore to a previous revision"
-    )?;
-    writeln!(
-        out,
-        "  runes sync                    # sync store with backend"
-    )?;
-    writeln!(out)?;
-
-    // -- Agent integration --
-    writeln!(out, "AGENT INTEGRATION")?;
-    writeln!(out, "=================")?;
-    writeln!(out)?;
-    writeln!(
-        out,
-        "  The following commands support --json for programmatic parsing:"
-    )?;
-    writeln!(out)?;
-    writeln!(
-        out,
-        "    runes list --json           # JSON array of rune summaries"
-    )?;
-    writeln!(
-        out,
-        "    runes search <term> --json  # JSON array of matching runes"
-    )?;
-    writeln!(
-        out,
-        "    runes show <id> --json      # JSON object with full rune details"
-    )?;
-    writeln!(
-        out,
-        "    runes log --json            # JSON array of log entries"
-    )?;
-    writeln!(out)?;
+    // -- Other commands -- (agents only: the human guide stops at getting
+    // going, and `runes --help` lists the rest)
+    if for_agent {
+        writeln!(out, "OTHER COMMANDS")?;
+        writeln!(out, "==============")?;
+        writeln!(out)?;
+        writeln!(
+            out,
+            "  runes log                     # change history for the project"
+        )?;
+        writeln!(
+            out,
+            "  runes log <id>                # change history for a specific rune"
+        )?;
+        writeln!(
+            out,
+            "  runes diff <id>               # show uncommitted changes to a rune"
+        )?;
+        writeln!(
+            out,
+            "  runes commit [-m <msg>]       # commit everything uncommitted"
+        )?;
+        writeln!(out, "  runes archive <id>            # archive a rune")?;
+        writeln!(out, "  runes delete <id>             # delete a rune")?;
+        writeln!(
+            out,
+            "  runes move <id> --project p   # move rune to another project"
+        )?;
+        writeln!(
+            out,
+            "  runes restore <id> --revision r  # restore to a previous revision"
+        )?;
+        writeln!(
+            out,
+            "  runes sync                    # sync store with backend"
+        )?;
+        writeln!(out)?;
+    }
 
     Ok(())
 }
@@ -5394,8 +5495,8 @@ fn write_quickstart(out: &mut impl io::Write, mode: QuickstartMode) -> Result<()
 mod tests {
     use super::{
         collect_matching_entries, detect_agent, format_log_entries, match_log_entries,
-        migrate_status_line, resolve_commit_author_env, strip_show_injections, truncate_to_width,
-        LogEntry, UserConfig,
+        migrate_status_line, quickstart_audience, resolve_commit_author_env, strip_show_injections,
+        truncate_to_width, Audience, LogEntry, QuickstartArgs, UserConfig,
     };
     use unicode_width::UnicodeWidthStr;
 
@@ -5407,6 +5508,36 @@ mod tests {
                 .find(|(k, _)| *k == key)
                 .map(|(_, v)| v.to_string())
         }
+    }
+
+    const NO_FLAG: QuickstartArgs = QuickstartArgs {
+        agent: false,
+        human: false,
+    };
+    const AGENT_FLAG: QuickstartArgs = QuickstartArgs {
+        agent: true,
+        human: false,
+    };
+    const HUMAN_FLAG: QuickstartArgs = QuickstartArgs {
+        agent: false,
+        human: true,
+    };
+
+    #[test]
+    fn quickstart_audience_follows_the_flag_then_the_environment() {
+        let agent_env = env_of(&[("CLAUDECODE", "1")]);
+        let plain_env = env_of(&[("TERM", "xterm-256color")]);
+
+        assert_eq!(quickstart_audience(&NO_FLAG, &agent_env), Audience::Agent);
+        assert_eq!(quickstart_audience(&NO_FLAG, &plain_env), Audience::Human);
+        assert_eq!(
+            quickstart_audience(&HUMAN_FLAG, &agent_env),
+            Audience::Human
+        );
+        assert_eq!(
+            quickstart_audience(&AGENT_FLAG, &plain_env),
+            Audience::Agent
+        );
     }
 
     fn cfg_with_email(email: Option<&str>) -> UserConfig {

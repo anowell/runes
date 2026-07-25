@@ -125,7 +125,7 @@ impl StateConfig {
                 .chain(substates.iter().map(|value| format!("{core}:{value}")))
                 .collect::<Vec<_>>()
                 .join(", "),
-            None => format!("{core}, {core}:<substate>"),
+            None => format!("{core}, {core}:*"),
         }
     }
 }
