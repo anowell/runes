@@ -215,14 +215,16 @@ See [docs/configuration.md](docs/configuration.md) for the full configuration re
 
 ### Stores
 
-A store is a VCS-backed repository that holds your runes. Runes supports `jj` (Jujutsu) and `pijul` backends.
+A store is a VCS-backed repository that holds your runes. Runes supports `jj` (Jujutsu) and `pijul` backends, and the backend's binary has to be installed.
+
+`runes init` creates the first store for you, so `store init` is only needed for a second one.
 
 ```bash
-# List configured stores
+# List configured stores (* marks the default)
 runes store list
 
-# Add a new store
-runes store init mystore --backend jj
+# Add a new store (--backend defaults to jj, --path to ~/.runes/stores/<name>)
+runes store init mystore --backend pijul
 
 # Rebuild the query cache and migrate legacy statuses
 runes store doctor mystore

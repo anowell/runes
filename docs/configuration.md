@@ -2,7 +2,9 @@
 
 Runes uses KDL config files named `runes.kdl`. Configuration is loaded by searching the current directory, then walking ancestors up to `~`, and finally checking `~/.runes/config.kdl`. Values from closer files override those from further ones.
 
-`runes init` creates both global and local configs interactively.
+`runes init` creates both global and local configs interactively, and initializes a store when the machine has none. Non-interactively it needs `--project` and an identity it can read: an existing `user.email` in the global config, or `RUNES_USER`.
+
+`runes init --help` lists the stores on this machine and marks the default.
 
 ## Reading and writing config
 

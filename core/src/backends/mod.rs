@@ -75,13 +75,42 @@ impl CliBackend {
     }
 
     fn run_checked(cmd: &mut Command, context: &str) -> Result<()> {
-        let output = cmd.output()?;
+        let program = cmd.get_program().to_string_lossy().to_string();
+        let output = cmd.output().map_err(|e| spawn_error(&program, e))?;
         if !output.status.success() {
             let stderr = String::from_utf8(output.stderr).unwrap_or_else(|_| String::new());
             return Err(Error::new(format!("{context} failed: {}", stderr.trim())));
         }
         Ok(())
     }
+}
+
+fn spawn_error(program: &str, err: std::io::Error) -> Error {
+    if err.kind() == std::io::ErrorKind::NotFound {
+        return Error::new(missing_backend_message(program));
+    }
+    Error::new(format!("could not run `{program}`: {err}"))
+}
+
+fn missing_backend_message(program: &str) -> String {
+    let install = match program {
+        "jj" => " (see https://jj-vcs.github.io/jj/latest/install-and-setup/)",
+        "pijul" => " (see https://pijul.org/manual/introduction.html#installing)",
+        _ => "",
+    };
+    format!("`{program}` was not found on PATH. Install it to use the {program} backend{install}.")
+}
+
+pub fn backend_available(backend: &BackendKind) -> bool {
+    let program = backend.as_str();
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| dir.join(program).is_file())
+}
+
+pub fn missing_backend_error(backend: &BackendKind) -> Error {
+    Error::new(missing_backend_message(backend.as_str()))
 }
 
 impl BackendAdapter for CliBackend {
@@ -93,26 +122,29 @@ impl BackendAdapter for CliBackend {
     }
 
     fn init_store(&self, path: &Path) -> Result<()> {
+        let dot = match self.kind {
+            BackendKind::Jj => ".jj",
+            BackendKind::Pijul => ".pijul",
+        };
+        if path.join(dot).exists() {
+            return Ok(());
+        }
+        // Probe before create_dir_all, or a missing binary leaves an empty store behind.
+        if !backend_available(&self.kind) {
+            return Err(missing_backend_error(&self.kind));
+        }
         std::fs::create_dir_all(path)?;
         match self.kind {
-            BackendKind::Jj => {
-                if path.join(".jj").exists() {
-                    return Ok(());
-                }
-                Self::run_checked(
-                    Command::new("jj")
-                        .arg("git")
-                        .arg("init")
-                        .arg("--colocate")
-                        .arg(path),
-                    "jj git init --colocate",
-                )?;
-            }
+            BackendKind::Jj => Self::run_checked(
+                Command::new("jj")
+                    .arg("git")
+                    .arg("init")
+                    .arg("--colocate")
+                    .arg(path),
+                "jj git init --colocate",
+            )?,
             BackendKind::Pijul => {
-                if path.join(".pijul").exists() {
-                    return Ok(());
-                }
-                Self::run_checked(Command::new("pijul").arg("init").arg(path), "pijul init")?;
+                Self::run_checked(Command::new("pijul").arg("init").arg(path), "pijul init")?
             }
         }
         Ok(())

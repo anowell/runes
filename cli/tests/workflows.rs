@@ -141,7 +141,16 @@ fn initable_home(test_name: &str) -> (PathBuf, PathBuf) {
         &home,
         &["config", "set", "user.email", "test@runes.dev", "--global"],
     );
+    seed_store_fixture(&home, "proj");
     (home, work)
+}
+
+/// A store directory `detect_backend` accepts, so tests about what init writes
+/// never need the jj binary.
+fn seed_store_fixture(home: &Path, name: &str) {
+    let path = home.join(".runes").join("stores").join(name);
+    fs::create_dir_all(path.join(".jj")).expect("create store fixture");
+    runes_ok(home, &["config", "set", "defaults.store", name, "--global"]);
 }
 
 const SKILL_RELPATHS: [&str; 2] = [
@@ -396,6 +405,7 @@ fn init_outside_repo() {
         &home,
         &["config", "set", "user.email", "test@runes.dev", "--global"],
     );
+    seed_store_fixture(&home, "proj");
     let output = Command::new(env!("CARGO_BIN_EXE_runes"))
         .args(["init", "--project", "demo"])
         .current_dir(&work)
@@ -417,6 +427,194 @@ fn init_outside_repo() {
     assert!(
         local.contains("demo"),
         "project missing from config: {local}"
+    );
+}
+
+#[test]
+fn store_init_names_the_missing_backend() {
+    let home = unique_tmp_home("store-init-missing-backend");
+    // An empty PATH makes every backend binary missing, whatever the machine has.
+    let output = runes_output_with_env(&home, &[("PATH", "")], &["store", "init", "proj"]);
+
+    assert!(!output.status.success(), "store init should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("`jj` was not found on PATH"),
+        "the missing backend should be named: {stderr}"
+    );
+    assert!(
+        !home.join(".runes").join("stores").join("proj").exists(),
+        "a failed store init left a half-made store behind"
+    );
+}
+
+#[test]
+fn store_init_defaults_to_jj_and_records_the_store() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let home = unique_tmp_home("store-init-defaults");
+    // Off the default location, so only the config record can find it.
+    let path = home.join("elsewhere").join("store");
+    let path_s = path.to_string_lossy().to_string();
+
+    let stdout = runes_ok(&home, &["store", "init", "work", "--path", &path_s]);
+    assert!(
+        stdout.contains("jj store 'work'"),
+        "store init should report the backend it chose: {stdout}"
+    );
+
+    let listed = runes_ok(&home, &["store", "list"]);
+    assert!(
+        listed.contains("* work") && listed.contains(&path_s),
+        "a store outside ~/.runes/stores should still be listed: {listed}"
+    );
+    assert_eq!(
+        runes_ok(&home, &["config", "get", "store.work.path", "--global"]).trim(),
+        path_s,
+        "store init should record the path in the global config"
+    );
+}
+
+#[test]
+fn init_creates_the_first_store() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let home = unique_tmp_home("init-first-store");
+    let work = home.join("work");
+    fs::create_dir_all(&work).expect("create work dir");
+    runes_ok(
+        &home,
+        &["config", "set", "user.email", "test@runes.dev", "--global"],
+    );
+
+    let stdout = runes_in(&home, &work, &["init", "--project", "demo", "--no-skill"]);
+    assert!(
+        stdout.contains("store 'proj'"),
+        "init should report the store it made: {stdout}"
+    );
+
+    let created = runes_in(&home, &work, &["new", "first task", "-m", "seed"]);
+    assert!(
+        rune_id(&created).starts_with("demo-"),
+        "unexpected rune id: {created}"
+    );
+}
+
+/// The cold start an agent hits: no global config, no store, no terminal.
+#[test]
+fn init_bootstraps_a_machine_with_no_config_at_all() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let home = unique_tmp_home("init-cold-machine");
+    let work = home.join("work");
+    fs::create_dir_all(&work).expect("create work dir");
+
+    let stdout = runes_in(&home, &work, &["init", "--project", "demo", "--no-skill"]);
+    assert!(
+        stdout.contains("Global config created") && stdout.contains("store 'proj'"),
+        "init should report both halves of the setup: {stdout}"
+    );
+
+    let created = runes_in(&home, &work, &["new", "cold start", "-m", "seed"]);
+    assert!(
+        rune_id(&created).starts_with("demo-"),
+        "unexpected rune id: {created}"
+    );
+}
+
+#[test]
+fn init_without_an_identity_says_how_to_set_one() {
+    let home = unique_tmp_home("init-no-identity");
+    let work = home.join("work");
+    fs::create_dir_all(&work).expect("create work dir");
+
+    let mut cmd = runes_cmd(&home);
+    cmd.env_remove("RUNES_USER");
+    let output = cmd
+        .args(["init", "--project", "demo"])
+        .current_dir(&work)
+        .output()
+        .expect("run runes command");
+
+    assert!(
+        !output.status.success(),
+        "init should fail with no identity"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("runes config set user.email"),
+        "the error should name the way out: {stderr}"
+    );
+}
+
+#[test]
+fn init_treats_an_unknown_store_as_a_typo() {
+    let (home, work) = initable_home("init-unknown-store");
+
+    let output = runes_in_output(
+        &home,
+        &work,
+        &["init", "--project", "prj:demo", "--no-skill"],
+    );
+    assert!(
+        !output.status.success(),
+        "init should reject a typo'd store"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Unknown store 'prj'")
+            && stderr.contains("runes store init prj")
+            && stderr.contains("default store 'proj'"),
+        "unhelpful message for an unknown store: {stderr}"
+    );
+    assert!(
+        !work.join("runes.kdl").exists(),
+        "a rejected init still wrote a local config"
+    );
+}
+
+#[test]
+fn init_pins_a_named_store_locally() {
+    let (home, work) = initable_home("init-named-store");
+    seed_store_fixture(&home, "other");
+    // seed_store_fixture points the default at the store it just made.
+    runes_ok(
+        &home,
+        &["config", "set", "defaults.store", "proj", "--global"],
+    );
+
+    runes_in(
+        &home,
+        &work,
+        &["init", "--project", "other:demo", "--no-skill"],
+    );
+
+    let local = fs::read_to_string(work.join("runes.kdl")).expect("local config created");
+    assert!(
+        local.contains("store other") && local.contains("project demo"),
+        "the named store should be pinned locally: {local}"
+    );
+}
+
+#[test]
+fn init_help_lists_the_stores() {
+    let (home, _work) = initable_home("init-help-stores");
+    seed_store_fixture(&home, "other");
+    runes_ok(
+        &home,
+        &["config", "set", "defaults.store", "proj", "--global"],
+    );
+
+    let help = runes_ok(&home, &["init", "--help"]);
+    assert!(
+        help.contains("* proj") && help.contains("other"),
+        "init --help should list the stores and mark the default: {help}"
     );
 }
 

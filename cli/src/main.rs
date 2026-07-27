@@ -1,7 +1,7 @@
 mod color;
 mod user_config;
 use atty::Stream;
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use pijul_interaction::{set_context, InteractiveContext};
 use runes_core::backend::{self, LogEntry};
 use runes_core::cache;
@@ -90,10 +90,10 @@ enum StoreCommand {
     Init {
         /// Store name
         name: String,
-        /// Backend type (e.g. pijul, jj)
+        /// Backend type: jj or pijul (default jj)
         #[arg(long)]
-        backend: String,
-        /// Path to the store directory
+        backend: Option<String>,
+        /// Path to the store directory (default ~/.runes/stores/<name>)
         #[arg(long)]
         path: Option<PathBuf>,
         /// Set as the default store
@@ -538,12 +538,26 @@ struct SyncArgs {
 fn main() {
     restore_default_sigpipe();
     set_context(InteractiveContext::Terminal);
-    let cli = Cli::parse();
+    let cli = parse_cli();
     let command = cli.command.unwrap_or(CliCommand::List(ListArgs::default()));
     if let Err(err) = handle_command(command) {
         eprintln!("error: {err}");
         std::process::exit(1);
     }
+}
+
+/// Parse argv, teaching `runes init --help` about this machine's stores.
+/// The listing costs a directory scan, so only a help run pays for it.
+fn parse_cli() -> Cli {
+    let mut command = Cli::command();
+    let wants_help = std::env::args().any(|arg| arg == "-h" || arg == "--help" || arg == "help");
+    if wants_help {
+        if let Some(text) = stores_help_text() {
+            command = command.mut_subcommand("init", |init| init.after_help(text));
+        }
+    }
+    let matches = command.get_matches();
+    Cli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit())
 }
 
 /// Rust ignores SIGPIPE, so writing past a closed pipe (`runes show <id> | head -3`)
@@ -587,6 +601,9 @@ fn home_dir() -> Result<PathBuf> {
 fn default_store_path(name: &str) -> Result<PathBuf> {
     Ok(home_dir()?.join(".runes").join("stores").join(name))
 }
+
+const DEFAULT_BACKEND: &str = "jj";
+const DEFAULT_STORE_NAME: &str = "proj";
 
 const DRAFT_MAX_AGE_DAYS: u64 = 30;
 
@@ -4459,7 +4476,7 @@ fn run_store(command: StoreCommand) -> Result<()> {
 }
 fn store_init(
     name: String,
-    backend_s: String,
+    backend_s: Option<String>,
     path: Option<PathBuf>,
     set_default: bool,
 ) -> Result<()> {
@@ -4468,20 +4485,39 @@ fn store_init(
     } else {
         default_store_path(&name)?
     };
-    let backend_kind = BackendKind::parse(&backend_s)?;
-    backend::init_store(&path, backend_kind.clone())?;
-    if set_default {
-        let global_path = user_config::global_config_path()?;
-        user_config::config_set(&global_path, "defaults.store", &name)?;
+    let backend_kind = BackendKind::parse(backend_s.as_deref().unwrap_or(DEFAULT_BACKEND))?;
+    create_store(&name, &backend_kind, &path, set_default)
+}
+
+/// Config records the store because discovery only scans `~/.runes/stores`,
+/// and `--path` can put one anywhere.
+fn create_store(name: &str, backend: &BackendKind, path: &Path, set_default: bool) -> Result<()> {
+    backend::init_store(path, backend.clone())?;
+    let global_path = user_config::global_config_path()?;
+    user_config::config_set(
+        &global_path,
+        &format!("store.{name}.backend"),
+        backend.as_str(),
+    )?;
+    user_config::config_set(
+        &global_path,
+        &format!("store.{name}.path"),
+        &path.display().to_string(),
+    )?;
+    let has_default = user_config::config_get(&global_path, "defaults.store")?.is_some();
+    if set_default || !has_default {
+        user_config::config_set(&global_path, "defaults.store", name)?;
     }
-    println!("Initialized store {name}");
+    println!(
+        "Initialized {} store '{name}' at {}",
+        backend.as_str(),
+        path.display()
+    );
     Ok(())
 }
 
 fn store_list() -> Result<()> {
-    let stores = discover_stores()?;
-    let cwd = std::env::current_dir().map_err(|e| Error::new(e.to_string()))?;
-    let user_cfg = UserConfig::load_from_dir(&cwd)?;
+    let (stores, user_cfg, _) = load_context()?;
     let default_store = user_cfg.default_store.as_deref();
     for store in &stores {
         let marker = if default_store == Some(store.name.as_str()) {
@@ -4501,12 +4537,10 @@ fn store_list() -> Result<()> {
 }
 
 fn store_info(name: Option<String>) -> Result<()> {
-    let stores = discover_stores()?;
+    let (stores, user_cfg, cwd) = load_context()?;
     let store = if let Some(name) = name {
         get_store(&stores, &name)?
     } else {
-        let cwd = std::env::current_dir().map_err(|e| Error::new(e.to_string()))?;
-        let user_cfg = UserConfig::load_from_dir(&cwd)?;
         resolve_store_with_context(&stores, &user_cfg, &cwd, None)?
     };
     println!("store \"{}\" {{", store.name);
@@ -4547,7 +4581,7 @@ fn rune_id_from_store_path(rel_path: &Path) -> Option<String> {
 }
 
 fn store_remove(name: String) -> Result<()> {
-    let stores = discover_stores()?;
+    let (stores, _, _) = load_context()?;
     let store = get_store(&stores, &name)?;
     eprintln!("To remove store '{name}', delete its directory:");
     eprintln!("  rm -rf {}", store.path.display());
@@ -4631,7 +4665,7 @@ fn store_doctor(store_name: String) -> Result<()> {
 }
 
 fn load_store(name: &str) -> Result<Store> {
-    let stores = discover_stores()?;
+    let (stores, _, _) = load_context()?;
     get_store(&stores, name)
 }
 
@@ -4725,108 +4759,57 @@ fn run_init(args: InitArgs) -> Result<()> {
         return Err(Error::new("--stealth only works in a git repo"));
     }
 
-    // Ensure global config exists
+    // Identity only; the store is settled below, so an existing config with no
+    // store still gets one.
     if !global_path.exists() {
-        if !stdin_is_tty() {
-            return Err(Error::new(
-                "Global config not found. Run `runes init` interactively to create it.",
-            ));
+        if stdin_is_tty() {
+            println!("Creating global config at {}", global_path.display());
         }
-        println!("Creating global config at {}", global_path.display());
-
-        // Prompt for default store name
-        eprint!("Default store name [proj]: ");
-        let mut store_name = String::new();
-        io::stdin()
-            .read_line(&mut store_name)
-            .map_err(|e| Error::new(e.to_string()))?;
-        let store_name = store_name.trim();
-        let store_name = if store_name.is_empty() {
-            "proj"
-        } else {
-            store_name
-        };
-
-        // Prompt for backend
-        eprint!("Backend (jj or pijul) [jj]: ");
-        let mut backend_input = String::new();
-        io::stdin()
-            .read_line(&mut backend_input)
-            .map_err(|e| Error::new(e.to_string()))?;
-        let backend_input = backend_input.trim();
-        let backend = if backend_input.is_empty() {
-            "jj"
-        } else {
-            backend_input
-        };
-        BackendKind::parse(backend)?;
-
-        // Prompt for user email
-        eprint!("User email: ");
-        let mut email = String::new();
-        io::stdin()
-            .read_line(&mut email)
-            .map_err(|e| Error::new(e.to_string()))?;
-        let email = email.trim().to_string();
-
-        // Create global config
+        let email = initial_identity_email()?;
         user_config::config_set(&global_path, "user.email", &email)?;
-        user_config::config_set(&global_path, "defaults.store", store_name)?;
-
-        let store_path = default_store_path(store_name)?;
-        user_config::config_set(
-            &global_path,
-            &format!("store.{store_name}.backend"),
-            backend,
-        )?;
-        user_config::config_set(
-            &global_path,
-            &format!("store.{store_name}.path"),
-            &store_path.display().to_string(),
-        )?;
-
         user_config::config_set(&global_path, "new.task.assignee", "self")?;
-
-        // Initialize the store
-        let backend_kind = BackendKind::parse(backend)?;
-        backend::init_store(&store_path, backend_kind)?;
-        user_config::config_set(&global_path, "defaults.store", store_name)?;
-        println!("Global config created.");
+        println!("Global config created at {}", global_path.display());
     }
 
-    // Create local config
-    if !local_path.exists() {
-        let project = if let Some(spec) = &args.project {
-            let (_store_hint, proj) = split_store_prefix(spec);
-            proj.to_string()
-        } else if stdin_is_tty() {
-            let default_name = root
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("myproject");
-            eprint!("Project prefix [{}]: ", default_name);
-            let mut input = String::new();
-            io::stdin()
-                .read_line(&mut input)
-                .map_err(|e| Error::new(e.to_string()))?;
-            let input = input.trim();
-            if input.is_empty() {
-                default_name.to_string()
-            } else {
-                input.to_string()
-            }
-        } else {
-            return Err(Error::new(
-                "Use --project to specify the project prefix non-interactively.",
-            ));
-        };
+    let (stores, user_cfg, _) = load_context()?;
 
-        // If project spec included a store, set that too
-        if let Some(spec) = &args.project {
-            let (store_hint, _) = split_store_prefix(spec);
-            if let Some(store) = store_hint {
-                user_config::config_set(&local_path, "defaults.store", &store)?;
-            }
+    let spec = if local_path.exists() {
+        None
+    } else if let Some(spec) = args.project.clone() {
+        Some(spec)
+    } else if stdin_is_tty() {
+        let dir_name = root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("myproject");
+        // Only offer the store prefix once there is a choice to make.
+        let default_spec = match user_cfg.default_store.as_deref() {
+            Some(store) if stores.len() > 1 => format!("{store}:{dir_name}"),
+            _ => dir_name.to_string(),
+        };
+        Some(prompt_line("Project prefix", &default_spec)?)
+    } else {
+        return Err(Error::new(
+            "Use --project to specify the project prefix non-interactively.",
+        ));
+    };
+    let (store_hint, project) = match &spec {
+        Some(spec) => {
+            let (store, project) = split_store_prefix(spec);
+            (store, Some(project.to_string()))
+        }
+        None => (None, None),
+    };
+
+    let store_name = ensure_store(&stores, &user_cfg, store_hint.as_deref())?;
+
+    if let Some(project) = project {
+        if project.is_empty() {
+            return Err(Error::new("Project prefix cannot be empty"));
+        }
+        // Unpinned repos follow the global default store as it changes.
+        if store_hint.is_some() {
+            user_config::config_set(&local_path, "defaults.store", &store_name)?;
         }
         user_config::config_set(&local_path, "defaults.project", &project)?;
 
@@ -4845,7 +4828,10 @@ fn run_init(args: InitArgs) -> Result<()> {
                 println!("Added runes.kdl to .git/info/exclude");
             }
         }
-        println!("Local config created at {}", local_path.display());
+        println!(
+            "Local config created at {} (store '{store_name}', project '{project}')",
+            local_path.display()
+        );
     } else {
         println!("Local config already exists at {}", local_path.display());
     }
@@ -4855,6 +4841,132 @@ fn run_init(args: InitArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Falls back to the environment so a non-interactive first run is not a dead end.
+fn initial_identity_email() -> Result<String> {
+    if stdin_is_tty() {
+        return prompt_required("User email");
+    }
+    match std::env::var("RUNES_USER") {
+        Ok(value) if !value.trim().is_empty() => Ok(parse_author_string(&value).1),
+        _ => Err(Error::new(
+            "No global config yet. Run `runes init` interactively, or set an identity first \
+             with `runes config set user.email <you@example.com> --global`.",
+        )),
+    }
+}
+
+/// The store `runes init` wires the repo to, created when this machine has none.
+/// A name matching no existing store is read as a typo: quietly making a second
+/// store is the worse guess.
+fn ensure_store(stores: &[Store], user_cfg: &UserConfig, hint: Option<&str>) -> Result<String> {
+    let wanted = hint.or(user_cfg.default_store.as_deref());
+    if let Some(name) = wanted {
+        if stores.iter().any(|s| s.name == name) {
+            return Ok(name.to_string());
+        }
+        if !stores.is_empty() {
+            let fallback = user_cfg
+                .default_store
+                .as_deref()
+                .filter(|d| stores.iter().any(|s| s.name == *d))
+                .unwrap_or(stores[0].name.as_str());
+            return Err(Error::new(if hint.is_some() {
+                format!(
+                    "Unknown store '{name}'. Run `runes store init {name}` to create it, \
+                     or use the default store '{fallback}'."
+                )
+            } else {
+                format!(
+                    "The default store '{name}' does not exist. Run `runes store init {name}` \
+                     to create it, or point at another with \
+                     `runes config set defaults.store <name> --global`."
+                )
+            }));
+        }
+    }
+
+    let interactive = stdin_is_tty();
+    if interactive {
+        println!("No store found; creating one.");
+    }
+    let name = match wanted {
+        Some(name) => name.to_string(),
+        None if interactive => prompt_line("Store name", DEFAULT_STORE_NAME)?,
+        None => DEFAULT_STORE_NAME.to_string(),
+    };
+    let backend = if interactive {
+        prompt_line("Backend (jj or pijul)", DEFAULT_BACKEND)?
+    } else {
+        DEFAULT_BACKEND.to_string()
+    };
+    create_store(
+        &name,
+        &BackendKind::parse(&backend)?,
+        &default_store_path(&name)?,
+        true,
+    )?;
+    Ok(name)
+}
+
+/// Ask on stderr and read one line, falling back to `default` on an empty answer.
+fn prompt_line(label: &str, default: &str) -> Result<String> {
+    eprint!("{label} [{default}]: ");
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| Error::new(e.to_string()))?;
+    let input = input.trim();
+    if input.is_empty() {
+        Ok(default.to_string())
+    } else {
+        Ok(input.to_string())
+    }
+}
+
+/// Keep asking until non-empty: a blank would be stored as an identity nothing
+/// can commit under.
+fn prompt_required(label: &str) -> Result<String> {
+    loop {
+        eprint!("{label}: ");
+        let mut input = String::new();
+        let read = io::stdin()
+            .read_line(&mut input)
+            .map_err(|e| Error::new(e.to_string()))?;
+        let trimmed = input.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+        if read == 0 {
+            return Err(Error::new(format!("{label} is required")));
+        }
+    }
+}
+
+/// This machine's stores, for `runes init --help`.
+fn stores_help_text() -> Option<String> {
+    let (stores, user_cfg, _) = load_context().ok()?;
+    if stores.is_empty() {
+        return Some("Stores:\n  none yet - init creates one".to_string());
+    }
+    let default = user_cfg.default_store.as_deref();
+    let width = stores.iter().map(|s| s.name.len()).max().unwrap_or(0);
+    let mut out = String::from("Stores (* = default):\n");
+    for store in &stores {
+        let marker = if default == Some(store.name.as_str()) {
+            '*'
+        } else {
+            ' '
+        };
+        out.push_str(&format!(
+            "  {marker} {:width$}  {:5}  {}\n",
+            store.name,
+            store.backend.as_str(),
+            store.path.display()
+        ));
+    }
+    Some(out.trim_end().to_string())
 }
 
 /// Skill locations relative to $HOME. Codex, Gemini and Cursor are left out:
@@ -5080,7 +5192,7 @@ fn write_quickstart(out: &mut impl io::Write, mode: QuickstartMode) -> Result<()
             )?;
             writeln!(
                 out,
-                "    runes init --project myapp     # non-interactive with project prefix"
+                "    runes init --project myapp     # non-interactive (needs RUNES_USER set)"
             )?;
             writeln!(out)?;
         } else {
