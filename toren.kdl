@@ -1,5 +1,6 @@
 setup {
     copy src="target"
+    share src=".git/info/exclude"
     share src="runes.kdl"
 }
 
