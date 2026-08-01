@@ -123,7 +123,7 @@ state "wip" {
 Set from the CLI with a comma-separated list:
 
 ```bash
-runes config set state.closed.substate "canceled,duplicate,wontfix"
+runes config set state.closed.substate "done,canceled,duplicate,wontfix"
 ```
 
 A core state with no `state` node accepts any substate (the default for `todo`).

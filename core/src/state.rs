@@ -1,6 +1,7 @@
 //! Rune states: the fixed core states `todo`, `wip` and `closed`, each taking an
 //! optional substate (`wip:review`, `closed:canceled`). Bare `closed` means
-//! completed. Core states are not configurable; substates are.
+//! completed, as does `closed:done`. Core states are not configurable;
+//! substates are.
 
 use crate::{Error, Result};
 use std::collections::HashMap;
@@ -61,7 +62,10 @@ impl Default for StateConfig {
     fn default() -> Self {
         let allowed = HashMap::from([
             (WIP.to_string(), owned(&["design", "impl", "review"])),
-            (CLOSED.to_string(), owned(&["canceled", "duplicate"])),
+            (
+                CLOSED.to_string(),
+                owned(&["done", "canceled", "duplicate"]),
+            ),
         ]);
         Self { allowed }
     }
@@ -147,6 +151,7 @@ mod tests {
     #[test]
     fn normalize_maps_legacy_names() {
         assert_eq!(normalize("done"), "closed");
+        assert_eq!(normalize("closed:done"), "closed:done");
         assert_eq!(normalize("in-progress"), "wip");
         assert_eq!(normalize(" wip:review "), "wip:review");
         assert_eq!(normalize("in-progress:review"), "wip:review");
@@ -156,7 +161,14 @@ mod tests {
     #[test]
     fn validate_accepts_core_states_and_default_substates() {
         let states = StateConfig::default();
-        for status in ["todo", "wip", "closed", "wip:review", "closed:canceled"] {
+        for status in [
+            "todo",
+            "wip",
+            "closed",
+            "wip:review",
+            "closed:done",
+            "closed:canceled",
+        ] {
             assert!(states.validate(status).is_ok(), "rejected {status}");
         }
         // todo takes any substate by default

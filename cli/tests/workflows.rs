@@ -3636,6 +3636,21 @@ fn closed_substates_are_terminal_and_filterable() {
         !other.contains(&blocker),
         "exact substate filter should not match another substate: {other}"
     );
+
+    runes_ok(
+        &home,
+        &[
+            "edit",
+            &format!("test:{blocked}"),
+            "--status",
+            "closed:done",
+        ],
+    );
+    let open = list(&[]);
+    assert!(
+        !open.contains(&blocked),
+        "closed:done should be terminal: {open}"
+    );
 }
 
 /// Test: `store doctor` migrates runes written with the old status vocabulary

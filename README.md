@@ -166,7 +166,7 @@ written as `state:substate`:
 |-------|---------|
 | `todo` | ready work |
 | `wip` | in progress — `wip:design`, `wip:impl`, `wip:review` |
-| `closed` | terminal; bare `closed` means completed, `closed:canceled` and `closed:duplicate` are the exceptions |
+| `closed` | terminal; bare `closed` and `closed:done` mean completed, `closed:canceled` and `closed:duplicate` are the exceptions |
 
 Filtering by a core state includes its substates (`--status closed` matches
 `closed:canceled`); filtering by `state:substate` is exact. Core states are

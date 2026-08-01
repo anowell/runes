@@ -128,7 +128,7 @@ A status is one of three fixed core states with an optional substate:
 |-------|----------|-------------------|
 | `todo` | no | any |
 | `wip` | no | `design`, `impl`, `review` |
-| `closed` | yes | `canceled`, `duplicate` (bare `closed` means completed) |
+| `closed` | yes | `done`, `canceled`, `duplicate` (bare `closed` also means completed) |
 
 Core states are not configurable and are not part of `.kinds/schema.kdl` — a
 `status` or `terminal` declaration there is ignored. Allowed substates come from
