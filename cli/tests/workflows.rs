@@ -415,7 +415,6 @@ fn init_outside_repo() {
         local.contains("demo"),
         "project missing from config: {local}"
     );
-    // The directory ignores itself for git/jj and pijul alike.
     for marker in [".gitignore", ".ignore"] {
         let content = fs::read_to_string(runes_dir.join(marker))
             .unwrap_or_else(|_| panic!("{marker} missing from .runes/"));
@@ -443,8 +442,8 @@ fn init_migrates_a_legacy_runes_kdl() {
         !work.join("runes.kdl").exists(),
         "legacy config should be gone after migration"
     );
-    let local = fs::read_to_string(work.join(".runes").join("config.kdl"))
-        .expect("migrated config exists");
+    let local =
+        fs::read_to_string(work.join(".runes").join("config.kdl")).expect("migrated config exists");
     assert!(
         local.contains("demo"),
         "migrated config lost its contents: {local}"
@@ -480,7 +479,10 @@ fn config_set_creates_a_self_ignoring_runes_dir() {
         String::from_utf8_lossy(&output.stderr)
     );
     let runes_dir = work.join(".runes");
-    assert!(runes_dir.join("config.kdl").exists(), "local config written");
+    assert!(
+        runes_dir.join("config.kdl").exists(),
+        "local config written"
+    );
     for marker in [".gitignore", ".ignore"] {
         assert_eq!(
             fs::read_to_string(runes_dir.join(marker)).expect("ignore marker written"),
@@ -679,8 +681,8 @@ fn init_pins_a_named_store_locally() {
         &["init", "--project", "other:demo", "--no-skill"],
     );
 
-    let local = fs::read_to_string(work.join(".runes").join("config.kdl"))
-        .expect("local config created");
+    let local =
+        fs::read_to_string(work.join(".runes").join("config.kdl")).expect("local config created");
     assert!(
         local.contains("store other") && local.contains("project demo"),
         "the named store should be pinned locally: {local}"

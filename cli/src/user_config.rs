@@ -780,7 +780,9 @@ pub fn find_repo_root(start: &Path) -> Option<PathBuf> {
     let mut cursor = start.to_path_buf();
     loop {
         let runes_dir = cursor.join(".runes").is_dir()
-            && home.as_deref().is_none_or(|home| !paths_equal(&cursor, home));
+            && home
+                .as_deref()
+                .is_none_or(|home| !paths_equal(&cursor, home));
         if runes_dir
             || cursor.join(".git").exists()
             || cursor.join(".jj").exists()

@@ -4762,8 +4762,6 @@ fn run_config(cmd: ConfigCommand) -> Result<()> {
                     println!("{k}={v}");
                 }
             } else {
-                // Show merged with provenance: local overrides global, and
-                // each effective value names the file it came from.
                 let global_path = user_config::global_config_path()?;
                 let local_path = user_config::local_config_path(&cwd);
                 let mut pairs: Vec<(String, String, PathBuf)> =
@@ -4842,7 +4840,6 @@ fn run_config(cmd: ConfigCommand) -> Result<()> {
     }
 }
 
-/// Paths under `$HOME` print as `~/...`; provenance lines stay short.
 fn display_home_relative(path: &Path) -> String {
     if let Ok(home) = home_dir() {
         if let Ok(rest) = path.strip_prefix(&home) {
@@ -4947,12 +4944,12 @@ fn migrate_legacy_local_config(start: &Path) -> Result<()> {
     let mut cursor = start.to_path_buf();
     let legacy = loop {
         let candidate = cursor.join("runes.kdl");
-        // symlink_metadata: a legacy config that is itself a symlink still counts.
+        // symlink_metadata, so a legacy config that is itself a symlink counts
         if candidate.symlink_metadata().is_ok() {
             break candidate;
         }
-        // The walk stops where root detection would: a legacy file above this
-        // repo's root belongs to some other setup.
+        // Stop where root detection would: a legacy file above this repo's
+        // root belongs to some other setup.
         if has_vcs_marker(&cursor) || cursor.join(".runes").is_dir() {
             return Ok(());
         }
@@ -4972,11 +4969,7 @@ fn migrate_legacy_local_config(start: &Path) -> Result<()> {
     }
     user_config::ensure_self_ignoring_dir(&root.join(".runes"))?;
     fs::rename(&legacy, &new_path)?;
-    println!(
-        "Migrated {} to {}",
-        legacy.display(),
-        new_path.display()
-    );
+    println!("Migrated {} to {}", legacy.display(), new_path.display());
     Ok(())
 }
 
