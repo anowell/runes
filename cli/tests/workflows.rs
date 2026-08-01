@@ -2770,34 +2770,37 @@ fn builtin_views_need_no_config_and_custom_views_warn() {
         "`list mine` should be open runes assigned to me: {mine_view}"
     );
 
-    // A config-defined view still applies, but says it is on the way out.
-    runes_ok(
-        &home,
-        &["config", "set", "query.finished.status", "done", "--global"],
-    );
-    let (custom_view, custom_stderr) = list_view(&["finished"]);
-    assert!(
-        custom_view.contains(&closed) && !custom_view.contains(&mine),
-        "custom view should still filter: {custom_view}"
-    );
-    assert!(
-        custom_stderr.contains("custom views are deprecated"),
-        "custom view should warn: {custom_stderr}"
-    );
-
-    // A custom view named like a built-in shadows it, and warns as well.
     runes_ok(
         &home,
         &["config", "set", "query.closed.status", "todo", "--global"],
     );
-    let (shadowed, shadow_stderr) = list_view(&["closed"]);
-    assert!(
-        shadowed.contains(&mine) && !shadowed.contains(&closed),
-        "config view should shadow the built-in: {shadowed}"
+    let (still_builtin, _) = list_view(&["closed"]);
+    assert_eq!(
+        still_builtin, closed_view,
+        "a config query block must not shadow the built-in `closed` view: {still_builtin}"
     );
+
+    let unknown = runes_output(&home, &["list", "finished", "--store", "test"]);
     assert!(
-        shadow_stderr.contains("custom views are deprecated"),
-        "shadowing view should warn: {shadow_stderr}"
+        !unknown.status.success(),
+        "`list finished` should fail: {}",
+        String::from_utf8_lossy(&unknown.stdout)
+    );
+    let unknown_stderr = String::from_utf8_lossy(&unknown.stderr);
+    assert!(
+        unknown_stderr.contains("unknown view 'finished'") && unknown_stderr.contains("closed"),
+        "unknown view should name itself and the built-ins: {unknown_stderr}"
+    );
+
+    runes_ok(
+        &home,
+        &["config", "set", "defaults.query", "finished", "--global"],
+    );
+    let from_config = runes_output(&home, &["list", "--store", "test"]);
+    let config_stderr = String::from_utf8_lossy(&from_config.stderr);
+    assert!(
+        !from_config.status.success() && config_stderr.contains("defaults { query"),
+        "a stale view name in config should blame the config: {config_stderr}"
     );
 }
 

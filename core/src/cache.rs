@@ -14,17 +14,6 @@ pub enum ArchivedMode {
     Include,
 }
 
-impl ArchivedMode {
-    pub fn from_keyword(value: &str) -> Option<Self> {
-        match value.to_lowercase().as_str() {
-            "only" | "archived-only" => Some(ArchivedMode::Only),
-            "archived" | "include" | "with-archived" => Some(ArchivedMode::Include),
-            "exclude" | "open" | "active" => Some(ArchivedMode::Exclude),
-            _ => None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct CacheFilter {
     pub project: Option<String>,
