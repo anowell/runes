@@ -1,7 +1,7 @@
 # Runes CLI Agent Guide
 
 This repo *is* the `runes` CLI. It also tracks its own work with runes, in the
-`rn` project (see `runes.kdl`).
+`rn` project (see `.runes/config.kdl`).
 
 ## Using runes
 

@@ -1,18 +1,38 @@
 # Configuration Reference
 
-Runes uses KDL config files named `runes.kdl`. Configuration is loaded by searching the current directory, then walking ancestors up to `~`, and finally checking `~/.runes/config.kdl`. Values from closer files override those from further ones.
+Runes follows the git-config model: two personal KDL config files, neither ever
+committed, sharing one vocabulary.
 
-`runes init` creates both global and local configs interactively, and initializes a store when the machine has none. Non-interactively it needs `--project` and an identity it can read: an existing `user.email` in the global config, or `RUNES_USER`.
+| File | Tracked | Typical contents |
+|---|---|---|
+| `~/.runes/config.kdl` | never | identity, `defaults.*`, `store` definitions, `new` defaults, `attribution` |
+| `<repo>/.runes/config.kdl` | never | any of the above, plus the store/project pointer for that repo |
+
+Process config — kinds, statuses, fields, templates — lives in the *store* and
+is committed there (see [schema.md](schema.md)).
+
+The local file is found by walking ancestors of the current directory to the
+repo root (marked by `.runes/`, `.git`, `.jj`, or `.pijul`). Local values
+override global ones. Nothing about runes lands in the code repo's history: the
+`.runes/` directory ignores itself via a `.runes/.gitignore` (honored by git
+and jj) and a `.runes/.ignore` (pijul), both written when the directory is
+created.
+
+`runes init` creates both global and local configs interactively, and
+initializes a store when the machine has none. Non-interactively it needs
+`--project` and an identity it can read: an existing `user.email` in the global
+config, or `RUNES_USER`. A repo whose local config lives at the pre-`.runes/`
+location (`<repo>/runes.kdl`) is migrated automatically by `runes init`.
 
 `runes init --help` lists the stores on this machine and marks the default.
 
 ## Reading and writing config
 
 ```bash
-runes config list              # show effective local config
+runes config list              # effective config, each value naming its source file
 runes config list --global     # show global config
 runes config get <key>         # read a value
-runes config set <key> <value> # write a value (to local config)
+runes config set <key> <value> # write a value (to the repo-local config)
 runes config set <key> <value> --global  # write to global config
 runes config unset <key>       # remove a value
 ```
@@ -43,9 +63,10 @@ new {
 }
 ```
 
-## Local config (per-repo `runes.kdl`)
+## Local config (`<repo>/.runes/config.kdl`)
 
-Created by `runes init` when run inside a git/jj/pijul repo. Sets the default project for that directory:
+Created by `runes init`. Accepts the full global vocabulary; most repos only
+need the project pointer:
 
 ```kdl
 defaults {
@@ -53,7 +74,9 @@ defaults {
 }
 ```
 
-Use `--stealth` with `runes init` to add `runes.kdl` to `.git/info/exclude` so it stays untracked.
+The file is personal, like `.git/config`: it never travels with the repo, so
+`runes init` is per-repo per-machine. Most repos need no local file at all — a
+global `defaults.store` plus a directory name matching the project is enough.
 
 ## Config blocks
 
@@ -111,7 +134,7 @@ Authorship is resolved in this order, first hit wins:
 3. a detected AI agent, unless `attribution.detect false`
 4. `user.email` / `user.name` from runes config
 5. `git config user.name` / `user.email`, read from the repo holding the
-   nearest `runes.kdl` (so the machine-global `~/.gitconfig` counts too)
+   nearest runes config (so the machine-global `~/.gitconfig` counts too)
 
 A detected agent still acts on behalf of whichever human identity 4 or 5 finds.
 `runes init` writes the same fallback chain into the global config on a
@@ -208,7 +231,7 @@ When your working directory is under a bound path, the associated store and view
 When `--project` is omitted, the CLI checks in order:
 
 1. `RUNES_PROJECT` environment variable (accepts `store:project` syntax)
-2. `defaults.project` from the nearest `runes.kdl`
+2. `defaults.project` from config (the repo-local file, then global)
 3. Whether the current directory name matches a project in the resolved store
 4. Whether the repo root name matches a project in the resolved store
 5. Fails with a prompt to pass `--project` or configure a default

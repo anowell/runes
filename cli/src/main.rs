@@ -161,9 +161,6 @@ struct InitArgs {
     /// Project prefix (optionally store:project)
     #[arg(long)]
     project: Option<String>,
-    /// Add runes.kdl to .git/info/exclude instead of committing it
-    #[arg(long)]
-    stealth: bool,
     /// Skip installing the agent skill (init refreshes it on every run otherwise)
     #[arg(long = "no-skill", conflicts_with = "force_skill")]
     no_skill: bool,
@@ -722,7 +719,7 @@ fn resolve_store_with_context(
         return Ok(stores[0].clone());
     }
     Err(Error::new(
-        "No default store configured. Set defaults.store in runes.kdl or ~/.runes/config.kdl",
+        "No default store configured. Set defaults.store in ~/.runes/config.kdl or the repo's .runes/config.kdl",
     ))
 }
 
@@ -1005,7 +1002,7 @@ fn agent_identity(slug: &str, on_behalf_of: Option<&str>) -> (String, String) {
 /// Injected so the git-config fallback stays unit-testable.
 type IdentityLookup<'a> = &'a dyn Fn() -> Option<(String, String)>;
 
-/// `git config` identity of the repo holding the nearest `runes.kdl`, so a
+/// `git config` identity of the repo holding the nearest runes config, so a
 /// project that already declares who you are needs no runes-specific setup.
 /// With no such repo it reads from `dir`, which still finds `~/.gitconfig`.
 fn git_identity(dir: &Path) -> Option<(String, String)> {
@@ -2011,15 +2008,7 @@ fn repo_root_basename(start: &Path) -> Option<String> {
 }
 
 fn find_repo_root(start: &Path) -> Option<PathBuf> {
-    let mut cursor = start.to_path_buf();
-    loop {
-        if cursor.join("runes.kdl").exists() || has_vcs_marker(&cursor) {
-            return Some(cursor);
-        }
-        if !cursor.pop() {
-            return None;
-        }
-    }
+    user_config::find_repo_root(start)
 }
 
 fn has_vcs_marker(path: &Path) -> bool {
@@ -2175,7 +2164,7 @@ fn run_list(args: ListArgs) -> Result<()> {
         filters.kind = Some(list_kind.kind_name().to_string());
     }
     // When no project context could be determined (no --project flag, no repo-local
-    // runes.kdl, no default project), the repo likely hasn't been initialized for
+    // config, no default project), the repo likely hasn't been initialized for
     // runes. Listing every rune across all projects is confusing in a fresh repo, so
     // show an init hint instead. Skipped for --json to keep programmatic output stable.
     if !json && !project_flag_present && filters.project.is_none() {
@@ -4773,22 +4762,33 @@ fn run_config(cmd: ConfigCommand) -> Result<()> {
                     println!("{k}={v}");
                 }
             } else {
-                // Show merged: global then local
+                // Show merged with provenance: local overrides global, and
+                // each effective value names the file it came from.
                 let global_path = user_config::global_config_path()?;
                 let local_path = user_config::local_config_path(&cwd);
-                let mut pairs = user_config::config_list(&global_path)?;
+                let mut pairs: Vec<(String, String, PathBuf)> =
+                    user_config::config_list(&global_path)?
+                        .into_iter()
+                        .map(|(k, v)| (k, v, global_path.clone()))
+                        .collect();
                 if let Some(lp) = local_path {
-                    let local_pairs = user_config::config_list(&lp)?;
-                    for (k, v) in local_pairs {
-                        if let Some(existing) = pairs.iter_mut().find(|(ek, _)| ek == &k) {
+                    for (k, v) in user_config::config_list(&lp)? {
+                        if let Some(existing) = pairs.iter_mut().find(|(ek, _, _)| ek == &k) {
                             existing.1 = v;
+                            existing.2 = lp.clone();
                         } else {
-                            pairs.push((k, v));
+                            pairs.push((k, v, lp.clone()));
                         }
                     }
                 }
-                for (k, v) in pairs {
-                    println!("{k}={v}");
+                let width = pairs
+                    .iter()
+                    .map(|(k, v, _)| k.len() + v.len() + 1)
+                    .max()
+                    .unwrap_or(0);
+                for (k, v, source) in pairs {
+                    let entry = format!("{k}={v}");
+                    println!("{entry:width$}  # {}", display_home_relative(&source));
                 }
             }
             Ok(())
@@ -4817,9 +4817,13 @@ fn run_config(cmd: ConfigCommand) -> Result<()> {
             let path = if global {
                 user_config::global_config_path()?
             } else {
-                user_config::local_config_path(&cwd).ok_or_else(|| {
+                let path = user_config::local_config_path(&cwd).ok_or_else(|| {
                     Error::new("Not in a repo. Use --global or run from a repo root.")
-                })?
+                })?;
+                if let Some(dir) = path.parent() {
+                    user_config::ensure_self_ignoring_dir(dir)?;
+                }
+                path
             };
             user_config::config_set(&path, &key, &value)?;
             Ok(())
@@ -4838,19 +4842,30 @@ fn run_config(cmd: ConfigCommand) -> Result<()> {
     }
 }
 
+/// Paths under `$HOME` print as `~/...`; provenance lines stay short.
+fn display_home_relative(path: &Path) -> String {
+    if let Ok(home) = home_dir() {
+        if let Ok(rest) = path.strip_prefix(&home) {
+            return format!("~/{}", rest.display());
+        }
+    }
+    path.display().to_string()
+}
+
 fn run_init(args: InitArgs) -> Result<()> {
     let cwd = std::env::current_dir().map_err(|e| Error::new(e.to_string()))?;
     let global_path = user_config::global_config_path()?;
 
+    migrate_legacy_local_config(&cwd)?;
+
     // Local config lands at the repo/config root if there is one, else cwd.
-    let local_path = user_config::local_config_path(&cwd).unwrap_or_else(|| cwd.join("runes.kdl"));
+    let local_path = user_config::local_config_path(&cwd)
+        .unwrap_or_else(|| cwd.join(".runes").join("config.kdl"));
     let root = local_path
         .parent()
+        .and_then(|p| p.parent())
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| cwd.clone());
-    if args.stealth && !root.join(".git").exists() {
-        return Err(Error::new("--stealth only works in a git repo"));
-    }
 
     // Identity only; the store is settled below, so an existing config with no
     // store still gets one.
@@ -4903,27 +4918,12 @@ fn run_init(args: InitArgs) -> Result<()> {
         if project.is_empty() {
             return Err(Error::new("Project prefix cannot be empty"));
         }
+        user_config::ensure_self_ignoring_dir(&root.join(".runes"))?;
         // Unpinned repos follow the global default store as it changes.
         if store_hint.is_some() {
             user_config::config_set(&local_path, "defaults.store", &store_name)?;
         }
         user_config::config_set(&local_path, "defaults.project", &project)?;
-
-        if args.stealth {
-            let info_dir = root.join(".git").join("info");
-            fs::create_dir_all(&info_dir)?;
-            let exclude_path = info_dir.join("exclude");
-            let existing = fs::read_to_string(&exclude_path).unwrap_or_default();
-            if !existing.lines().any(|l| l.trim() == "runes.kdl") {
-                let mut content = existing;
-                if !content.ends_with('\n') && !content.is_empty() {
-                    content.push('\n');
-                }
-                content.push_str("runes.kdl\n");
-                fs::write(&exclude_path, content)?;
-                println!("Added runes.kdl to .git/info/exclude");
-            }
-        }
         println!(
             "Local config created at {} (store '{store_name}', project '{project}')",
             local_path.display()
@@ -4936,6 +4936,47 @@ fn run_init(args: InitArgs) -> Result<()> {
         install_skill(args.force_skill)?;
     }
 
+    Ok(())
+}
+
+/// Convert a legacy `<root>/runes.kdl` into `<root>/.runes/config.kdl`. The
+/// vocabulary never changed, so migration is a move. Only init looks for the
+/// old location: everywhere else a repo without the new path is simply a repo
+/// runes has not been set up on.
+fn migrate_legacy_local_config(start: &Path) -> Result<()> {
+    let mut cursor = start.to_path_buf();
+    let legacy = loop {
+        let candidate = cursor.join("runes.kdl");
+        // symlink_metadata: a legacy config that is itself a symlink still counts.
+        if candidate.symlink_metadata().is_ok() {
+            break candidate;
+        }
+        // The walk stops where root detection would: a legacy file above this
+        // repo's root belongs to some other setup.
+        if has_vcs_marker(&cursor) || cursor.join(".runes").is_dir() {
+            return Ok(());
+        }
+        if !cursor.pop() {
+            return Ok(());
+        }
+    };
+    let root = legacy.parent().expect("legacy config path has a parent");
+    let new_path = root.join(".runes").join("config.kdl");
+    if new_path.exists() {
+        println!(
+            "Ignoring legacy {}; config lives at {} now - delete the old file",
+            legacy.display(),
+            new_path.display()
+        );
+        return Ok(());
+    }
+    user_config::ensure_self_ignoring_dir(&root.join(".runes"))?;
+    fs::rename(&legacy, &new_path)?;
+    println!(
+        "Migrated {} to {}",
+        legacy.display(),
+        new_path.display()
+    );
     Ok(())
 }
 
@@ -5233,7 +5274,7 @@ fn write_init_status(
         (false, _) => {
             writeln!(
                 out,
-                "  {NO} repo is not configured - run `runes init` here to create a local runes.kdl"
+                "  {NO} repo is not configured - run `runes init` here to set it up"
             )?;
         }
     }
@@ -5275,8 +5316,8 @@ fn write_quickstart(out: &mut impl io::Write, mode: QuickstartMode) -> Result<()
     if live {
         let cwd = std::env::current_dir().map_err(|e| Error::new(e.to_string()))?;
         let global_exists = user_config::global_config_path()?.exists();
-        let has_local = find_repo_root(&cwd)
-            .map(|root| root.join("runes.kdl").exists())
+        let has_local = user_config::local_config_path(&cwd)
+            .map(|path| path.exists())
             .unwrap_or(false);
 
         if !global_exists {
@@ -5288,7 +5329,7 @@ fn write_quickstart(out: &mut impl io::Write, mode: QuickstartMode) -> Result<()
             writeln!(out, "  - Initialize a store backed by jj or pijul")?;
             writeln!(
                 out,
-                "  - Optionally create a local runes.kdl config for the current repo"
+                "  - Optionally create a local .runes/config.kdl for the current repo"
             )?;
             writeln!(out)?;
             writeln!(out, "  Example:")?;

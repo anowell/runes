@@ -52,7 +52,7 @@ pub fn normalize(status: &str) -> String {
     }
 }
 
-/// Allowed substates per core state, from `runes.kdl` (global or repo).
+/// Allowed substates per core state, from the user config (global or repo).
 #[derive(Clone, Debug)]
 pub struct StateConfig {
     /// A core state with no entry here accepts any substate.

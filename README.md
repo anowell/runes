@@ -46,10 +46,10 @@ Initialize runes:
 - Creates project config
 
 ```bash
-runes init --stealth
+runes init
 ```
 
-The `--stealth` flag keeps `runes.kdl` out of your repo's tracked files by adding it to `.git/info/exclude`.
+The project config lives in `<repo>/.runes/`, which ignores itself — nothing about runes lands in your repo's history.
 
 Create your first rune, writing the description in your editor:
 
@@ -167,10 +167,10 @@ runes sync
 
 ### Configuration
 
-Runes uses KDL config files (`runes.kdl`) at two levels:
+Runes uses KDL config files at two levels, git-config style — both personal, neither committed:
 
 - **Global** (`~/.runes/config.kdl`) — user identity, stores, default queries
-- **Local** (per-repo `runes.kdl`) — project defaults, path bindings
+- **Local** (`<repo>/.runes/config.kdl`) — the same vocabulary, plus the repo's store/project pointer
 
 `runes init` creates both. The local config sets `defaults.project` so commands like `runes new` know which project to target.
 

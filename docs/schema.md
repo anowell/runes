@@ -140,7 +140,7 @@ A **status** is a core **state** with an optional **substate**, written
 
 Core states are not configurable and are not part of `.kinds/schema.kdl` — a
 `status` or `terminal` declaration there is ignored. Allowed substates come from
-`runes.kdl` (see [configuration.md](configuration.md)). `done` and `in-progress`
+config (see [configuration.md](configuration.md)). `done` and `in-progress`
 are accepted on input and rewritten to `closed` and `wip`; `runes store doctor`
 migrates stores written with the old vocabulary.
 

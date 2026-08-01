@@ -339,7 +339,41 @@ pub fn global_config_path() -> Result<PathBuf> {
 }
 
 pub fn local_config_path(start: &Path) -> Option<PathBuf> {
-    find_repo_root(start).map(|root| root.join("runes.kdl"))
+    let root = find_repo_root(start)?;
+    // A repo root at $HOME (say, a dotfiles repo) would make the global config
+    // double as a local one.
+    if let Ok(home) = home_dir() {
+        if paths_equal(&root, &home) {
+            return None;
+        }
+    }
+    Some(root.join(".runes").join("config.kdl"))
+}
+
+/// Equality that survives symlinked ancestors (`/var` vs `/private/var`), which
+/// otherwise defeat the $HOME comparisons here.
+fn paths_equal(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Create `dir` (a repo-local `.runes/`) so it ignores itself: a `.gitignore`
+/// honored by git and jj, and an `.ignore` for pijul. Nothing about runes may
+/// land in the enclosing repo's history.
+pub fn ensure_self_ignoring_dir(dir: &Path) -> Result<()> {
+    fs::create_dir_all(dir)?;
+    for name in [".gitignore", ".ignore"] {
+        let marker = dir.join(name);
+        if !marker.exists() {
+            fs::write(&marker, "*\n")?;
+        }
+    }
+    Ok(())
 }
 
 pub fn config_list(path: &Path) -> Result<Vec<(String, String)>> {
@@ -741,9 +775,13 @@ fn home_dir() -> Result<PathBuf> {
 }
 
 pub fn find_repo_root(start: &Path) -> Option<PathBuf> {
+    // `~/.runes` holds global state, so it must not make $HOME a repo root.
+    let home = home_dir().ok();
     let mut cursor = start.to_path_buf();
     loop {
-        if cursor.join("runes.kdl").exists()
+        let runes_dir = cursor.join(".runes").is_dir()
+            && home.as_deref().is_none_or(|home| !paths_equal(&cursor, home));
+        if runes_dir
             || cursor.join(".git").exists()
             || cursor.join(".jj").exists()
             || cursor.join(".pijul").exists()
@@ -762,8 +800,7 @@ fn find_config_paths(start: &Path) -> Result<Vec<PathBuf>> {
     if global.exists() {
         config_paths.push(global);
     }
-    if let Some(repo_root) = find_repo_root(start) {
-        let local = repo_root.join("runes.kdl");
+    if let Some(local) = local_config_path(start) {
         if local.exists() {
             config_paths.push(local);
         }

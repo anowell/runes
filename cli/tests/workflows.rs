@@ -386,26 +386,7 @@ fn init_outside_repo() {
     let work = home.join("work");
     fs::create_dir_all(&work).expect("create work dir");
 
-    // --stealth needs .git/info/exclude, so it must fail outside a git repo
-    let output = Command::new(env!("CARGO_BIN_EXE_runes"))
-        .args(["init", "--project", "demo", "--stealth"])
-        .current_dir(&work)
-        .env("HOME", &home)
-        .env("RUNES_USER", "Test User <test@runes.dev>")
-        .output()
-        .expect("run runes command");
-    assert!(
-        !output.status.success(),
-        "init --stealth should fail outside a git repo"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("--stealth only works in a git repo"),
-        "unexpected stderr: {stderr}"
-    );
-    assert!(!work.join("runes.kdl").exists());
-
-    // Without --stealth the local config is created even outside a repo
+    // The local config is created even outside a VCS repo
     runes_ok(
         &home,
         &["config", "set", "user.email", "test@runes.dev", "--global"],
@@ -428,10 +409,108 @@ fn init_outside_repo() {
         !stdout.contains("Global config already exists"),
         "init should not mention existing global config: {stdout}"
     );
-    let local = fs::read_to_string(work.join("runes.kdl")).expect("local config created");
+    let runes_dir = work.join(".runes");
+    let local = fs::read_to_string(runes_dir.join("config.kdl")).expect("local config created");
     assert!(
         local.contains("demo"),
         "project missing from config: {local}"
+    );
+    // The directory ignores itself for git/jj and pijul alike.
+    for marker in [".gitignore", ".ignore"] {
+        let content = fs::read_to_string(runes_dir.join(marker))
+            .unwrap_or_else(|_| panic!("{marker} missing from .runes/"));
+        assert_eq!(content, "*\n", "{marker} should ignore everything");
+    }
+}
+
+/// Init converts the pre-`.runes/` local config in place; nothing else reads
+/// the old path.
+#[test]
+fn init_migrates_a_legacy_runes_kdl() {
+    let (home, work) = initable_home("init-legacy-config");
+    fs::write(
+        work.join("runes.kdl"),
+        "defaults {\n    project \"demo\"\n}\n",
+    )
+    .expect("write legacy config");
+
+    let stdout = runes_in(&home, &work, &["init", "--no-skill"]);
+    assert!(
+        stdout.contains("Migrated"),
+        "init should report the migration: {stdout}"
+    );
+    assert!(
+        !work.join("runes.kdl").exists(),
+        "legacy config should be gone after migration"
+    );
+    let local = fs::read_to_string(work.join(".runes").join("config.kdl"))
+        .expect("migrated config exists");
+    assert!(
+        local.contains("demo"),
+        "migrated config lost its contents: {local}"
+    );
+    assert!(
+        work.join(".runes").join(".gitignore").exists(),
+        "migration should leave a self-ignoring .runes/"
+    );
+
+    // The migrated pointer still resolves from the new location.
+    let value = runes_in(&home, &work, &["config", "get", "defaults.project"]);
+    assert_eq!(value.trim(), "demo");
+}
+
+/// Whatever first creates `.runes/` must leave it self-ignoring; `config set`
+/// is the other writer besides init.
+#[test]
+fn config_set_creates_a_self_ignoring_runes_dir() {
+    let home = unique_tmp_home("config-set-self-ignore");
+    let work = home.join("work");
+    // A bare .git marker makes work a repo root without needing git installed.
+    fs::create_dir_all(work.join(".git")).expect("create fake git repo");
+
+    let mut cmd = runes_cmd(&home);
+    let output = cmd
+        .args(["config", "set", "defaults.project", "demo"])
+        .current_dir(&work)
+        .output()
+        .expect("run runes command");
+    assert!(
+        output.status.success(),
+        "config set failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let runes_dir = work.join(".runes");
+    assert!(runes_dir.join("config.kdl").exists(), "local config written");
+    for marker in [".gitignore", ".ignore"] {
+        assert_eq!(
+            fs::read_to_string(runes_dir.join(marker)).expect("ignore marker written"),
+            "*\n"
+        );
+    }
+}
+
+/// Effective config is two layers deep, so each value names its source file.
+#[test]
+fn config_list_reports_provenance() {
+    let (home, work) = initable_home("config-list-provenance");
+    runes_in(&home, &work, &["init", "--project", "demo", "--no-skill"]);
+
+    let listed = runes_in(&home, &work, &["config", "list"]);
+    let project_line = listed
+        .lines()
+        .find(|line| line.starts_with("defaults.project=demo"))
+        .unwrap_or_else(|| panic!("defaults.project missing: {listed}"));
+    assert!(
+        project_line.contains(".runes/config.kdl") && !project_line.contains("~/.runes"),
+        "local value should name the repo config: {project_line}"
+    );
+    let email_line = listed
+        .lines()
+        .find(|line| line.starts_with("user.email="))
+        .unwrap_or_else(|| panic!("user.email missing: {listed}"));
+    assert!(
+        email_line.contains("~/.runes/config.kdl"),
+        "global value should name the global config: {email_line}"
     );
 }
 
@@ -579,7 +658,7 @@ fn init_treats_an_unknown_store_as_a_typo() {
         "unhelpful message for an unknown store: {stderr}"
     );
     assert!(
-        !work.join("runes.kdl").exists(),
+        !work.join(".runes").exists(),
         "a rejected init still wrote a local config"
     );
 }
@@ -600,7 +679,8 @@ fn init_pins_a_named_store_locally() {
         &["init", "--project", "other:demo", "--no-skill"],
     );
 
-    let local = fs::read_to_string(work.join("runes.kdl")).expect("local config created");
+    let local = fs::read_to_string(work.join(".runes").join("config.kdl"))
+        .expect("local config created");
     assert!(
         local.contains("store other") && local.contains("project demo"),
         "the named store should be pinned locally: {local}"
@@ -2930,7 +3010,7 @@ fn quickstart_human_variant_opens_with_the_init_status() {
         ],
     );
 
-    // No local runes.kdl yet: globally set up, repo is not.
+    // No local config yet: globally set up, repo is not.
     let before = runes_in(&home, &work, &["quickstart", "--human"]);
     assert!(
         before.contains("\u{2713} runes is initialized globally")
