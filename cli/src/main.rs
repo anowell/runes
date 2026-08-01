@@ -223,7 +223,7 @@ struct NewArgs {
     /// Commit message (implies commit)
     #[arg(short = 'm', long = "message")]
     message: Option<String>,
-    /// Emit {id, path, committed} as JSON instead of the three text lines
+    /// Emit {id, path, committed} as JSON instead of the human-readable summary
     #[arg(long)]
     json: bool,
 }
@@ -1834,16 +1834,12 @@ fn run_new(args: NewArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
         return Ok(());
     }
-    // The id stays on the first line so callers can keep parsing it out.
-    println!("{identifier}");
-    println!("{}", abs_path.display());
-    // "uncommitted" would contain "committed": the status line has to stay
-    // greppable for automation that only has stdout to go on.
     if should_commit {
-        println!("committed");
+        println!("Created {identifier}");
     } else {
-        println!("draft — edit the file, then run: runes commit {identifier}");
+        println!("Created {identifier} (uncommitted)");
     }
+    println!("{}", abs_path.display());
     Ok(())
 }
 
@@ -5229,9 +5225,14 @@ fn write_quickstart(out: &mut impl io::Write, mode: QuickstartMode) -> Result<()
         )?;
         writeln!(out, "  template. Never create the doc file yourself.")?;
         writeln!(out)?;
+        writeln!(
+            out,
+            "  Always pass `--json`: it answers with {{id, path, committed}}."
+        )?;
+        writeln!(out)?;
         writeln!(out, "  1) Create a draft, fill it in, commit it:")?;
         writeln!(out)?;
-        writeln!(out, "       runes new \"Fix login bug\" --kind bug")?;
+        writeln!(out, "       runes new \"Fix login bug\" --kind bug --json")?;
         writeln!(
             out,
             "       # edit the file at the path `runes new` printed"
@@ -5242,7 +5243,7 @@ fn write_quickstart(out: &mut impl io::Write, mode: QuickstartMode) -> Result<()
         writeln!(out)?;
         writeln!(
             out,
-            "       runes new \"v2.0 release\" --kind milestone --commit"
+            "       runes new \"v2.0 release\" --kind milestone --commit --json"
         )?;
         writeln!(out)?;
         writeln!(
@@ -5252,7 +5253,7 @@ fn write_quickstart(out: &mut impl io::Write, mode: QuickstartMode) -> Result<()
         writeln!(out)?;
         writeln!(
             out,
-            "       runes new \"Fix flake\" -f notes.md   # --no-commit leaves it uncommitted"
+            "       runes new \"Fix flake\" -f notes.md --json   # --no-commit leaves it uncommitted"
         )?;
         writeln!(out)?;
         writeln!(
@@ -5262,9 +5263,9 @@ fn write_quickstart(out: &mut impl io::Write, mode: QuickstartMode) -> Result<()
         writeln!(out)?;
         writeln!(
             out,
-            "  stdout carries the id and the absolute path; `--json` gives them as"
+            "  Without it, stdout is `Created <id>` - `Created <id> (uncommitted)` for a"
         )?;
-        writeln!(out, "  {{id, path, committed}}.")?;
+        writeln!(out, "  draft - then the absolute path.")?;
     } else {
         writeln!(
             out,

@@ -71,9 +71,14 @@ fn runes_with_env(home: &Path, envs: &[(&str, &str)], args: &[&str]) -> String {
     String::from_utf8(output.stdout).expect("stdout utf8")
 }
 
-/// The id `runes new` reports: always its first output line.
 fn rune_id(new_output: &str) -> &str {
-    new_output.lines().next().unwrap_or("").trim()
+    new_output
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_start_matches("Created ")
+        .trim_end_matches(" (uncommitted)")
 }
 
 fn command_exists(cmd: &str) -> bool {
@@ -1384,23 +1389,17 @@ fn jj_new_leaves_draft_until_commit() {
     }
     let (home, store_path) = setup_jj_store("jj-new-draft");
     let created = runes_ok(&home, &["new", "--project", "test:proj", "Draft me"]);
-    let mut lines = created.lines();
-    let id = lines.next().expect("id line").to_string();
-    let printed_path = PathBuf::from(lines.next().expect("path line"));
-    let hint = lines.next().expect("commit hint").to_string();
+    let id = rune_id(&created).to_string();
+    let printed_path = find_rune_file(Path::new(&store_path), &id);
 
-    assert!(id.starts_with("proj-"), "id must come first: {created}");
+    assert!(id.starts_with("proj-"), "unexpected id: {created}");
     assert!(
-        printed_path.is_absolute() && printed_path.is_file(),
-        "second line must be the absolute doc path: {created}"
+        printed_path.is_absolute(),
+        "{printed_path:?} is not absolute"
     );
-    assert_eq!(printed_path, find_rune_file(Path::new(&store_path), &id));
-    // "uncommitted" would contain "committed": the line has to stay greppable.
-    assert!(
-        hint.contains("draft")
-            && !hint.contains("committed")
-            && hint.contains(&format!("runes commit {id}")),
-        "missing commit hint: {created}"
+    assert_eq!(
+        created.trim_end(),
+        format!("Created {id} (uncommitted)\n{}", printed_path.display())
     );
 
     // Nothing recorded yet, but the draft is listed and marked as such.
@@ -1446,7 +1445,7 @@ fn jj_new_commits_when_content_is_supplied() {
         &["new", "--project", "test:proj", "From file", "-f", &body_s],
     );
     assert!(
-        from_file.lines().nth(2) == Some("committed"),
+        !from_file.contains("(uncommitted)"),
         "-f should commit: {from_file}"
     );
     let id = rune_id(&from_file).to_string();
@@ -1466,7 +1465,7 @@ fn jj_new_commits_when_content_is_supplied() {
         ],
     );
     assert!(
-        suppressed.contains("draft"),
+        suppressed.contains("(uncommitted)"),
         "--no-commit should suppress the commit: {suppressed}"
     );
     let held = rune_id(&suppressed).to_string();
@@ -1505,7 +1504,10 @@ fn jj_new_draft_normalizes_a_legacy_status() {
         ],
     );
     let id = rune_id(&created).to_string();
-    assert!(created.contains("draft"), "not left as a draft: {created}");
+    assert!(
+        created.contains("(uncommitted)"),
+        "not left as a draft: {created}"
+    );
 
     // Normalization happens on the way in, so the alias never reaches the file.
     let doc = fs::read_to_string(find_rune_file(store, &id)).expect("read draft");
@@ -2832,6 +2834,7 @@ fn quickstart_agent_variant_documents_the_canonical_flow() {
         "--commit",
         "--no-commit",
         "{id, path, committed}",
+        "runes new \"Fix login bug\" --kind bug --json",
         "Never create the doc file yourself",
         "runes show <id> --json",
         "runes list --blocked-by <id>",

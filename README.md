@@ -95,7 +95,7 @@ runes list
 ### Creating and editing runes
 
 ```bash
-# Create an issue: prints the id, the path, and that it is still a draft
+# Create an issue: prints the id and the doc path (--json for {id, path, committed})
 runes new "Fix the login bug"
 runes commit myproject-a3x            # after editing the printed file
 
