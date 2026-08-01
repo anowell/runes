@@ -2,6 +2,7 @@ pub mod backends;
 pub use backends as backend;
 pub mod cache;
 pub mod config;
+pub mod identity;
 pub mod model;
 pub mod schema;
 pub mod state;

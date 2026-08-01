@@ -1,5 +1,6 @@
 use crate::{Error, Result};
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
+use runes_core::identity::UserFormat;
 use runes_core::state::StateConfig;
 use std::collections::HashMap;
 use std::env;
@@ -10,6 +11,8 @@ use std::path::{Path, PathBuf};
 pub struct UserConfig {
     pub identity_email: Option<String>,
     pub identity_name: Option<String>,
+    /// `user.format`: how users render in human-facing output.
+    pub identity_format: Option<String>,
     pub default_store: Option<String>,
     pub default_query: Option<String>,
     pub default_project: Option<String>,
@@ -90,6 +93,9 @@ impl UserConfig {
                     }
                     if let Some(name) = value_string(node, "name") {
                         config.identity_name = Some(name);
+                    }
+                    if let Some(format) = value_string(node, "format") {
+                        config.identity_format = Some(format);
                     }
                 }
                 "attribution" => {
@@ -198,6 +204,7 @@ impl UserConfig {
         let UserConfig {
             identity_email,
             identity_name,
+            identity_format,
             default_store,
             default_query,
             default_project,
@@ -217,6 +224,9 @@ impl UserConfig {
         }
         if let Some(name) = identity_name {
             self.identity_name = Some(name);
+        }
+        if let Some(format) = identity_format {
+            self.identity_format = Some(format);
         }
         if let Some(store) = default_store {
             self.default_store = Some(store);
@@ -337,6 +347,14 @@ impl UserConfig {
         self.identity_email.as_deref()
     }
 
+    /// How users render in human-facing output. Defaults to the full name.
+    pub fn user_format(&self) -> Result<UserFormat> {
+        match &self.identity_format {
+            Some(value) => UserFormat::parse(value),
+            None => Ok(UserFormat::default()),
+        }
+    }
+
     pub fn resolve_user_alias(&self, value: &str) -> Option<String> {
         if value.eq_ignore_ascii_case("self") {
             self.identity_email.clone()
@@ -374,6 +392,9 @@ pub fn config_list(path: &Path) -> Result<Vec<(String, String)>> {
                 }
                 if let Some(v) = value_string(node, "name") {
                     pairs.push(("user.name".to_string(), v));
+                }
+                if let Some(v) = value_string(node, "format") {
+                    pairs.push(("user.format".to_string(), v));
                 }
             }
             "attribution" => {
@@ -803,7 +824,7 @@ fn home_dir() -> Result<PathBuf> {
     Ok(PathBuf::from(home))
 }
 
-fn find_repo_root(start: &Path) -> Option<PathBuf> {
+pub fn find_repo_root(start: &Path) -> Option<PathBuf> {
     let mut cursor = start.to_path_buf();
     loop {
         if cursor.join("runes.kdl").exists()

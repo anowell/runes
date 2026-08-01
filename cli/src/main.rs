@@ -6,6 +6,7 @@ use pijul_interaction::{set_context, InteractiveContext};
 use runes_core::backend::{self, LogEntry};
 use runes_core::cache;
 use runes_core::config::{discover_stores, ensure_dir, get_store, BackendKind, Store};
+use runes_core::identity::{Identity, Mailmap, UserDisplay, MAILMAP_FILE};
 use runes_core::model::{
     discover_project_docs, ensure_title, has_frontmatter, new_milestone_doc, new_rune_doc,
     next_short_id, parse_doc, parse_doc_text, parse_full_id, render_doc, replace_title,
@@ -909,18 +910,13 @@ fn id_exists(project_root: &Path, id: &str) -> Result<bool> {
     Ok(false)
 }
 
-/// Parse an author string: "Name <email>" or just "email"
+/// An author string (`Name <email>` or a bare email) as the (name, email) a
+/// commit signature needs, the name defaulting to the email.
 fn parse_author_string(s: &str) -> (String, String) {
-    let s = s.trim();
-    if let Some(start) = s.find('<') {
-        if let Some(end) = s.find('>') {
-            let name = s[..start].trim().to_string();
-            let email = s[start + 1..end].trim().to_string();
-            return (name, email);
-        }
-    }
-    // Treat entire string as email, use email as name fallback
-    (s.to_string(), s.to_string())
+    let identity = Identity::parse(s);
+    let email = identity.canonical();
+    let name = identity.name.clone().unwrap_or_else(|| email.clone());
+    (name, email)
 }
 
 /// Environment lookup, injected so agent detection stays unit-testable.
@@ -1009,18 +1005,51 @@ fn agent_identity(slug: &str, on_behalf_of: Option<&str>) -> (String, String) {
     }
 }
 
-/// Resolve commit author from: override flag > RUNES_USER env > detected agent > config
+/// Injected so the git-config fallback stays unit-testable.
+type IdentityLookup<'a> = &'a dyn Fn() -> Option<(String, String)>;
+
+/// `git config` identity of the repo holding the nearest `runes.kdl`, so a
+/// project that already declares who you are needs no runes-specific setup.
+/// With no such repo it reads from `dir`, which still finds `~/.gitconfig`.
+fn git_identity(dir: &Path) -> Option<(String, String)> {
+    let repo_dir = user_config::find_repo_root(dir).unwrap_or_else(|| dir.to_path_buf());
+    let read = |key: &str| -> Option<String> {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&repo_dir)
+            .arg("config")
+            .arg("--get")
+            .arg(key)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let value = String::from_utf8(output.stdout).ok()?;
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    };
+    let email = read("user.email")?;
+    let name = read("user.name").unwrap_or_else(|| email.clone());
+    Some((name, email))
+}
+
+/// Resolve commit author from: override flag > `RUNES_USER` > detected agent >
+/// runes config > `git config` in the repo that holds the runes config file.
 fn resolve_commit_author(
     user_cfg: &UserConfig,
     author_override: Option<&str>,
 ) -> Result<(String, String)> {
-    resolve_commit_author_env(user_cfg, author_override, &system_env)
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let git = || git_identity(&cwd);
+    resolve_commit_author_env(user_cfg, author_override, &system_env, &git)
 }
 
 fn resolve_commit_author_env(
     user_cfg: &UserConfig,
     author_override: Option<&str>,
     env: EnvLookup,
+    git: IdentityLookup,
 ) -> Result<(String, String)> {
     if let Some(author_str) = author_override {
         return Ok(parse_author_string(author_str));
@@ -1028,17 +1057,23 @@ fn resolve_commit_author_env(
     if let Some(env_val) = env("RUNES_USER") {
         return Ok(parse_author_string(&env_val));
     }
+    // The human identity doubles as the agent's on-behalf-of, so it is resolved
+    // before agent detection even though it loses to it.
+    let configured = user_cfg.identity_email.as_deref().map(|email| {
+        let name = user_cfg.identity_name.as_deref().unwrap_or(email);
+        (name.to_string(), email.to_string())
+    });
+    let human = configured.or_else(git);
     if user_cfg.attribution_detect() {
         if let Some(slug) = detect_agent(env) {
-            return Ok(agent_identity(&slug, user_cfg.identity_email.as_deref()));
+            return Ok(agent_identity(
+                &slug,
+                human.as_ref().map(|(_, email)| email.as_str()),
+            ));
         }
     }
-    if let Some(email) = &user_cfg.identity_email {
-        let name = user_cfg.identity_name.as_deref().unwrap_or(email);
-        return Ok((name.to_string(), email.clone()));
-    }
-    Err(Error::new(
-        "No author configured. Set user.email in runes config, RUNES_USER env var, or use --author flag."
+    human.ok_or_else(|| Error::new(
+        "No author configured. Set user.email in runes config or git config, RUNES_USER env var, or use --author flag."
     ))
 }
 
@@ -1049,9 +1084,47 @@ fn commit_store_changes(
     author_name: &str,
     author_email: &str,
 ) -> Result<()> {
-    backend::commit_paths(store, paths, message, author_name, author_email)?;
+    record_identity(store, &Identity::from_parts(author_name, author_email))?;
+    // An empty path list already means "commit everything"; otherwise the
+    // mailmap rides along, so a rename never lands without it.
+    let mut paths = paths.to_vec();
+    let mailmap_path = PathBuf::from(MAILMAP_FILE);
+    if !paths.is_empty() && Mailmap::path(&store.path).exists() && !paths.contains(&mailmap_path) {
+        paths.push(mailmap_path);
+    }
+    backend::commit_paths(store, &paths, message, author_name, author_email)?;
     cache::rebuild_cache(store)?;
     Ok(())
+}
+
+/// Record a name↔email pairing in the store's `.mailmap`, so later commands can
+/// render an email-only value as a person. A value with no real name is a no-op.
+fn record_identity(store: &Store, identity: &Identity) -> Result<()> {
+    let mut mailmap = Mailmap::load(&store.path);
+    if mailmap.upsert(identity) {
+        mailmap.save(&store.path)?;
+    }
+    Ok(())
+}
+
+/// Canonical on-disk form of a user value: `Name <email>` splits, recording the
+/// name and storing the email. Bare emails and handles pass through.
+fn canonical_user_value(store: &Store, raw: &str) -> Result<String> {
+    let identity = Identity::parse(raw);
+    record_identity(store, &identity)?;
+    let canonical = identity.canonical();
+    Ok(if canonical.is_empty() {
+        raw.trim().to_string()
+    } else {
+        canonical
+    })
+}
+
+fn user_display(user_cfg: &UserConfig, store: &Store) -> Result<UserDisplay> {
+    Ok(UserDisplay::new(
+        Mailmap::load(&store.path),
+        user_cfg.user_format()?,
+    ))
 }
 
 /// Build a compact change description from an old and new RuneDoc.
@@ -1712,6 +1785,9 @@ fn run_new(args: NewArgs) -> Result<()> {
         store_hint.as_deref(),
         project_arg.as_ref(),
     )?;
+    let resolved_assignee = resolved_assignee
+        .map(|value| canonical_user_value(&store, &value))
+        .transpose()?;
     let mut relations = parse_relations(&relation_inputs)?;
     if let Some(doc) = &incoming {
         extend_unique(&mut combined_labels, doc.labels.iter().cloned());
@@ -2007,9 +2083,13 @@ fn run_list(args: ListArgs) -> Result<()> {
     )?;
     let status_flag_present = status.is_some();
     let kind_flag_present = kind.is_some();
+    let display = user_display(&user_cfg, &store)?;
+    // The cache stores canonical emails, so a name or `Name <email>` filter
+    // has to come back down to one before it is applied.
     let assignee_filter = assignee
         .as_deref()
-        .and_then(|value| user_cfg.resolve_user_alias(value));
+        .and_then(|value| user_cfg.resolve_user_alias(value))
+        .map(|value| display.mailmap().canonical_query(&value));
     let mut list_kind = kind
         .as_deref()
         .map(ListKind::parse)
@@ -2165,7 +2245,7 @@ fn run_list(args: ListArgs) -> Result<()> {
                     },
                 }
             });
-            output_issue_rows(&store, &rows, &uncommitted_ids, json);
+            output_issue_rows(&store, &rows, &uncommitted_ids, json, &display);
             if !json {
                 warn_if_modified(&rows, &uncommitted_ids);
             }
@@ -2237,6 +2317,7 @@ fn output_issue_rows(
     rows: &[cache::CacheRow],
     uncommitted_ids: &std::collections::HashSet<String>,
     json: bool,
+    display: &UserDisplay,
 ) {
     if json {
         let json_rows: Vec<serde_json::Value> = rows
@@ -2260,7 +2341,7 @@ fn output_issue_rows(
             .collect();
         println!("{}", serde_json::to_string_pretty(&json_rows).unwrap());
     } else {
-        print_issue_table(rows, uncommitted_ids);
+        print_issue_table(rows, uncommitted_ids, display);
     }
 }
 
@@ -2319,7 +2400,8 @@ fn run_search(args: SearchArgs) -> Result<()> {
     };
     let rows = cache::search_cache(&store, &term, &filters)?;
     let uncommitted_ids = uncommitted_rune_ids(&store, &rows);
-    output_issue_rows(&store, &rows, &uncommitted_ids, json);
+    let display = user_display(&user_cfg, &store)?;
+    output_issue_rows(&store, &rows, &uncommitted_ids, json, &display);
     if !json && rows.is_empty() {
         println!("No runes match '{term}'.");
     }
@@ -2552,6 +2634,7 @@ fn truncate_to_width(s: &str, max: usize) -> String {
 fn print_issue_table(
     rows: &[cache::CacheRow],
     uncommitted_ids: &std::collections::HashSet<String>,
+    display: &UserDisplay,
 ) {
     use unicode_width::UnicodeWidthStr;
     if rows.is_empty() {
@@ -2593,12 +2676,13 @@ fn print_issue_table(
     let mut w_labels = if has_labels { "labels".len() } else { 0 };
     let mut w_title = "title".len();
     let label_strs: Vec<String> = rows.iter().map(|r| format_labels(&r.labels, 3)).collect();
+    let assignee_strs: Vec<String> = rows.iter().map(|r| display.render(&r.assignee)).collect();
     for (i, row) in rows.iter().enumerate() {
         w_updated = w_updated.max(updated_strs[i].len());
         w_id = w_id.max(id_strs[i].len());
         w_kind = w_kind.max(row.kind.len());
         w_status = w_status.max(status_strs[i].len());
-        w_assignee = w_assignee.max(row.assignee.len());
+        w_assignee = w_assignee.max(assignee_strs[i].chars().count());
         if has_labels {
             w_labels = w_labels.max(label_strs[i].len());
         }
@@ -2659,7 +2743,7 @@ fn print_issue_table(
         if has_labels {
             println!(
                 "{}  {}{:id_pad$}  {:<w_kind$}  {}{:status_pad$}  {:<w_assignee$}  {:<w_labels$}  {}",
-                updated_display, id_display, "", row.kind, status_display, "", row.assignee, label_strs[i], title_strs[i]
+                updated_display, id_display, "", row.kind, status_display, "", assignee_strs[i], label_strs[i], title_strs[i]
             );
         } else {
             println!(
@@ -2670,7 +2754,7 @@ fn print_issue_table(
                 row.kind,
                 status_display,
                 "",
-                row.assignee,
+                assignee_strs[i],
                 title_strs[i]
             );
         }
@@ -2736,7 +2820,8 @@ fn run_show(args: ShowArgs) -> Result<()> {
         .strip_prefix(&store.path)
         .map_err(|e| Error::new(e.to_string()))?;
     let history = backend::file_rich_log(&store, rel_path, 50).unwrap_or_default();
-    print_annotated_rune_doc(&content, &history, &store, rel_path);
+    let display = user_display(&user_cfg, &store)?;
+    print_annotated_rune_doc(&content, &history, &store, rel_path, &display);
     let doc = parse_doc(&path)?;
     // Display dep status inline
     if !doc.deps.is_empty() {
@@ -2825,8 +2910,15 @@ fn format_timestamp_local(epoch_secs: i64) -> String {
     zdt.strftime("%b %-d at %-I:%M%P").to_string()
 }
 
-fn print_annotated_rune_doc(content: &str, history: &[LogEntry], store: &Store, rel_path: &Path) {
+fn print_annotated_rune_doc(
+    content: &str,
+    history: &[LogEntry],
+    store: &Store,
+    rel_path: &Path,
+    display: &UserDisplay,
+) {
     let (frontmatter, body) = split_rune_doc(content);
+    let frontmatter = render_frontmatter_users(&frontmatter, display);
     let is_uncommitted = history.is_empty();
 
     if is_uncommitted {
@@ -2839,10 +2931,12 @@ fn print_annotated_rune_doc(content: &str, history: &[LogEntry], store: &Store, 
     // Oldest entry = created, newest = last update
     let created = history.last().unwrap();
     let updated = history.first().unwrap();
+    let created_by = display.render_parts(&created.author, &created.author_email);
+    let updated_by = display.render_parts(&updated.author, &updated.author_email);
 
     let mut injected = String::new();
-    if !created.author.is_empty() {
-        injected.push_str(&format!("  created_by \"{}\"\n", created.author));
+    if !created_by.is_empty() {
+        injected.push_str(&format!("  created_by \"{created_by}\"\n"));
     }
     if created.timestamp > 0 {
         injected.push_str(&format!(
@@ -2851,8 +2945,8 @@ fn print_annotated_rune_doc(content: &str, history: &[LogEntry], store: &Store, 
         ));
     }
     if updated.revision != created.revision {
-        if !updated.author.is_empty() && updated.author != created.author {
-            injected.push_str(&format!("  updated_by \"{}\"\n", updated.author));
+        if !updated_by.is_empty() && updated_by != created_by {
+            injected.push_str(&format!("  updated_by \"{updated_by}\"\n"));
         }
         if updated.timestamp > 0 {
             injected.push_str(&format!(
@@ -2871,8 +2965,15 @@ fn print_annotated_rune_doc(content: &str, history: &[LogEntry], store: &Store, 
     inject_frontmatter_metadata(&frontmatter, &injected, false);
 
     // Build section-level and comment attribution by diffing consecutive revisions
-    let (section_annotations, comment_attributions) =
-        build_annotations(history, store, rel_path, &body, created, has_pending);
+    let (section_annotations, comment_attributions) = build_annotations(
+        history,
+        store,
+        rel_path,
+        &body,
+        created,
+        has_pending,
+        display,
+    );
 
     // Print body with section and comment annotations
     print_annotated_body(
@@ -2881,6 +2982,27 @@ fn print_annotated_rune_doc(content: &str, history: &[LogEntry], store: &Store, 
         &comment_attributions,
         &created.revision,
     );
+}
+
+/// The file keeps the canonical email; only what `show` prints follows
+/// `user.format`.
+fn render_frontmatter_users(frontmatter: &str, display: &UserDisplay) -> String {
+    let mut out = String::new();
+    for line in frontmatter.lines() {
+        let trimmed = line.trim_start();
+        let rewritten = trimmed
+            .strip_prefix("assignee \"")
+            .and_then(|rest| rest.strip_suffix('"'))
+            .map(|value| (value, display.render(value)))
+            .filter(|(value, rendered)| rendered != value)
+            .map(|(_, rendered)| {
+                let indent = &line[..line.len() - trimmed.len()];
+                format!("{indent}assignee \"{rendered}\"")
+            });
+        out.push_str(rewritten.as_deref().unwrap_or(line));
+        out.push('\n');
+    }
+    out
 }
 
 /// Check if the current disk content of a rune file differs from the latest committed version.
@@ -2966,7 +3088,9 @@ fn build_annotations(
     current_body: &str,
     created: &LogEntry,
     has_pending: bool,
+    display: &UserDisplay,
 ) -> (Vec<SectionAnnotation>, Vec<CommentAttribution>) {
+    let render = |entry: &LogEntry| display.render_parts(&entry.author, &entry.author_email);
     let current_sections = parse_sections(current_body);
     if current_sections.is_empty() {
         return (Vec::new(), Vec::new());
@@ -2994,7 +3118,7 @@ fn build_annotations(
         if heading == "Comments" || heading.is_empty() {
             continue;
         }
-        let mut last_editor = created.author.clone();
+        let mut last_editor = render(created);
         let mut last_edited_at = created.timestamp;
         let mut last_edit_revision = created.revision.clone();
         let mut prev_section_text: Option<String> = None;
@@ -3008,7 +3132,7 @@ fn build_annotations(
 
             if let Some(ref text) = section_text {
                 if prev_section_text.as_ref() != Some(text) {
-                    last_editor = entry.author.clone();
+                    last_editor = render(entry);
                     last_edited_at = entry.timestamp;
                     last_edit_revision = entry.revision.clone();
                 }
@@ -3053,7 +3177,7 @@ fn build_annotations(
 
     if !current_comments.is_empty() {
         for (ci, comment) in current_comments.iter().enumerate() {
-            let mut author = created.author.clone();
+            let mut author = render(created);
             let mut timestamp = created.timestamp;
             let mut prev_text: Option<String> = None;
 
@@ -3069,7 +3193,7 @@ fn build_annotations(
 
                 if let Some(ref text) = rev_text {
                     if prev_text.as_ref() != Some(text) {
-                        author = entry.author.clone();
+                        author = render(entry);
                         timestamp = entry.timestamp;
                     }
                 }
@@ -3370,10 +3494,11 @@ fn run_edit(args: EditArgs) -> Result<()> {
         if let Some(assignee_value) = assignee {
             if assignee_value.eq_ignore_ascii_case("none") {
                 doc.assignee = None;
-            } else if let Some(resolved) = user_cfg.resolve_user_alias(&assignee_value) {
-                doc.assignee = Some(resolved);
             } else {
-                doc.assignee = Some(assignee_value);
+                let resolved = user_cfg
+                    .resolve_user_alias(&assignee_value)
+                    .unwrap_or(assignee_value);
+                doc.assignee = Some(canonical_user_value(&store, &resolved)?);
             }
         }
         for label in add_labels {
@@ -4023,6 +4148,7 @@ struct MatchedEntry {
     revision: String,
     timestamp: i64,
     author: String,
+    author_email: String,
     description: String,
     rune_ids: Vec<String>,
 }
@@ -4042,7 +4168,10 @@ fn match_log_entries(
             break;
         }
         if let Some(author) = author_filter {
-            if !entry.author.eq_ignore_ascii_case(author) {
+            let matches = entry.author.eq_ignore_ascii_case(author)
+                || entry.author_email.eq_ignore_ascii_case(author)
+                || entry.identity().matches_name(author);
+            if !matches {
                 continue;
             }
         }
@@ -4070,6 +4199,7 @@ fn match_log_entries(
             revision: entry.revision.clone(),
             timestamp: entry.timestamp,
             author: entry.author.clone(),
+            author_email: entry.author_email.clone(),
             description: entry.description.clone(),
             rune_ids,
         });
@@ -4142,6 +4272,7 @@ fn format_log_entries(
     entries: &[MatchedEntry],
     rune_filter: Option<&str>,
     project_filter: Option<&str>,
+    display: &UserDisplay,
 ) -> String {
     use std::fmt::Write;
     let mut out = String::new();
@@ -4151,7 +4282,8 @@ fn format_log_entries(
         let ts = format_log_timestamp(entry.timestamp);
         let rev_colored = color::gray(short_rev);
         let ts_colored = color::teal(&ts);
-        let author_colored = color::yellow(&entry.author);
+        let author_colored =
+            color::yellow(&display.render_parts(&entry.author, &entry.author_email));
 
         if entry.rune_ids.is_empty() {
             let desc = entry.description.lines().next().unwrap_or("").trim();
@@ -4288,8 +4420,13 @@ fn run_log(args: LogArgs) -> Result<()> {
     if json {
         print_log_entries_json(&entries);
     } else {
-        let output =
-            format_log_entries(&entries, rune_filter.as_deref(), project_filter.as_deref());
+        let display = user_display(&user_cfg, &store)?;
+        let output = format_log_entries(
+            &entries,
+            rune_filter.as_deref(),
+            project_filter.as_deref(),
+            &display,
+        );
         if output.is_empty() {
             println!("No matching changes found.");
         } else {
@@ -4761,8 +4898,11 @@ fn run_init(args: InitArgs) -> Result<()> {
         if stdin_is_tty() {
             println!("Creating global config at {}", global_path.display());
         }
-        let email = initial_identity_email()?;
+        let (name, email) = initial_identity(&cwd)?;
         user_config::config_set(&global_path, "user.email", &email)?;
+        if let Some(name) = name {
+            user_config::config_set(&global_path, "user.name", &name)?;
+        }
         user_config::config_set(&global_path, "new.task.assignee", "self")?;
         println!("Global config created at {}", global_path.display());
     }
@@ -4839,18 +4979,28 @@ fn run_init(args: InitArgs) -> Result<()> {
     Ok(())
 }
 
-/// Falls back to the environment so a non-interactive first run is not a dead end.
-fn initial_identity_email() -> Result<String> {
+/// The (name, email) a first run writes to the global config. Falls back to
+/// `RUNES_USER` then `git config`, so a non-interactive first run is not a
+/// dead end.
+fn initial_identity(cwd: &Path) -> Result<(Option<String>, String)> {
     if stdin_is_tty() {
-        return prompt_required("User email");
+        return Ok((None, prompt_required("User email")?));
     }
-    match std::env::var("RUNES_USER") {
-        Ok(value) if !value.trim().is_empty() => Ok(parse_author_string(&value).1),
-        _ => Err(Error::new(
-            "No global config yet. Run `runes init` interactively, or set an identity first \
-             with `runes config set user.email <you@example.com> --global`.",
-        )),
+    if let Some(value) = system_env("RUNES_USER") {
+        let identity = Identity::parse(&value);
+        return Ok((
+            identity.real_name().map(str::to_string),
+            identity.canonical(),
+        ));
     }
+    if let Some((name, email)) = git_identity(cwd) {
+        let identity = Identity::from_parts(&name, &email);
+        return Ok((identity.real_name().map(str::to_string), email));
+    }
+    Err(Error::new(
+        "No global config yet. Run `runes init` interactively, or set an identity first \
+         with `runes config set user.email <you@example.com> --global`.",
+    ))
 }
 
 /// The store `runes init` wires the repo to, created when this machine has none.
@@ -5188,7 +5338,7 @@ fn write_quickstart(out: &mut impl io::Write, mode: QuickstartMode) -> Result<()
             )?;
             writeln!(
                 out,
-                "    runes init --project myapp     # non-interactive (needs RUNES_USER set)"
+                "    runes init --project myapp     # non-interactive (needs RUNES_USER or git config user.email)"
             )?;
             writeln!(out)?;
         } else {
@@ -5608,9 +5758,11 @@ fn write_quickstart(out: &mut impl io::Write, mode: QuickstartMode) -> Result<()
 mod tests {
     use super::{
         collect_matching_entries, detect_agent, format_log_entries, match_log_entries,
-        migrate_status_line, quickstart_audience, resolve_commit_author_env, strip_show_injections,
-        truncate_to_width, Audience, LogEntry, QuickstartArgs, UserConfig,
+        migrate_status_line, quickstart_audience, render_frontmatter_users,
+        resolve_commit_author_env, strip_show_injections, truncate_to_width, Audience, LogEntry,
+        Mailmap, QuickstartArgs, UserConfig, UserDisplay,
     };
+    use runes_core::identity::UserFormat;
     use unicode_width::UnicodeWidthStr;
 
     /// Env lookup over a fixed list, returning values verbatim — detection has
@@ -5798,16 +5950,20 @@ mod tests {
         assert_eq!(detect_agent(&env), None);
     }
 
+    fn no_git() -> Option<(String, String)> {
+        None
+    }
+
     #[test]
     fn author_explicit_signals_win_without_decoration() {
         let cfg = cfg_with_email(Some("anowell@gmail.com"));
         let env = env_of(&[("CLAUDECODE", "1"), ("RUNES_USER", "Bot <bot@example.com>")]);
 
         let (name, email) =
-            resolve_commit_author_env(&cfg, Some("Ann <ann@example.com>"), &env).unwrap();
+            resolve_commit_author_env(&cfg, Some("Ann <ann@example.com>"), &env, &no_git).unwrap();
         assert_eq!((name.as_str(), email.as_str()), ("Ann", "ann@example.com"));
 
-        let (name, email) = resolve_commit_author_env(&cfg, None, &env).unwrap();
+        let (name, email) = resolve_commit_author_env(&cfg, None, &env, &no_git).unwrap();
         assert_eq!((name.as_str(), email.as_str()), ("Bot", "bot@example.com"));
     }
 
@@ -5815,16 +5971,21 @@ mod tests {
     fn author_detected_agent_acts_on_behalf_of_human() {
         let cfg = cfg_with_email(Some("anowell@gmail.com"));
         let (name, email) =
-            resolve_commit_author_env(&cfg, None, &env_of(&[("CLAUDECODE", "1")])).unwrap();
+            resolve_commit_author_env(&cfg, None, &env_of(&[("CLAUDECODE", "1")]), &no_git)
+                .unwrap();
         assert_eq!(name, "claude (on behalf of anowell@gmail.com)");
         assert_eq!(email, "claude@agents.localhost");
     }
 
     #[test]
     fn author_detected_agent_without_human_identity() {
-        let (name, email) =
-            resolve_commit_author_env(&cfg_with_email(None), None, &env_of(&[("CLAUDECODE", "1")]))
-                .unwrap();
+        let (name, email) = resolve_commit_author_env(
+            &cfg_with_email(None),
+            None,
+            &env_of(&[("CLAUDECODE", "1")]),
+            &no_git,
+        )
+        .unwrap();
         assert_eq!(
             (name.as_str(), email.as_str()),
             ("claude", "claude@agents.localhost")
@@ -5835,7 +5996,8 @@ mod tests {
     fn author_skips_on_behalf_of_when_identity_is_the_agent() {
         let cfg = cfg_with_email(Some("claude@agents.localhost"));
         let (name, email) =
-            resolve_commit_author_env(&cfg, None, &env_of(&[("CLAUDECODE", "1")])).unwrap();
+            resolve_commit_author_env(&cfg, None, &env_of(&[("CLAUDECODE", "1")]), &no_git)
+                .unwrap();
         assert_eq!(
             (name.as_str(), email.as_str()),
             ("claude", "claude@agents.localhost")
@@ -5845,9 +6007,13 @@ mod tests {
     #[test]
     fn author_unusable_agent_slug_falls_back_to_config() {
         let cfg = cfg_with_email(Some("anowell@gmail.com"));
-        let (name, email) =
-            resolve_commit_author_env(&cfg, None, &env_of(&[("RUNES_AGENT", "My Tool v2")]))
-                .unwrap();
+        let (name, email) = resolve_commit_author_env(
+            &cfg,
+            None,
+            &env_of(&[("RUNES_AGENT", "My Tool v2")]),
+            &no_git,
+        )
+        .unwrap();
         assert_eq!(
             (name.as_str(), email.as_str()),
             ("anowell@gmail.com", "anowell@gmail.com")
@@ -5863,7 +6029,8 @@ mod tests {
             ..UserConfig::default()
         };
         let (name, email) =
-            resolve_commit_author_env(&cfg, None, &env_of(&[("CLAUDECODE", "1")])).unwrap();
+            resolve_commit_author_env(&cfg, None, &env_of(&[("CLAUDECODE", "1")]), &no_git)
+                .unwrap();
         assert_eq!(
             (name.as_str(), email.as_str()),
             ("Anthony", "anowell@gmail.com")
@@ -5871,8 +6038,77 @@ mod tests {
     }
 
     #[test]
+    fn author_falls_back_to_git_config() {
+        let git = || Some(("Ana Ruiz".to_string(), "ana@example.com".to_string()));
+        let (name, email) =
+            resolve_commit_author_env(&cfg_with_email(None), None, &env_of(&[]), &git).unwrap();
+        assert_eq!(
+            (name.as_str(), email.as_str()),
+            ("Ana Ruiz", "ana@example.com")
+        );
+    }
+
+    #[test]
+    fn author_prefers_runes_config_over_git_config() {
+        let git = || Some(("Ana Ruiz".to_string(), "ana@example.com".to_string()));
+        let (_, email) = resolve_commit_author_env(
+            &cfg_with_email(Some("anowell@gmail.com")),
+            None,
+            &env_of(&[]),
+            &git,
+        )
+        .unwrap();
+        assert_eq!(email, "anowell@gmail.com");
+    }
+
+    #[test]
+    fn author_agent_acts_on_behalf_of_git_identity() {
+        let git = || Some(("Ana Ruiz".to_string(), "ana@example.com".to_string()));
+        let (name, email) = resolve_commit_author_env(
+            &cfg_with_email(None),
+            None,
+            &env_of(&[("CLAUDECODE", "1")]),
+            &git,
+        )
+        .unwrap();
+        assert_eq!(name, "claude (on behalf of ana@example.com)");
+        assert_eq!(email, "claude@agents.localhost");
+    }
+
+    #[test]
+    fn frontmatter_assignee_renders_through_the_mailmap() {
+        let display = UserDisplay::new(
+            Mailmap::parse("Ana Ruiz <ana@example.com>\n"),
+            UserFormat::Name,
+        );
+        let frontmatter = concat!(
+            "---\n",
+            "task \"rn-abc\" {\n",
+            "  status \"todo\"\n",
+            "  assignee \"ana@example.com\"\n",
+            "  labels \"assignee\"\n",
+            "}\n",
+            "---\n",
+        );
+        let rendered = render_frontmatter_users(frontmatter, &display);
+        assert!(rendered.contains("assignee \"Ana Ruiz\""), "{rendered}");
+        // Only the assignee field is rewritten; a label that happens to spell
+        // "assignee" is left alone.
+        assert!(rendered.contains("labels \"assignee\""), "{rendered}");
+        assert!(rendered.contains("status \"todo\""), "{rendered}");
+    }
+
+    #[test]
+    fn frontmatter_without_a_known_user_is_unchanged() {
+        let display = UserDisplay::new(Mailmap::default(), UserFormat::Name);
+        let frontmatter = "---\ntask \"rn-abc\" {\n  assignee \"bo@example.com\"\n}\n---\n";
+        assert_eq!(render_frontmatter_users(frontmatter, &display), frontmatter);
+    }
+
+    #[test]
     fn author_errors_without_any_identity() {
-        let err = resolve_commit_author_env(&cfg_with_email(None), None, &env_of(&[])).unwrap_err();
+        let err = resolve_commit_author_env(&cfg_with_email(None), None, &env_of(&[]), &no_git)
+            .unwrap_err();
         assert!(
             err.to_string().contains("No author configured"),
             "unexpected error: {err}"
@@ -5884,6 +6120,7 @@ mod tests {
             revision: revision.to_string(),
             timestamp: 1_700_000_000,
             author: "test@runes.dev".to_string(),
+            author_email: "test@runes.dev".to_string(),
             description: "some change".to_string(),
             changed_files: files.iter().map(|f| f.to_string()).collect(),
         }
@@ -5903,7 +6140,7 @@ mod tests {
         let matched = match_log_entries(&entries, None, Some("proj"), None, 2);
         assert_eq!(matched.len(), 2, "expected 2 commits");
         assert_eq!(matched[0].rune_ids.len(), 3, "expected 3 runes on commit 1");
-        let out = format_log_entries(&matched, None, Some("proj"));
+        let out = format_log_entries(&matched, None, Some("proj"), &UserDisplay::default());
         assert_eq!(out.lines().count(), 4, "expected 4 rows: {out}");
     }
 
@@ -5915,7 +6152,7 @@ mod tests {
         ];
         let matched = match_log_entries(&entries, None, Some("proj"), None, 1);
         assert_eq!(matched.len(), 1, "limit 1 keeps only the newest commit");
-        let out = format_log_entries(&matched, None, Some("proj"));
+        let out = format_log_entries(&matched, None, Some("proj"), &UserDisplay::default());
         assert_eq!(out.lines().count(), 2, "both rune rows survive: {out}");
         assert!(!out.contains("proj-cc"), "second commit leaked: {out}");
     }
@@ -5927,7 +6164,7 @@ mod tests {
             .collect();
         entries.push(log_entry("target", &["proj/aa--one.md"]));
         let matched = match_log_entries(&entries, Some("proj-aa"), None, None, 5);
-        let out = format_log_entries(&matched, Some("proj-aa"), None);
+        let out = format_log_entries(&matched, Some("proj-aa"), None, &UserDisplay::default());
         assert_eq!(out.lines().count(), 1, "expected 1 row: {out}");
         assert!(out.contains("proj-aa"), "missing matched rune: {out}");
     }
@@ -5938,7 +6175,7 @@ mod tests {
         let entries = vec![log_entry("aaa", &["proj/aa--one.md", "proj/bb--two.md"])];
         let matched = match_log_entries(&entries, Some("proj-aa"), None, None, 5);
         assert_eq!(matched.len(), 1);
-        let out = format_log_entries(&matched, Some("proj-aa"), None);
+        let out = format_log_entries(&matched, Some("proj-aa"), None, &UserDisplay::default());
         assert_eq!(out.lines().count(), 1, "expected 1 row: {out}");
         assert!(!out.contains("proj-bb"), "sibling rune leaked: {out}");
     }

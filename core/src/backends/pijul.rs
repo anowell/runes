@@ -13,46 +13,58 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tokio::runtime::Runtime;
 
-/// Build a map from public key → display name for all local pijul identities.
-/// Display name prefers: display_name > "name <email>" > email > identity name.
-fn load_identity_map() -> std::collections::HashMap<String, String> {
+/// Build a map from public key → (display name, email) for all local pijul
+/// identities. Display name prefers: display_name > identity name.
+fn load_identity_map() -> std::collections::HashMap<String, (String, String)> {
     let mut map = std::collections::HashMap::new();
     if let Ok(identities) = CompleteIdentity::load_all() {
         for ident in identities {
             let author = &ident.config.author;
-            let display = if !author.display_name.is_empty() {
-                author.display_name.clone()
-            } else if !author.email.is_empty() {
-                author.email.clone()
-            } else {
+            let display = if author.display_name.is_empty() {
                 ident.name.clone()
+            } else {
+                author.display_name.clone()
             };
-            map.insert(ident.public_key.key.clone(), display);
+            map.insert(
+                ident.public_key.key.clone(),
+                (display, author.email.clone()),
+            );
         }
     }
     map
 }
 
-/// Resolve author from a pijul change's author map.
-/// Strategy: if key is present, look up the local identity first;
-/// fall back to email/name from the author map.
+/// Resolve a pijul change's author as (display name, email).
+/// Strategy: if key is present, look up the local identity first; fall back to
+/// the name/email the change itself carries, then to the bare key.
 fn resolve_pijul_author(
     author_map: &std::collections::BTreeMap<String, String>,
-    identity_map: &std::collections::HashMap<String, String>,
-) -> String {
-    // Try key → identity lookup first
+    identity_map: &std::collections::HashMap<String, (String, String)>,
+) -> (String, String) {
+    let email = author_map.get("email").cloned().unwrap_or_default();
+    let mut name = author_map.get("name").cloned().unwrap_or_default();
+    let mut identity_email = String::new();
     if let Some(key) = author_map.get("key") {
-        if let Some(display) = identity_map.get(key) {
-            return display.clone();
+        if let Some((known_name, known_email)) = identity_map.get(key) {
+            if name.is_empty() {
+                name = known_name.clone();
+            }
+            identity_email = known_email.clone();
         }
     }
-    // Fall back to email > name > key
-    author_map
-        .get("email")
-        .or(author_map.get("name"))
-        .or(author_map.get("key"))
-        .cloned()
-        .unwrap_or_default()
+    let email = if email.is_empty() {
+        identity_email
+    } else {
+        email
+    };
+    if name.is_empty() {
+        name = if email.is_empty() {
+            author_map.get("key").cloned().unwrap_or_default()
+        } else {
+            email.clone()
+        };
+    }
+    (name, email)
 }
 
 /// Extract changed file paths from a pijul Change by inspecting its hunks.
@@ -274,25 +286,27 @@ fn enrich_hashes(store: &Store, hashes: &[String]) -> Result<Vec<super::LogEntry
         let hash = hash_str
             .parse::<Hash>()
             .map_err(|e| Error::new(format!("invalid pijul change hash: {e}")))?;
-        let (author, timestamp, description, changed_files) = match changes.get_change(&hash) {
-            Ok(change) => {
-                let author_name = change
-                    .header
-                    .authors
-                    .first()
-                    .map(|a| resolve_pijul_author(&a.0, &id_map))
-                    .unwrap_or_default();
-                let ts = change.header.timestamp.as_second();
-                let desc = change.header.message.clone();
-                let files = extract_changed_files(&change);
-                (author_name, ts, desc, files)
-            }
-            Err(_) => (String::new(), 0, String::new(), Vec::new()),
-        };
+        let ((author, author_email), timestamp, description, changed_files) =
+            match changes.get_change(&hash) {
+                Ok(change) => {
+                    let author_parts = change
+                        .header
+                        .authors
+                        .first()
+                        .map(|a| resolve_pijul_author(&a.0, &id_map))
+                        .unwrap_or_default();
+                    let ts = change.header.timestamp.as_second();
+                    let desc = change.header.message.clone();
+                    let files = extract_changed_files(&change);
+                    (author_parts, ts, desc, files)
+                }
+                Err(_) => ((String::new(), String::new()), 0, String::new(), Vec::new()),
+            };
         entries.push(super::LogEntry {
             revision: hash_str.clone(),
             timestamp,
             author,
+            author_email,
             description,
             changed_files,
         });
@@ -340,25 +354,27 @@ pub(super) fn pijul_sdk_rich_log(store: &Store, limit: usize) -> Result<Vec<supe
             item.map_err(|e| Error::new(format!("libpijul reverse log item failed: {e}")))?;
         let hash: Hash = pair.0.into();
         let revision = hash.to_base32();
-        let (author, timestamp, description, changed_files) = match changes.get_change(&hash) {
-            Ok(change) => {
-                let author_name = change
-                    .header
-                    .authors
-                    .first()
-                    .map(|a| resolve_pijul_author(&a.0, &id_map))
-                    .unwrap_or_default();
-                let ts = change.header.timestamp.as_second();
-                let desc = change.header.message.clone();
-                let files = extract_changed_files(&change);
-                (author_name, ts, desc, files)
-            }
-            Err(_) => (String::new(), 0, String::new(), Vec::new()),
-        };
+        let ((author, author_email), timestamp, description, changed_files) =
+            match changes.get_change(&hash) {
+                Ok(change) => {
+                    let author_parts = change
+                        .header
+                        .authors
+                        .first()
+                        .map(|a| resolve_pijul_author(&a.0, &id_map))
+                        .unwrap_or_default();
+                    let ts = change.header.timestamp.as_second();
+                    let desc = change.header.message.clone();
+                    let files = extract_changed_files(&change);
+                    (author_parts, ts, desc, files)
+                }
+                Err(_) => ((String::new(), String::new()), 0, String::new(), Vec::new()),
+            };
         entries.push(super::LogEntry {
             revision,
             timestamp,
             author,
+            author_email,
             description,
             changed_files,
         });

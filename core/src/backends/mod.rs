@@ -27,9 +27,18 @@ use pijul::{
 pub struct LogEntry {
     pub revision: String,
     pub timestamp: i64,
+    /// Author display name, falling back to the email when the commit has none.
     pub author: String,
+    /// Author email, the key identities are recorded under. May be empty.
+    pub author_email: String,
     pub description: String,
     pub changed_files: Vec<String>,
+}
+
+impl LogEntry {
+    pub fn identity(&self) -> crate::identity::Identity {
+        crate::identity::Identity::from_parts(&self.author, &self.author_email)
+    }
 }
 
 pub trait BackendAdapter {

@@ -27,6 +27,17 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// A commit signature as (display name, email), the name defaulting to the
+/// email so callers always have something to print.
+fn signature_parts(signature: &Signature) -> (String, String) {
+    let name = if signature.name.is_empty() {
+        signature.email.clone()
+    } else {
+        signature.name.clone()
+    };
+    (name, signature.email.clone())
+}
+
 pub(super) fn probe_jj_workspace(store: &Store) -> Result<(PathBuf, PathBuf)> {
     let config = StackedConfig::with_defaults();
     let settings = UserSettings::from_config(config).map_err(|e| Error::new(e.to_string()))?;
@@ -267,11 +278,7 @@ pub(super) fn jj_sdk_rich_log(store: &Store, limit: usize) -> Result<Vec<super::
             continue;
         }
         let author = commit.author();
-        let author_name = if author.email.is_empty() {
-            author.name.clone()
-        } else {
-            author.email.clone()
-        };
+        let (author_name, author_email) = signature_parts(author);
         let timestamp = author.timestamp.timestamp.0 / 1000;
         let changed_files = match repo
             .index()
@@ -303,6 +310,7 @@ pub(super) fn jj_sdk_rich_log(store: &Store, limit: usize) -> Result<Vec<super::
             revision: commit_id.hex(),
             timestamp,
             author: author_name,
+            author_email,
             description: desc,
             changed_files,
         });
@@ -563,16 +571,13 @@ pub(super) fn jj_sdk_file_rich_log(
         if changed {
             let desc = commit.description().trim().to_string();
             let author = commit.author();
-            let author_name = if author.name.is_empty() {
-                author.email.clone()
-            } else {
-                author.name.clone()
-            };
+            let (author_name, author_email) = signature_parts(author);
             let timestamp = author.timestamp.timestamp.0 / 1000;
             entries.push(super::LogEntry {
                 revision: commit_id.hex(),
                 timestamp,
                 author: author_name,
+                author_email,
                 description: desc,
                 changed_files: all_changed_files,
             });

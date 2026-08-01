@@ -103,11 +103,17 @@ Inside the block:
 | Field | Required | Description |
 |-------|----------|-------------|
 | `status` | yes | Current state, `state` or `state:substate` (e.g. `"todo"`, `"wip:review"`, `"closed:canceled"`) |
-| `assignee` | no | Assigned user |
+| `assignee` | no | Assigned user, by email (see below) |
 | `labels` | no | Space-separated quoted strings |
 | `milestone` | no | Parent milestone ID |
 | `relations` | no | Block of typed relations (e.g. `blocks`, `related`) |
 | `dep` | no | Dependency ID (repeatable) |
+
+A user field holds the canonical identity — an email address, or a bare handle
+when there is no email. Passing `--assignee "Ana Ruiz <ana@example.com>"` writes
+`assignee "ana@example.com"` and records the name in the store's `.mailmap`;
+`runes show` renders it back per `user.format`. See
+[configuration.md](configuration.md#names-and-emails).
 
 ### Body conventions
 

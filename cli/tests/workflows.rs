@@ -3896,3 +3896,185 @@ fn find_rune_file(store_path: &Path, rune_id: &str) -> PathBuf {
         project_dir.display()
     );
 }
+
+/// The store keeps one canonical name per email in `.mailmap`, recorded from
+/// whoever commits, and the file rides along with the commit that produced it.
+#[test]
+fn jj_commit_records_the_author_in_the_mailmap() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let (home, store_path) = setup_jj_store("jj-mailmap-author");
+    runes_ok(
+        &home,
+        &["new", "--project", "test:proj", "Mailmap rune", "--commit"],
+    );
+
+    let mailmap =
+        fs::read_to_string(Path::new(&store_path).join(".mailmap")).expect("read mailmap");
+    assert_eq!(mailmap, "Test User <test@runes.dev>\n", "{mailmap}");
+
+    let committed = command_ok(
+        &home,
+        "jj",
+        &["-R", &store_path, "file", "list", "-r", "@-"],
+        None,
+    );
+    assert!(
+        committed.contains(".mailmap"),
+        "mailmap left uncommitted: {committed}"
+    );
+}
+
+/// `Name <email>` on an assignee splits: the doc keeps the email, the mailmap
+/// keeps the name, and `show` puts them back together.
+#[test]
+fn assignee_stores_the_email_and_shows_the_name() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let (home, store_path) = setup_jj_store("assignee-canonical");
+    let id = rune_id(&runes_ok(
+        &home,
+        &[
+            "new",
+            "--project",
+            "test:proj",
+            "Assigned rune",
+            "--assignee",
+            "Ana Ruiz <ana@example.com>",
+            "--commit",
+        ],
+    ))
+    .to_string();
+    let target = format!("test:{id}");
+
+    let stored = fs::read_to_string(find_rune_file(Path::new(&store_path), &id)).expect("read doc");
+    assert!(
+        stored.contains("assignee \"ana@example.com\"") && !stored.contains("Ana Ruiz"),
+        "doc did not store the canonical email: {stored}"
+    );
+
+    let shown = runes_ok(&home, &["show", &target]);
+    assert!(
+        shown.contains("assignee \"Ana Ruiz\""),
+        "show did not render the name: {shown}"
+    );
+
+    // JSON is the machine contract, so it stays canonical.
+    let json = runes_ok(&home, &["show", &target, "--json"]);
+    assert!(
+        json.contains("\"assignee\": \"ana@example.com\""),
+        "json is not canonical: {json}"
+    );
+
+    let listed = runes_ok(
+        &home,
+        &["list", "--project", "test:proj", "--assignee", "Ana Ruiz"],
+    );
+    assert!(
+        listed.contains(&id) && listed.contains("Ana Ruiz"),
+        "list did not resolve the name filter: {listed}"
+    );
+}
+
+/// `user.format` picks which part of the identity human-facing output shows.
+#[test]
+fn user_format_config_selects_the_rendering() {
+    if !command_exists("jj") {
+        eprintln!("skipping: jj not installed");
+        return;
+    }
+    let (home, _) = setup_jj_store("user-format");
+    let id = rune_id(&runes_ok(
+        &home,
+        &[
+            "new",
+            "--project",
+            "test:proj",
+            "Formatted rune",
+            "--assignee",
+            "Ana Ruiz <ana@example.com>",
+            "--commit",
+        ],
+    ))
+    .to_string();
+    let target = format!("test:{id}");
+
+    // The format matrix is unit-tested; what matters here is that the config
+    // key reaches `show`, aliases included.
+    for (format, expected) in [("email", "ana@example.com"), ("firstName", "Ana")] {
+        runes_ok(&home, &["config", "set", "user.format", format, "--global"]);
+        let shown = runes_ok(&home, &["show", &target]);
+        assert!(
+            shown.contains(&format!("assignee \"{expected}\"")),
+            "user.format={format} did not render {expected}: {shown}"
+        );
+    }
+
+    runes_ok(
+        &home,
+        &["config", "set", "user.format", "nickname", "--global"],
+    );
+    let output = runes_output(&home, &["show", &target]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success() && stderr.contains("Unknown user.format"),
+        "an unusable user.format should be reported: {stderr}"
+    );
+}
+
+/// With no runes identity and no `RUNES_USER`, authorship comes from the git
+/// config of the repo the runes config lives in.
+#[test]
+fn author_falls_back_to_git_config_of_the_repo() {
+    if !command_exists("jj") || !command_exists("git") {
+        eprintln!("skipping: jj or git not installed");
+        return;
+    }
+    let (home, store_path) = setup_jj_store("git-config-author");
+    let work = home.join("work");
+    fs::create_dir_all(&work).expect("create work dir");
+    command_ok(&home, "git", &["init"], Some(&work));
+    command_ok(
+        &home,
+        "git",
+        &["config", "user.name", "Ana Ruiz"],
+        Some(&work),
+    );
+    command_ok(
+        &home,
+        "git",
+        &["config", "user.email", "ana@example.com"],
+        Some(&work),
+    );
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_runes"));
+    cmd.env("HOME", &home);
+    cmd.env_remove("RUNES_USER");
+    for var in AGENT_ENV_VARS {
+        cmd.env_remove(var);
+    }
+    let output = cmd
+        .args(["new", "--project", "test:proj", "Git identity", "--commit"])
+        .current_dir(&work)
+        .output()
+        .expect("run runes new");
+    assert!(
+        output.status.success(),
+        "runes new failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let mailmap =
+        fs::read_to_string(Path::new(&store_path).join(".mailmap")).expect("read mailmap");
+    assert_eq!(mailmap, "Ana Ruiz <ana@example.com>\n", "{mailmap}");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let shown = runes_ok(&home, &["show", &format!("test:{}", rune_id(&stdout))]);
+    assert!(
+        shown.contains("created_by \"Ana Ruiz\""),
+        "git identity did not reach the commit: {shown}"
+    );
+}
