@@ -234,7 +234,7 @@ const BUILTIN_VIEWS: &[(&str, &str)] = &[
     ("open", "runes that aren't closed yet (the default)"),
     ("mine", "open runes assigned to you"),
     ("all", "every rune, whatever its status"),
-    ("closed", "runes in a closed status"),
+    ("closed", "runes in the closed state"),
 ];
 
 const VIEW_OPEN: &str = "open";
@@ -2154,7 +2154,7 @@ fn run_list(args: ListArgs) -> Result<()> {
     }
     if !status_flag_present {
         match *view {
-            VIEW_OPEN | VIEW_MINE => filters.statuses = open_statuses(),
+            VIEW_OPEN | VIEW_MINE => filters.statuses = open_states(),
             VIEW_CLOSED => filters.statuses = vec![state::CLOSED.to_string()],
             _ => {}
         }
@@ -2182,9 +2182,9 @@ fn run_list(args: ListArgs) -> Result<()> {
         print_uninitialized_notice();
         return Ok(());
     }
-    // For --ready, add non-terminal status filter if no explicit statuses set
+    // `--ready` means ready to work on, so it implies the open states.
     if filters.blocked == Some(false) && filters.statuses.is_empty() {
-        filters.statuses = open_statuses();
+        filters.statuses = open_states();
     }
     match list_kind {
         ListKind::Issues => {
@@ -2242,7 +2242,7 @@ fn run_list(args: ListArgs) -> Result<()> {
 }
 
 /// The non-terminal core states, which match their substates too.
-fn open_statuses() -> Vec<String> {
+fn open_states() -> Vec<String> {
     state::OPEN_STATES.iter().map(|s| s.to_string()).collect()
 }
 
@@ -4680,7 +4680,7 @@ fn store_remove(name: String) -> Result<()> {
     eprintln!("  rm -rf {}", store.path.display());
     Ok(())
 }
-/// Rewrite a legacy status onto its core state, leaving the rest of the file alone.
+/// Rewrite a legacy state name onto its core state, leaving the rest of the file alone.
 /// Returns `None` when nothing needs migrating.
 fn migrate_status_line(text: &str) -> Option<String> {
     let mut out = String::with_capacity(text.len());
@@ -4712,7 +4712,7 @@ fn migrate_status_line(text: &str) -> Option<String> {
     migrated.then_some(out)
 }
 
-/// Migrate every rune in the store off the pre-substate statuses.
+/// Migrate every rune in the store off the pre-substate state names.
 /// Returns the store-relative paths that changed.
 fn migrate_store_statuses(store: &Store) -> Result<Vec<PathBuf>> {
     let mut migrated = Vec::new();
@@ -5576,7 +5576,7 @@ fn write_quickstart(out: &mut impl io::Write, mode: QuickstartMode) -> Result<()
 
         // Neutral mode has no config to read, so this is the built-in default.
         let states = user_cfg.state_config().unwrap_or_default();
-        writeln!(out, "  Status:")?;
+        writeln!(out, "  Statuses:")?;
         for core in state::CORE_STATES {
             writeln!(out, "    {}", states.allowed_display(core))?;
         }
@@ -5585,9 +5585,12 @@ fn write_quickstart(out: &mut impl io::Write, mode: QuickstartMode) -> Result<()
         if !live {
             writeln!(
                 out,
-                "  Statuses, kinds and custom fields are per-project: run `runes quickstart`"
+                "  Substates are configurable, and kinds and custom fields are per-project:"
             )?;
-            writeln!(out, "  for the schema in effect here.")?;
+            writeln!(
+                out,
+                "  run `runes quickstart` for the schema in effect here."
+            )?;
             writeln!(out)?;
         }
 

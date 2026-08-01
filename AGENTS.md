@@ -26,6 +26,9 @@ record just that rune.
   `cargo clippy --fix` then `cargo fmt`.
 - `cli/src/main.rs` holds the commands; `core/` holds the model, schema, cache,
   and the `jj` and `pijul` backends.
+- Vocabulary: a *status* is a *state* (`todo`, `wip`, `closed`) plus an optional
+  *substate*, written `state:substate`. Keep docs, help text, errors and
+  comments to that split.
 - Quickstart text is the installed skill, so keep it accurate and terse. Keep
   environment-dependent lines behind `QuickstartMode.live`, and audience-
   specific ones behind its `audience` (editor-driven advice is human-only,

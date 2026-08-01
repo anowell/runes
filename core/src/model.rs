@@ -525,15 +525,14 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
+    // Tests run in parallel, so a clock reading is not unique enough for a filename.
     fn write_temp_doc(contents: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock drift")
-            .as_nanos();
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let unique = NEXT.fetch_add(1, Ordering::Relaxed);
         let mut path = std::env::temp_dir();
-        path.push(format!("runes-test-doc-{nanos}.md"));
+        path.push(format!("runes-test-doc-{}-{unique}.md", std::process::id()));
         fs::write(&path, contents).expect("write temp doc");
         path
     }

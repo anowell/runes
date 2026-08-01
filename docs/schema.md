@@ -102,7 +102,7 @@ Inside the block:
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `status` | yes | Current state, `state` or `state:substate` (e.g. `"todo"`, `"wip:review"`, `"closed:canceled"`) |
+| `status` | yes | Current status, `state` or `state:substate` (e.g. `"todo"`, `"wip:review"`, `"closed:canceled"`) |
 | `assignee` | no | Assigned user, by email (see below) |
 | `labels` | no | Space-separated quoted strings |
 | `milestone` | no | Parent milestone ID |
@@ -128,7 +128,9 @@ or `<store>/.kinds/<kind>.md` to override the default.
 
 ### States
 
-A status is one of three fixed core states with an optional substate:
+A **status** is a core **state** with an optional **substate**, written
+`state:substate` — `wip` and `wip:review` are both statuses, `wip` is the state,
+`review` the substate. There are three fixed core states:
 
 | State | Terminal | Default substates |
 |-------|----------|-------------------|

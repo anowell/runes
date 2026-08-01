@@ -81,7 +81,7 @@ pub fn rebuild_cache(store: &Store) -> Result<()> {
 
     // Collect all docs with their deps for a two-pass approach:
     // 1. Insert all runes
-    // 2. Insert deps and compute blocked status
+    // 2. Insert deps and compute the blocked flag
     struct DocInfo {
         id: String,
         deps: Vec<String>,
@@ -161,7 +161,7 @@ pub fn rebuild_cache(store: &Store) -> Result<()> {
         }
     }
 
-    // Compute blocked status: a rune is blocked if any of its deps is not closed
+    // A rune is blocked if any of its deps is not closed.
     let mut status_map: HashMap<String, String> = HashMap::new();
     {
         let mut stmt = conn.prepare("SELECT id, status FROM runes")?;

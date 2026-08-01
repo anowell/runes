@@ -113,16 +113,16 @@ runes edit proj-a3x -f notes.md
 # List open runes (the default view)
 runes list
 
-# Filter by state, assignee, kind
-runes list --status wip --assignee self       # matches wip:review too
-runes list --status closed:canceled           # or an exact substate
+# Filter by status, assignee, kind
+runes list --status wip --assignee self       # a state matches its substates too
+runes list --status closed:canceled           # or filter on an exact substate
 runes list --kind milestones
 
 # Built-in views: open, mine, all, closed
 runes list mine
 runes list closed
 
-# Full-text search titles and bodies (all states, including closed)
+# Full-text search titles and bodies (every status, including closed)
 runes search login
 runes search "auth flow" --with-archived
 
@@ -135,18 +135,18 @@ runes log proj-a3x
 
 ### Status
 
-Every rune is in one of three core statuses, optionally refined by a substate
-written as `status:substate`.
+Every rune has a `status`: one of three core states, optionally refined by a
+substate and written `state:substate`.
 
-| Status | Default substates|
-|-------|---------|
-| `todo` (not started) |  `todo:*` (any substate) |
-| `wip`  (in progress) | `wip:design`, `wip:impl`, `wip:review` |
-| `closed` (terminal) | `closed`, `closed:done`, `closed:canceled`, `closed:duplicate` |
+| State | Default substates |
+|-------|-------------------|
+| `todo` (not started) | any |
+| `wip` (in progress) | `design`, `impl`, `review` |
+| `closed` (terminal) | `done`, `canceled`, `duplicate` |
 
-Filtering by a core status includes its substates (`--status closed` matches
-`closed:canceled`); filtering by `state:substate` is exact. Core states are
-fixed; the allowed substates are configurable:
+Filtering by a bare state includes its substates (`--status closed` matches
+`closed:canceled`); filtering by `state:substate` is exact. The core states are
+fixed; their substates are configurable:
 
 ```bash
 runes config set state.wip.substate "design,impl,review,qa"

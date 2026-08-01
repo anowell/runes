@@ -1,7 +1,8 @@
-//! Rune states: the fixed core states `todo`, `wip` and `closed`, each taking an
-//! optional substate (`wip:review`, `closed:canceled`). Bare `closed` means
-//! completed, as does `closed:done`. Core states are not configurable;
-//! substates are.
+//! Rune states. A `status` is a core state plus an optional substate, written
+//! `state:substate`: in `wip:review`, `wip` is the state and `review` the
+//! substate. The core states `todo`, `wip` and `closed` are fixed; their
+//! substates are configurable. Bare `closed` means completed, as does
+//! `closed:done`.
 
 use crate::{Error, Result};
 use std::collections::HashMap;
@@ -16,7 +17,7 @@ pub const CORE_STATES: [&str; 3] = [TODO, WIP, CLOSED];
 /// Core states that are not terminal — what the `open` view lists.
 pub const OPEN_STATES: [&str; 2] = [TODO, WIP];
 
-/// Statuses from the pre-substate vocabulary, accepted on input but never emitted.
+/// State names from the pre-substate vocabulary, accepted on input but never emitted.
 const ALIASES: [(&str, &str); 2] = [("done", CLOSED), ("in-progress", WIP)];
 
 /// Split a status into its core state and optional substate.
@@ -37,7 +38,7 @@ pub fn is_terminal(status: &str) -> bool {
     core_of(status) == CLOSED
 }
 
-/// Map legacy status names onto core states, preserving any substate.
+/// Map legacy state names onto core states, preserving any substate.
 /// Applied to input everywhere so `done` and `in-progress` keep working.
 pub fn normalize(status: &str) -> String {
     let (core, substate) = split(status.trim());
@@ -99,7 +100,7 @@ impl StateConfig {
         let (core, substate) = split(status);
         if !CORE_STATES.contains(&core) {
             return Err(Error::new(format!(
-                "Invalid status '{}'. Allowed: {} (each takes an optional substate, e.g. wip:review)",
+                "Invalid status '{}'. Allowed states: {} (each takes an optional substate, e.g. wip:review)",
                 status,
                 CORE_STATES.join(", ")
             )));

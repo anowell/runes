@@ -2879,7 +2879,7 @@ fn quickstart_human_variant_leads_with_the_editor() {
         "runes list --blocked",
         "runes archive <id>",
         "runes delete <id>",
-        "Status:",
+        "Statuses:",
         "Rune templates:",
     ] {
         assert!(
