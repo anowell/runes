@@ -21,7 +21,6 @@ pub struct UserConfig {
     /// `attribution.detect`: automatic agent detection for commit authorship (default on).
     pub attribution_detect: Option<bool>,
     pub(crate) path_entries: Vec<PathEntry>,
-    pub(crate) queries: HashMap<String, QueryDefinition>,
     pub(crate) stores: Vec<StoreDefinition>,
     /// Allowed substates, keyed by core state.
     pub(crate) substates: HashMap<String, Vec<String>>,
@@ -40,19 +39,6 @@ pub struct CreationDefaults {
     pub status: Option<String>,
     pub assignee: Option<String>,
     pub labels: Vec<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct QueryDefinition {
-    pub project: Option<String>,
-    pub statuses: Vec<String>,
-    pub kind: Option<String>,
-    pub archived: Option<String>,
-    pub assignee: Option<String>,
-    pub labels: Vec<String>,
-    pub blocked: Option<bool>,
-    pub blocks: Option<String>,
-    pub blocked_by: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -122,12 +108,6 @@ impl UserConfig {
                         config.creation_fallback = defaults;
                     }
                 }
-                "query" => {
-                    if let Some(name) = first_value(node) {
-                        let query = parse_query_node(node);
-                        config.queries.insert(name, query);
-                    }
-                }
                 "state" => {
                     if let Some(core) = first_value(node) {
                         let substates = split_values(collect_property_values(node, "substate"));
@@ -176,11 +156,6 @@ impl UserConfig {
                         config.creation_fallback = defaults;
                     }
                 }
-                name if name.starts_with("queries.") => {
-                    let alias = name.trim_start_matches("queries.");
-                    let query = parse_query_node(node);
-                    config.queries.insert(alias.to_string(), query);
-                }
                 // Shared nodes
                 "path" => {
                     if let Some(path_value) = first_value(node) {
@@ -212,7 +187,6 @@ impl UserConfig {
             creation_fallback,
             attribution_detect,
             path_entries,
-            queries,
             stores,
             substates,
         } = other;
@@ -262,9 +236,6 @@ impl UserConfig {
             }
         }
         self.path_entries.extend(path_entries);
-        for (name, query) in queries {
-            self.queries.insert(name, query);
-        }
         for (core, values) in substates {
             self.substates.insert(core, values);
         }
@@ -298,10 +269,6 @@ impl UserConfig {
             }
         }
         None
-    }
-
-    pub fn query(&self, name: &str) -> Option<&QueryDefinition> {
-        self.queries.get(name)
     }
 
     /// Core states with the substates this config allows.
@@ -426,29 +393,6 @@ pub fn config_list(path: &Path) -> Result<Vec<(String, String)>> {
                     pairs.push((format!("{prefix}.labels"), labels.join(",")));
                 }
             }
-            "query" => {
-                if let Some(name) = first_value(node) {
-                    let prefix = format!("query.{name}");
-                    for key in &["assignee", "kind", "archived", "project"] {
-                        if let Some(v) = value_string(node, key) {
-                            pairs.push((format!("{prefix}.{key}"), v));
-                        }
-                    }
-                    let statuses = collect_property_values(node, "status");
-                    if !statuses.is_empty() {
-                        pairs.push((format!("{prefix}.status"), statuses.join(",")));
-                    }
-                    if let Some(v) = value_string(node, "blocked") {
-                        pairs.push((format!("{prefix}.blocked"), v));
-                    }
-                    if let Some(v) = value_string(node, "blocks") {
-                        pairs.push((format!("{prefix}.blocks"), v));
-                    }
-                    if let Some(v) = value_string(node, "blocked-by") {
-                        pairs.push((format!("{prefix}.blocked-by"), v));
-                    }
-                }
-            }
             "state" => {
                 if let Some(core) = first_value(node) {
                     let substates = split_values(collect_property_values(node, "substate"));
@@ -499,19 +443,6 @@ pub fn config_list(path: &Path) -> Result<Vec<(String, String)>> {
                 }
                 if let Some(v) = value_string(node, "status") {
                     pairs.push((format!("{prefix}.status"), v));
-                }
-            }
-            name if name.starts_with("queries.") => {
-                let alias = name.trim_start_matches("queries.");
-                let prefix = format!("query.{alias}");
-                for key in &["assignee", "kind", "archived", "project"] {
-                    if let Some(v) = value_string(node, key) {
-                        pairs.push((format!("{prefix}.{key}"), v));
-                    }
-                }
-                let statuses = collect_property_values(node, "status");
-                if !statuses.is_empty() {
-                    pairs.push((format!("{prefix}.status"), statuses.join(",")));
                 }
             }
             "path" => {
@@ -696,21 +627,6 @@ fn parse_old_creation_node(node: &KdlNode) -> CreationDefaults {
 
 fn parse_bool(value: &str) -> bool {
     value.eq_ignore_ascii_case("true") || value == "1"
-}
-
-fn parse_query_node(node: &KdlNode) -> QueryDefinition {
-    let blocked = value_string(node, "blocked").map(|v| parse_bool(&v));
-    QueryDefinition {
-        project: value_string(node, "project"),
-        statuses: collect_property_values(node, "status"),
-        kind: value_string(node, "kind"),
-        archived: value_string(node, "archived"),
-        assignee: value_string(node, "assignee"),
-        labels: collect_property_values(node, "label"),
-        blocked,
-        blocks: value_string(node, "blocks"),
-        blocked_by: value_string(node, "blocked-by"),
-    }
 }
 
 fn value_string(node: &KdlNode, name: &str) -> Option<String> {

@@ -262,11 +262,8 @@ struct ListArgs {
     /// Filter by project (or store:project; empty string for all)
     #[arg(long)]
     project: Option<String>,
-    /// Named query from runes.kdl (deprecated; prefer a built-in view)
-    #[arg(long)]
-    query: Option<String>,
     /// Show runes in any status (alias for the `all` view)
-    #[arg(long = "all", conflicts_with_all = ["view", "query"])]
+    #[arg(long = "all", conflicts_with = "view")]
     all: bool,
     /// Filter by kind (e.g. issues, milestones)
     #[arg(short = 'k', long = "kind")]
@@ -2050,7 +2047,6 @@ fn run_list(args: ListArgs) -> Result<()> {
         view,
         store,
         project,
-        query,
         all,
         kind,
         status,
@@ -2064,7 +2060,7 @@ fn run_list(args: ListArgs) -> Result<()> {
         blocks,
         json,
     } = args;
-    let mut archived_mode = if archived {
+    let archived_mode = if archived {
         ArchivedMode::Only
     } else if with_archived {
         ArchivedMode::Include
@@ -2082,7 +2078,6 @@ fn run_list(args: ListArgs) -> Result<()> {
         effective_project.as_ref(),
     )?;
     let status_flag_present = status.is_some();
-    let kind_flag_present = kind.is_some();
     let display = user_display(&user_cfg, &store)?;
     // The cache stores canonical emails, so a name or `Name <email>` filter
     // has to come back down to one before it is applied.
@@ -2090,12 +2085,11 @@ fn run_list(args: ListArgs) -> Result<()> {
         .as_deref()
         .and_then(|value| user_cfg.resolve_user_alias(value))
         .map(|value| display.mailmap().canonical_query(&value));
-    let mut list_kind = kind
+    let kind_explicitly_set = kind.is_some();
+    let list_kind = kind
         .as_deref()
         .map(ListKind::parse)
         .unwrap_or(ListKind::Issues);
-    let mut kind_explicitly_set = kind_flag_present;
-    let label_flag_present = !labels.is_empty();
     let blocked_filter = if blocked {
         Some(true)
     } else if ready {
@@ -2123,86 +2117,52 @@ fn run_list(args: ListArgs) -> Result<()> {
         blocked_by,
         blocks,
     };
-    let view_name = view
-        .or(query)
-        .or_else(|| all.then(|| VIEW_ALL.to_string()))
-        .or_else(|| user_cfg.query_for_path(&cwd))
-        .or_else(|| user_cfg.default_query.clone())
-        .unwrap_or_else(|| VIEW_OPEN.to_string());
-    let mut query_set_project = false;
-    // Config-defined views shadow built-ins for back-compat, with a nudge to drop them.
-    let builtin_view = if let Some(query_cfg) = user_cfg.query(&view_name) {
-        eprintln!(
-            "warning: custom views are deprecated while built-in views stabilize \
-            (view \"{view_name}\" comes from your config)"
-        );
-        if !project_flag_present {
-            if query_cfg.project.is_some() {
-                query_set_project = true;
-            }
-            filters.project = query_cfg.project.clone();
-        }
-        if !status_flag_present {
-            filters.statuses = query_cfg
-                .statuses
-                .iter()
-                .map(|value| state::normalize(value))
-                .collect();
-        }
-        if !kind_flag_present {
-            if let Some(kind_value) = &query_cfg.kind {
-                list_kind = ListKind::parse(kind_value);
-                kind_explicitly_set = true;
-            }
-        }
-        if !archived && !with_archived {
-            if let Some(archived_value) = &query_cfg.archived {
-                if let Some(parsed) = ArchivedMode::from_keyword(archived_value) {
-                    archived_mode = parsed;
-                }
-            }
-        }
-        if filters.assignee.is_none() {
-            if let Some(query_assignee) = &query_cfg.assignee {
-                filters.assignee = user_cfg.resolve_user_alias(query_assignee);
-            }
-        }
-        if !label_flag_present && !query_cfg.labels.is_empty() {
-            filters.labels = query_cfg.labels.clone();
-        }
-        // Apply blocked/blocks/blocked-by from query if not set by CLI flags
-        if filters.blocked.is_none() {
-            filters.blocked = query_cfg.blocked;
-        }
-        if filters.blocks.is_none() {
-            filters.blocks = query_cfg.blocks.clone();
-        }
-        if filters.blocked_by.is_none() {
-            filters.blocked_by = query_cfg.blocked_by.clone();
-        }
-        None
-    } else {
-        BUILTIN_VIEWS
-            .iter()
-            .find(|(name, _)| *name == view_name)
-            .map(|(name, _)| *name)
-    };
-    if let Some(view) = builtin_view {
-        if view == VIEW_MINE && filters.assignee.is_none() {
-            filters.assignee = user_cfg.resolve_user_alias("self");
-        }
-        if !status_flag_present {
-            match view {
-                VIEW_OPEN | VIEW_MINE => filters.statuses = open_statuses(),
-                VIEW_CLOSED => filters.statuses = vec![state::CLOSED.to_string()],
-                _ => {}
-            }
+    // Carry where the name came from: an unrecognized one is an error, and a name the user
+    // never typed needs to say which config key produced it.
+    let (view_name, view_source) = view
+        .map(|name| (name, None))
+        .or_else(|| all.then(|| (VIEW_ALL.to_string(), None)))
+        .or_else(|| {
+            let source = "the `query` on a `path` entry in your config";
+            user_cfg
+                .query_for_path(&cwd)
+                .map(|name| (name, Some(source)))
+        })
+        .or_else(|| {
+            let source = "`defaults { query ... }` in your config";
+            user_cfg
+                .default_query
+                .clone()
+                .map(|name| (name, Some(source)))
+        })
+        .unwrap_or((VIEW_OPEN.to_string(), None));
+    // Falling through instead would list everything unfiltered and look like it worked.
+    let (view, _) = BUILTIN_VIEWS
+        .iter()
+        .find(|(name, _)| *name == view_name)
+        .ok_or_else(|| {
+            let source = view_source
+                .map(|source| format!(" (from {source})"))
+                .unwrap_or_default();
+            Error::new(format!(
+                "unknown view '{view_name}'{source}\n{}",
+                builtin_views_help()
+            ))
+        })?;
+    if *view == VIEW_MINE && filters.assignee.is_none() {
+        filters.assignee = user_cfg.resolve_user_alias("self");
+    }
+    if !status_flag_present {
+        match *view {
+            VIEW_OPEN | VIEW_MINE => filters.statuses = open_statuses(),
+            VIEW_CLOSED => filters.statuses = vec![state::CLOSED.to_string()],
+            _ => {}
         }
     }
     // Empty project means "any project" (overrides default_project)
     if filters.project.as_deref() == Some("") {
         filters.project = None;
-    } else if filters.project.is_none() && !project_flag_present && !query_set_project {
+    } else if filters.project.is_none() && !project_flag_present {
         if let Some(default_spec) = user_cfg.default_project.as_deref() {
             let (_, proj_name) = split_store_prefix(default_spec);
             if !proj_name.is_empty() {
@@ -2218,7 +2178,7 @@ fn run_list(args: ListArgs) -> Result<()> {
     // runes.kdl, no default project), the repo likely hasn't been initialized for
     // runes. Listing every rune across all projects is confusing in a fresh repo, so
     // show an init hint instead. Skipped for --json to keep programmatic output stable.
-    if !json && !project_flag_present && !query_set_project && filters.project.is_none() {
+    if !json && !project_flag_present && filters.project.is_none() {
         print_uninitialized_notice();
         return Ok(());
     }
@@ -5499,20 +5459,6 @@ fn write_quickstart(out: &mut impl io::Write, mode: QuickstartMode) -> Result<()
         writeln!(
             out,
             "    runes log --json              # array of log entries"
-        )?;
-    }
-    if !user_cfg.queries.is_empty() {
-        let mut query_names: Vec<&str> = user_cfg.queries.keys().map(String::as_str).collect();
-        query_names.sort();
-        writeln!(out)?;
-        writeln!(
-            out,
-            "  Custom views are deprecated while built-in views stabilize."
-        )?;
-        writeln!(
-            out,
-            "  Still defined in your config: {}",
-            query_names.join(", ")
         )?;
     }
     writeln!(out)?;

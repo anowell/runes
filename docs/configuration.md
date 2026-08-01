@@ -182,29 +182,9 @@ runes config set state.closed.substate "done,canceled,duplicate,wontfix"
 
 A core state with no `state` node accepts any substate (the default for `todo`).
 
-### `query "<name>"` (deprecated)
-
-Custom views are deprecated while the built-in views stabilize. `runes list` ships
-with `open`, `mine`, `all`, and `closed`, which need no config — see
-`runes list --help`. Config-defined queries still work (and still shadow a
-built-in of the same name), but using one prints a deprecation warning, and a
-reimagined customization story may replace them.
-
-Saved filter sets for `runes list`. Use with `runes list <name>` or `runes list --query <name>`.
-
-Supported filters:
-
-- `project` — restrict to a project
-- `status` — one or more statuses (multiple values are OR'd); a core state also matches its substates
-- `kind` — doc type (`task`, `milestone`)
-- `assignee` — assignee (use `"self"` to match your configured email)
-- `archived` — boolean, include archived docs
-
-Multiple filters of the same key are OR'd; different keys are AND'd. Explicit CLI flags (`--status`, `--assignee`, etc.) override stored query values.
-
 ### `path`
 
-Bind directories to stores or queries:
+Bind directories to a store or a default view:
 
 ```kdl
 path "/Users/you/work" {
@@ -213,7 +193,7 @@ path "/Users/you/work" {
 }
 ```
 
-When your working directory is under a bound path, the associated store and query are used as defaults.
+When your working directory is under a bound path, the associated store and view are used as defaults. `query` names a built-in view (`open`, `mine`, `all`, `closed`).
 
 ## Store selection order
 
